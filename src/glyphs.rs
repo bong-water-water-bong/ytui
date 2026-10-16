@@ -66,7 +66,6 @@ const FONT_PATHS: &[&str] = &[
 pub struct Glyphs {
     pub chars: Vec<char>,
     pub vecs: Vec<[f32; 6]>,
-    pub source: String,
 }
 
 /// Pixel offsets (relative to a cell origin) whose centres lie inside a
@@ -97,7 +96,7 @@ impl Glyphs {
         for p in env.iter().map(|s| s.as_str()).chain(FONT_PATHS.iter().copied()) {
             if let Ok(bytes) = std::fs::read(p) {
                 if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                    return Self::from_font(&font, p);
+                    return Self::from_font(&font);
                 }
             }
         }
@@ -109,10 +108,10 @@ impl Glyphs {
         let chars: Vec<char> = " .:-=+*#%@".chars().collect();
         let n = chars.len() as f32 - 1.0;
         let vecs = (0..chars.len()).map(|i| [i as f32 / n; 6]).collect();
-        Glyphs { chars, vecs, source: "ramp (no font found)".into() }
+        Glyphs { chars, vecs }
     }
 
-    fn from_font(font: &Font, path: &str) -> Glyphs {
+    fn from_font(font: &Font) -> Glyphs {
         const S: usize = 8;
         let (w, h) = (CW * S, CH * S);
         let adv = font.metrics('M', 100.0).advance_width / 100.0;
@@ -165,7 +164,7 @@ impl Glyphs {
                 vecs.iter_mut().for_each(|v| v[d] /= mx);
             }
         }
-        Glyphs { chars, vecs, source: path.to_string() }
+        Glyphs { chars, vecs }
     }
 
     pub fn nearest(&self, s: &[f32; 6]) -> usize {

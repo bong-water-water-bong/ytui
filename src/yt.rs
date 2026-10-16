@@ -1,19 +1,8 @@
-//! yt-dlp front end: search / playlist listing and stream resolution.
+//! yt-dlp front end: resolves direct stream URLs for playback.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use std::process::Command;
-
-#[derive(Clone, Debug)]
-pub struct Video {
-    pub id: String,
-    pub url: String,
-    pub title: String,
-    pub channel: String,
-    pub duration: Option<f64>,
-    pub views: Option<u64>,
-    pub live: bool,
-}
 
 #[derive(Clone, Debug)]
 pub struct Stream {
@@ -42,8 +31,37 @@ pub fn ytdlp() -> String {
     }
 }
 
+/// yt-dlp needs a JavaScript runtime to solve YouTube's stream challenges;
+/// without one it falls back to clients whose URLs throttle and expire.
+/// It only looks for deno by default, so point it at node when that's what
+/// is installed (including nvm installs that aren't on PATH).
+fn js_runtime_args() -> Vec<String> {
+    let works = |cmd: &str| Command::new(cmd).arg("--version").output().is_ok_and(|o| o.status.success());
+    if works("deno") {
+        return Vec::new();
+    }
+    if works("node") {
+        return vec!["--js-runtimes".into(), "node".into()];
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut nvm: Vec<_> = std::fs::read_dir(format!("{home}/.nvm/versions/node"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("bin/node"))
+        .filter(|p| p.exists())
+        .collect();
+    nvm.sort();
+    match nvm.pop() {
+        Some(p) => vec!["--js-runtimes".into(), format!("node:{}", p.display())],
+        None => Vec::new(),
+    }
+}
+
 fn run_json(args: &[&str]) -> Result<Value> {
+    static JS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let out = Command::new(ytdlp())
+        .args(JS.get_or_init(js_runtime_args))
         .args(["--no-warnings", "-J"])
         .args(args)
         .output()
@@ -54,46 +72,6 @@ fn run_json(args: &[&str]) -> Result<Value> {
         bail!("{}", line.trim());
     }
     Ok(serde_json::from_slice(&out.stdout)?)
-}
-
-fn looks_like_target(q: &str) -> bool {
-    q.starts_with("http://")
-        || q.starts_with("https://")
-        || q.starts_with("www.")
-        || q.starts_with("youtube.com")
-        || q.starts_with("youtu.be")
-}
-
-fn entry(e: &Value) -> Option<Video> {
-    let id = e["id"].as_str()?.to_string();
-    let url = e["url"]
-        .as_str()
-        .or(e["webpage_url"].as_str())
-        .map(String::from)
-        .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}"));
-    Some(Video {
-        title: e["title"].as_str().unwrap_or("(untitled)").to_string(),
-        channel: e["channel"].as_str().or(e["uploader"].as_str()).unwrap_or("").to_string(),
-        duration: e["duration"].as_f64(),
-        views: e["view_count"].as_u64(),
-        live: e["live_status"].as_str() == Some("is_live") || e["is_live"].as_bool() == Some(true),
-        id,
-        url,
-    })
-}
-
-/// Search YouTube, or list a playlist / channel / single video URL.
-pub fn search(q: &str, n: usize) -> Result<Vec<Video>> {
-    let target = if looks_like_target(q) { q.to_string() } else { format!("ytsearch{n}:{q}") };
-    let v = run_json(&["--flat-playlist", "--playlist-end", &n.max(50).to_string(), &target])?;
-    let list: Vec<Video> = match v["entries"].as_array() {
-        Some(es) => es.iter().filter_map(entry).filter(|v| !v.id.starts_with("UC")).collect(),
-        None => entry(&v).into_iter().collect(),
-    };
-    if list.is_empty() {
-        bail!("no results");
-    }
-    Ok(list)
 }
 
 /// Resolve direct media URLs for playback, capped at `max_h` lines.
@@ -135,14 +113,5 @@ pub fn fmt_time(s: f64) -> String {
         format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
     } else {
         format!("{}:{:02}", s / 60, s % 60)
-    }
-}
-
-pub fn fmt_views(v: u64) -> String {
-    match v {
-        0..=999 => format!("{v}"),
-        1_000..=999_999 => format!("{:.1}K", v as f64 / 1e3),
-        1_000_000..=999_999_999 => format!("{:.1}M", v as f64 / 1e6),
-        _ => format!("{:.1}B", v as f64 / 1e9),
     }
 }

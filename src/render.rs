@@ -17,7 +17,7 @@ impl Default for Cell {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Mode {
     /// Two-tone shape ASCII: glyphs only where there is edge detail.
     Ascii,
