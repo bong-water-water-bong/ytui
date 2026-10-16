@@ -52,7 +52,7 @@ USAGE:
   ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
 
 OPTIONS:
-  --mode M       art | ascii | classic | sextant | quadrant | halfblock | braille
+  --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock | braille
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)

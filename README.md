@@ -4,13 +4,22 @@ YouTube in the terminal: search, browse, and watch videos rendered as truecolour
 
 **[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS.
 
+![ytui's Home page, signed out, showing the Trending feed as a grid of thumbnails](docs/screenshots/home.jpg)
+*Home, signed out: the Trending feed, with thumbnails drawn as pixel graphics.*
+
 ![ytui in Windows Terminal, playing video in the native GPU window](docs/screenshots/native-window.jpg)
 *Native GPU video window in Windows Terminal: hardware-decoded 1080p60, with ytui's player bar and volume slider underneath.*
 
 ![ytui drawing the video with sixel graphics inside the terminal](docs/screenshots/sixel.jpg)
 *The same video drawn inside the terminal with sixel graphics, at about 30 fps.*
 
-<sub>Screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
+![Big Buck Bunny drawn as coloured ASCII characters in glow mode, fullscreen](docs/screenshots/glow.jpg)
+*Glow mode: shape-matched ASCII in boosted colour over a dimmed copy of the picture, fullscreen at 60 fps.*
+
+![The look panel open over glow-mode video, with mode, brightness, saturation, background, contrast and auto-exposure](docs/screenshots/glow-look-panel.jpg)
+*The look panel (`o`): mode, brightness, saturation, background, contrast and auto-exposure, kept between runs.*
+
+<sub>Video screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
 
 ## Requirements
 
@@ -229,6 +238,7 @@ and the nearest glyph wins.
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
 | `m` | cycle render mode |
+| `o` | look panel: mode, brightness, saturation, background, contrast, auto-exposure |
 | `?` `q` | help, quit |
 
 With libmpv, audio goes through mpv's own output (WASAPI, PipeWire/PulseAudio, ALSA…).
