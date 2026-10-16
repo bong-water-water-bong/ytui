@@ -1,6 +1,6 @@
 [package]
 name = "ytui"
-version = "0.1.0"
+version = "2026.10.16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/bong-water-water-bong/ytui"
@@ -12,14 +12,24 @@ base64 = "0.22"
 crossterm = "0.28"
 flate2 = "1"
 fontdue = "0.9"
-libc = "0.2"
+getrandom = "0.2"
+libloading = "0.8"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
 sha2 = "0.10"
 ureq = "2"
 unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_DataExchange", "Win32_System_Memory"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_Accessibility"] }
 
 [profile.release]
 opt-level = 3

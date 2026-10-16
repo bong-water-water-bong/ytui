@@ -81,6 +81,14 @@ pub struct Ctx {
     pub chat: bool,
     /// Signed-in channel name, if signed in.
     pub account: Option<String>,
+    /// Signed-in YouTube account (browser sign-in), if known.
+    pub yt_account: Option<String>,
+    /// Saved YouTube sign-in: (cookie count, age), if any.
+    pub yt_cookies: Option<(usize, std::time::Duration)>,
+    /// Waiting for a cookie extension's export on the clipboard.
+    pub capturing: bool,
+    /// A Google sign-in window is open.
+    pub logging_in: bool,
 }
 
 pub struct Page {
@@ -162,6 +170,11 @@ pub enum Act {
     ChannelTab(usize),
     ToggleSub(String, String),
     ToggleLater(VideoItem),
+    /// Open / cancel the Google sign-in window.
+    SignIn,
+    /// Start / cancel picking up cookies from a cookie extension.
+    SignInCookies,
+    SignOutVideos,
     ExpandDesc,
     Replies(usize),
     Seek(f64),
@@ -738,8 +751,8 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                 b.button(iw.saturating_sub(16), y, "+ New playlist", Act::NewPlaylist, true);
             }
             y += 2;
-            if ctx.account.is_none() {
-                b.line(1, y, vec![Span::styled("Sign in to see and manage your YouTube playlists (see the Account page).".to_string(), st(META))]);
+            if ctx.account.is_none() && ctx.yt_account.is_none() {
+                b.line(1, y, vec![Span::styled("Sign in to see your YouTube playlists (see the Account page).".to_string(), st(META))]);
                 y += 2;
             } else if let Some(e) = &page.error {
                 b.line(1, y, vec![Span::styled(format!("⚠ {e}"), st(ACCENT))]);
@@ -762,7 +775,10 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                 let ww = iw.saturating_sub(tw + 2);
                 b.para(tx, y, ww, &p.title, bold, 2);
                 b.line(tx, y + 2, vec![Span::styled(format!("{} videos · {}", p.count, p.privacy), st(META))]);
-                b.tgt(1, y, iw, th, Act::OpenMyPlaylist(p.id.clone()));
+                // Editing needs the API sign-in; otherwise open it like any
+                // playlist (as the signed-in user, so private ones work too).
+                let act = if ctx.account.is_some() { Act::OpenMyPlaylist(p.id.clone()) } else { Act::Playlist(p.id.clone()) };
+                b.tgt(1, y, iw, th, act);
                 y += th as usize + 1;
             }
         }
@@ -803,6 +819,63 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
             }
         }
         Kind::Account => {
+            b.line(1, y, vec![Span::styled("YouTube sign-in", bold)]);
+            y += 2;
+            if ctx.logging_in {
+                for l in [
+                    "A browser window is open on Google's sign-in page.",
+                    "Sign in there as you would on any website. When you're done and YouTube",
+                    "shows, close that window: ytui then saves your sign-in.",
+                ] {
+                    b.line(1, y, vec![Span::styled(l.to_string(), st(Color::White))]);
+                    y += 1;
+                }
+                y += 1;
+                b.button(1, y, "Cancel", Act::SignIn, false);
+                y += 2;
+            } else if ctx.capturing {
+                for l in [
+                    "Waiting for your cookies…",
+                    "",
+                    "In your browser, on youtube.com (signed in), click your cookie extension",
+                    "(e.g. Cookie-Editor or Get cookies.txt LOCALLY) and press Export or Copy.",
+                    "ytui picks them up from the clipboard by itself. Pasting here (Ctrl-V) works too.",
+                ] {
+                    b.line(1, y, vec![Span::styled(l.to_string(), st(if l.starts_with("Waiting") { Color::White } else { META }))]);
+                    y += 1;
+                }
+                y += 1;
+                b.button(1, y, "Cancel", Act::SignInCookies, false);
+                y += 2;
+            } else if let Some((n, age)) = ctx.yt_cookies {
+                let days = age.as_secs() / 86400;
+                let when = if days == 0 { "today".to_string() } else { format!("{days} day{} ago", if days == 1 { "" } else { "s" }) };
+                let who = ctx.yt_account.clone().map(|a| format!("Signed in as {a} ✓")).unwrap_or_else(|| "Signed in ✓".to_string());
+                b.line(1, y, vec![Span::styled(format!("{who}  (since {when}, {n} cookies)"), st(Color::Rgb(120, 220, 120)))]);
+                y += 1;
+                b.line(1, y, vec![Span::styled("Home shows your recommendations, Subscriptions your subscriptions feed, and".to_string(), st(META))]);
+                y += 1;
+                b.line(1, y, vec![Span::styled("videos play even when YouTube asks to confirm you're not a bot.".to_string(), st(META))]);
+                y += 2;
+                let w = b.button(1, y, "Sign in again", Act::SignIn, false);
+                b.button(1 + w + 6, y, "Sign out", Act::SignOutVideos, false);
+                y += 2;
+            } else {
+                for l in [
+                    "Sign in with your Google account, like on any website: a sign-in window opens,",
+                    "you sign in, and it closes by itself. Lets videos play when YouTube asks to",
+                    "confirm you're not a bot. ytui never sees your password.",
+                ] {
+                    b.line(1, y, vec![Span::styled(l.to_string(), st(META))]);
+                    y += 1;
+                }
+                y += 1;
+                b.button(1, y, "Sign in with Google", Act::SignIn, true);
+                y += 2;
+                b.button(1, y, "Use my cookie extension instead", Act::SignInCookies, false);
+                y += 2;
+            }
+            y += 1;
             match &ctx.account {
                 Some(name) => {
                     b.line(1, y, vec![Span::styled("Account", bold)]);
@@ -823,7 +896,7 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                     y += 2;
                 }
                 None => {
-                    b.line(1, y, vec![Span::styled("Sign in to like and comment", bold)]);
+                    b.line(1, y, vec![Span::styled("Likes and comments (optional, needs a Google Cloud OAuth client)", bold)]);
                     y += 2;
                     for l in crate::auth::SETUP_HELP.lines() {
                         b.line(1, y, vec![Span::styled(l.to_string(), st(if l.starts_with(' ') || l.is_empty() { META } else { Color::White }))]);
@@ -1087,6 +1160,8 @@ Keys — player (anywhere while something is playing)
   P                save the focused / current video to a playlist (signed in)
   V                3D audio visualiser instead of the video picture (ytui --demo3d for the engine)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
+  S                captions: cycle off / each track (remembered across videos)
+  N                native GPU video window over the terminal on / off (Windows, libmpv)
   G                pixel graphics (kitty / sixel) on / off, when the terminal supports them
   m                cycle render mode
   [ ] { }          ascii contrast / edges

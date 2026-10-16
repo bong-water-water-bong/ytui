@@ -22,9 +22,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::{Frame, Terminal};
+
+/// ratatui writing into the frame buffer that `out::Out` sends.
+pub type Term = Terminal<ratatui::backend::CrosstermBackend<crate::out::Buf>>;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -33,6 +35,12 @@ type R<T> = std::result::Result<T, String>;
 
 pub enum Msg {
     Wake,
+    /// A status-line message from a background thread.
+    Flash(String),
+    /// Name of the signed-in YouTube account (None: signed out).
+    AccountName(Option<String>),
+    /// Channels the signed-in account subscribes to.
+    RemoteSubs(Vec<crate::api::ChannelItem>),
     Load(u64, Load),
     Stream(String, R<yt::Stream>),
     Suggest(String, Vec<String>),
@@ -176,6 +184,9 @@ struct Geo {
     mini_bar: Option<Rect>,
     mini_btns: Vec<(Rect, MiniBtn)>,
     fs_bar: Option<Rect>,
+    /// Player-bar volume sliders and seek bars drawn this frame.
+    vol: Vec<Rect>,
+    seek: Vec<Rect>,
 }
 
 pub struct App {
@@ -210,6 +221,22 @@ pub struct App {
     t0: Instant,
     /// Pixel graphics backend (kitty / sixel), if the terminal has one.
     gfx: Option<Gfx>,
+    /// Native GPU video window over the terminal, and where the terminal's
+    /// grid is on screen (kept fresh by a background thread).
+    #[cfg(windows)]
+    overlay: Option<crate::overlay::Overlay>,
+    #[cfg(windows)]
+    grid: Arc<std::sync::Mutex<Option<crate::overlay::Grid>>>,
+    /// This frame's video box for the native window: (full, visible part),
+    /// in terminal cells.
+    native_rect: Option<(Rect, Rect)>,
+    /// Our terminal tab is the one showing (from focus reports): the native
+    /// window must not float over other tabs.
+    tab_active: bool,
+    /// Focus went to another application while our tab was showing; when
+    /// the terminal comes back without focusing us, another tab was picked.
+    #[cfg(windows)]
+    away_since: Option<Instant>,
     /// Bytes for the backend to write after the current frame.
     gfx_out: Vec<u8>,
     /// Frame counter for animated pixel images (3D scenes).
@@ -222,9 +249,23 @@ pub struct App {
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
+    /// Google sign-in window, and when it was last checked.
+    login: Option<crate::browser_login::Login>,
+    /// Signed-in YouTube account name, for the sidebar and Account page.
+    account_name: Option<String>,
+    /// A mouse drag that started on a player-bar control.
+    drag: Option<Drag>,
+    /// Waiting for a cookie extension's export on the clipboard since .0;
+    /// .1 is the clipboard sequence number last looked at.
+    capture: Option<(Instant, u32)>,
+    /// --fullscreen: go fullscreen when the first video starts.
+    fs_on_play: bool,
+    /// YTUI_STATS: per-second frame timing log.
+    stats: Option<Stats>,
     status: (String, Instant),
     opts: Opts,
-    max_h: u32,
+    /// --height: fixed stream height (None: chosen per output).
+    max_h: Option<u32>,
     dirty: bool,
     quit: bool,
     geo: Geo,
@@ -237,6 +278,74 @@ fn s<T>(r: anyhow::Result<T>) -> R<T> {
 }
 
 impl App {
+    /// Use a native GPU window for video (Windows Terminal + libmpv).
+    #[cfg(windows)]
+    pub fn set_overlay(&mut self, o: crate::overlay::Overlay) {
+        let grid = self.grid.clone();
+        let term = o.owner as isize;
+        std::thread::Builder::new()
+            .name("ytui-grid".into())
+            .spawn(move || loop {
+                let g = crate::overlay::current_grid(term as _);
+                *grid.lock().unwrap() = g;
+                std::thread::sleep(Duration::from_millis(250));
+            })
+            .ok();
+        if self.store.native {
+            self.opts.wid = Some(o.wid());
+        }
+        self.overlay = Some(o);
+    }
+
+    /// Place or hide the native video window after a frame is drawn.
+    fn place_overlay(&mut self) {
+        #[cfg(windows)]
+        {
+            if let (Some(t), Some(o)) = (self.away_since, self.overlay.as_ref()) {
+                // Back in the terminal but no focus report for us: the user
+                // came back to a different tab.
+                if crate::overlay::is_foreground(o.owner) && t.elapsed() > Duration::from_millis(400) {
+                    self.tab_active = false;
+                    self.away_since = None;
+                }
+            }
+            let busy = self.edit.is_some() || self.compose.is_some() || self.dialog.is_some() || self.viz || !self.tab_active;
+            let grid = *self.grid.lock().unwrap();
+            let native = self.player.as_ref().is_some_and(|p| p.native());
+            let Some(o) = self.overlay.as_mut() else { return };
+            match (self.native_rect, grid) {
+                (Some((full, vis)), Some(g)) if native && !busy && vis.width > 0 && vis.height > 0 => {
+                    use crate::overlay::Overlay;
+                    o.place(Some((Overlay::cells_to_screen(g, full.x, full.y, full.width, full.height), Overlay::cells_to_screen(g, vis.x, vis.y, vis.width, vis.height))));
+                }
+                _ => o.place(None),
+            }
+        }
+    }
+
+    /// Stream height to ask for: --height if given; for the native window,
+    /// its real pixel height (so fullscreen gets 1080p60); otherwise 720,
+    /// the lowest height YouTube serves at 60 fps. Terminal output is never
+    /// sharper than that, and 720p decodes cheaply in hardware.
+    fn stream_height(&self) -> u32 {
+        if let Some(h) = self.max_h {
+            return h;
+        }
+        #[cfg(windows)]
+        if self.opts.wid.is_some() {
+            if let Some(g) = *self.grid.lock().unwrap() {
+                let px = (self.term.1 as f32 * g.ch) as u32;
+                return [720, 1080, 1440, 2160].into_iter().find(|&h| h >= px).unwrap_or(2160).min(1440);
+            }
+            return 1080;
+        }
+        720
+    }
+
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.fs_on_play = on;
+    }
+
     pub fn set_gfx(&mut self, g: Option<Gfx>) {
         if let Some(g) = &g {
             self.flash(format!("pixel graphics: {} (G switches to characters)", g.proto.name()));
@@ -254,7 +363,7 @@ impl App {
         self.gfx.is_some() && self.store.gfx
     }
 
-    pub fn new(mut renderer: Renderer, opts: Opts, max_h: u32, mode_forced: bool) -> (App, Receiver<Msg>) {
+    pub fn new(mut renderer: Renderer, opts: Opts, max_h: Option<u32>, mode_forced: bool) -> (App, Receiver<Msg>) {
         let (tx, rx) = channel();
         let txw = tx.clone();
         let thumbs = Thumbs::new(move || {
@@ -297,12 +406,26 @@ impl App {
             gfx: None,
             gfx_out: Vec::new(),
             gfx_seq: 0,
+            #[cfg(windows)]
+            overlay: None,
+            #[cfg(windows)]
+            grid: Arc::new(std::sync::Mutex::new(None)),
+            native_rect: None,
+            tab_active: true,
+            #[cfg(windows)]
+            away_since: None,
             gfx_reset: false,
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
+            login: None,
+            account_name: None,
+            drag: None,
+            capture: None,
+            stats: std::env::var("YTUI_STATS").ok().map(Stats::new),
+            fs_on_play: false,
             status: (String::new(), Instant::now()),
             opts,
             max_h,
@@ -433,6 +556,14 @@ impl App {
                 let chip = *chip;
                 std::thread::spawn(move || {
                     if chip == 0 {
+                        // Signed in: YouTube's own recommendations for you.
+                        if api.signed_in() {
+                            if let Ok(f) = api.home() {
+                                if !f.entries.is_empty() {
+                                    return send(Load::Feed(Ok(f)));
+                                }
+                            }
+                        }
                         send(Load::Feed(Ok(for_you(&api, &hist, &subs, &watched))));
                     } else {
                         let (q, sp) = chip_query(CHIPS[chip]);
@@ -458,6 +589,14 @@ impl App {
             }
             Kind::Subs { .. } => {
                 std::thread::spawn(move || {
+                    // Signed in: your YouTube subscriptions feed.
+                    if api.signed_in() {
+                        if let Ok(f) = api.subscriptions_feed() {
+                            if !f.entries.is_empty() {
+                                return send(Load::Feed(Ok(f)));
+                            }
+                        }
+                    }
                     let entries = rss_all(&api, &subs).into_iter().take(90).map(|v| Entry::Item(Item::Video(v))).collect();
                     send(Load::Feed(Ok(Feed { entries, cont: None })));
                 });
@@ -465,6 +604,22 @@ impl App {
             Kind::Playlists { .. } => match self_auth.clone() {
                 Some(a) => {
                     std::thread::spawn(move || send(Load::Playlists(s(a.playlists()))));
+                }
+                None if api.signed_in() => {
+                    std::thread::spawn(move || {
+                        let r = api.my_playlists().map(|l| {
+                            l.into_iter()
+                                .map(|p| crate::auth::MyPlaylist {
+                                    count: p.count.as_deref().map(|c| c.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>()).and_then(|d| d.parse().ok()).unwrap_or(0),
+                                    id: p.id,
+                                    title: p.title,
+                                    privacy: String::new(),
+                                    thumb: p.thumb,
+                                })
+                                .collect()
+                        });
+                        send(Load::Playlists(s(r)));
+                    });
                 }
                 None => p.loading = false,
             },
@@ -622,6 +777,23 @@ impl App {
     fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::Wake => {}
+            Msg::Flash(m) => self.flash(m),
+            Msg::AccountName(n) => {
+                self.account_name = n;
+                self.store_rev += 1;
+            }
+            Msg::RemoteSubs(chs) => {
+                let before = self.store.subs.len();
+                for c in chs {
+                    if !self.store.subs.iter().any(|s| s.id == c.id) {
+                        self.store.subs.push(crate::store::ChannelRef { id: c.id, name: c.name, sub_id: None });
+                    }
+                }
+                if self.store.subs.len() != before {
+                    self.store_changed();
+                    self.refresh_signed_in_pages();
+                }
+            }
             Msg::Load(uid, l) => self.on_load(uid, l),
             Msg::Stream(id, r) => {
                 let Some((v, start)) = self.pending.take_if(|p| p.0.id == id) else { return };
@@ -635,7 +807,12 @@ impl App {
                         self.store.record(&v, start, dur);
                         self.store_changed();
                         let (c, r) = self.term;
-                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure));
+                        let mut p = Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure);
+                        p.set_caption_pref(self.store.captions.clone());
+                        self.player = Some(p);
+                        if std::mem::take(&mut self.fs_on_play) {
+                            self.fullscreen = true;
+                        }
                         self.ended_handled = false;
                         self.last_record = Instant::now();
                         if start > 0.0 {
@@ -875,10 +1052,10 @@ impl App {
         }
         let start = at.unwrap_or_else(|| self.store.resume_pos(&v.id));
         self.pending = Some((v.clone(), start));
-        let (api, tx, h) = (self.api.clone(), self.tx.clone(), self.max_h);
+        let (api, tx, h, av1) = (self.api.clone(), self.tx.clone(), self.stream_height(), self.opts.mpv);
         let id = v.id.clone();
         std::thread::spawn(move || {
-            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h));
+            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h, av1));
             let _ = tx.send(Msg::Stream(id.clone(), r));
             if let Ok(w) = api.watch(&id) {
                 let _ = tx.send(Msg::Related(id, w.related.videos(), w.chat));
@@ -951,7 +1128,121 @@ impl App {
         }
     }
 
+    /// Look up the signed-in account: its name and subscribed channels.
+    fn fetch_account(&self) {
+        let (tx, api) = (self.tx.clone(), self.api.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::AccountName(api.account_name().ok()));
+            if let Ok(chs) = api.subscribed_channels() {
+                let _ = tx.send(Msg::RemoteSubs(chs));
+            }
+        });
+    }
+
+    /// Reload Home and Subscriptions after signing in or out, so they show
+    /// (or stop showing) the account's own feeds.
+    fn refresh_signed_in_pages(&mut self) {
+        for t in 0..self.tabs.len() {
+            for i in 0..self.tabs[t].pages.len() {
+                let p = &mut self.tabs[t].pages[i];
+                match &mut p.kind {
+                    Kind::Home { feed, .. } | Kind::Subs { feed } => *feed = Feed::default(),
+                    Kind::Playlists { list } => *list = None,
+                    _ => continue,
+                }
+                p.rev += 1;
+                let uid = p.uid;
+                self.load(uid);
+            }
+        }
+    }
+
+    /// While a sign-in window is open, check on it.
+    fn poll_login(&mut self) {
+        use crate::browser_login::Poll;
+        let Some(l) = self.login.as_mut() else { return };
+        let r = l.poll();
+        let timed_out = matches!(r, Poll::Waiting) && l.started.elapsed() > Duration::from_secs(900);
+        match r {
+            Poll::Waiting if !timed_out => return,
+            Poll::Waiting => {
+                if let Some(l) = self.login.take() {
+                    l.close();
+                }
+                self.flash("gave up waiting for the sign-in");
+            }
+            Poll::Done(c) => {
+                self.login = None;
+                self.take_cookies(c);
+            }
+            Poll::NotSignedIn => {
+                self.login = None;
+                self.flash("the sign-in window closed before you were signed in to YouTube");
+            }
+            Poll::Failed(e) => {
+                self.login = None;
+                self.flash(format!("sign-in failed: {e}; try \"use my cookie extension\""));
+            }
+        }
+        self.store_rev += 1;
+    }
+
+    /// While waiting on a cookie extension, look at the clipboard whenever
+    /// it changes.
+    fn poll_capture(&mut self) {
+        let Some((since, seq)) = self.capture else { return };
+        if since.elapsed() > Duration::from_secs(300) {
+            self.capture = None;
+            self.store_rev += 1;
+            self.flash("gave up waiting for cookies; try Sign in again");
+            return;
+        }
+        let now = crate::cookies::clipboard_seq();
+        if now == seq || now == 0 {
+            return;
+        }
+        self.capture = Some((since, now));
+        if let Some(c) = crate::cookies::clipboard_text().and_then(|t| crate::cookies::parse(&t)) {
+            self.take_cookies(c);
+        }
+    }
+
+    /// A sign-in arrived (window, clipboard or paste): save it, clear the
+    /// clipboard, and check it with YouTube.
+    fn take_cookies(&mut self, c: Vec<crate::cookies::Cookie>) {
+        if !crate::cookies::signed_in(&c) {
+            self.flash("those cookies aren't from a signed-in youtube.com tab: sign in there and try again");
+            return;
+        }
+        match crate::cookies::save(&c) {
+            Ok(_) => {
+                if self.capture.take().is_some() {
+                    crate::cookies::clear_clipboard();
+                }
+                self.store_rev += 1;
+                self.flash("signed in, checking with YouTube…");
+                self.api.reload_auth();
+                self.refresh_signed_in_pages();
+                self.fetch_account();
+                let (tx, api) = (self.tx.clone(), self.api.clone());
+                std::thread::spawn(move || {
+                    let name = api.account_name().ok();
+                    let m = match (crate::cookies::verify(), &name) {
+                        (Ok(()), Some(n)) => format!("signed in as {n} ✓"),
+                        (Ok(()), None) => "signed in ✓ videos will play".to_string(),
+                        (Err(e), _) => format!("YouTube didn't accept the sign-in: {e}"),
+                    };
+                    let _ = tx.send(Msg::AccountName(name));
+                    let _ = tx.send(Msg::Flash(m));
+                });
+            }
+            Err(e) => self.flash(format!("couldn't save the sign-in: {e}")),
+        }
+    }
+
     fn after_tick(&mut self) {
+        self.poll_login();
+        self.poll_capture();
         self.sync_chat();
         let Some(p) = &self.player else { return };
         if p.failed && self.retried.as_deref() != Some(p.video.id.as_str()) {
@@ -1252,6 +1543,43 @@ impl App {
                     });
                 }
             }
+            Act::SignIn => {
+                if let Some(l) = self.login.take() {
+                    l.close();
+                    self.flash("sign-in cancelled");
+                } else {
+                    match crate::browser_login::Login::start() {
+                        Ok(l) => {
+                            self.login = Some(l);
+                            self.flash("sign in with Google in the window that opened, then close it");
+                        }
+                        Err(e) => {
+                            // No usable browser: fall back to a cookie extension.
+                            self.capture = Some((Instant::now(), crate::cookies::clipboard_seq()));
+                            self.flash(format!("{e}; use your cookie extension instead"));
+                        }
+                    }
+                }
+                self.store_rev += 1;
+            }
+            Act::SignInCookies => {
+                if self.capture.take().is_some() {
+                    self.flash("sign-in cancelled");
+                } else {
+                    self.capture = Some((Instant::now(), crate::cookies::clipboard_seq()));
+                    crate::sys::open_url("https://www.youtube.com");
+                    self.flash("on youtube.com, click your cookie extension and press Export");
+                }
+                self.store_rev += 1;
+            }
+            Act::SignOutVideos => {
+                crate::cookies::remove();
+                self.api.reload_auth();
+                self.account_name = None;
+                self.refresh_signed_in_pages();
+                self.store_rev += 1;
+                self.flash("signed out");
+            }
             Act::SignOut => {
                 if let Some(a) = self.auth.take() {
                     std::thread::spawn(move || a.sign_out());
@@ -1503,7 +1831,14 @@ impl App {
             ("◷  Watch later".to_string(), Side::Later),
             ("≡  Playlists".to_string(), Side::Playlists),
             ("?  Help".to_string(), Side::Help),
-            (if self.auth.is_some() { "@  Account ✓".to_string() } else { "@  Sign in".to_string() }, Side::Account),
+            (
+                match (&self.account_name, self.auth.is_some()) {
+                    (Some(n), _) => format!("@  {}", page::trunc(n.split(" (").next().unwrap_or(n), 18)),
+                    (None, true) => "@  Account ✓".to_string(),
+                    (None, false) => "@  Sign in".to_string(),
+                },
+                Side::Account,
+            ),
         ];
         for c in &self.store.subs {
             v.push((c.name.clone(), Side::Channel(c.id.clone())));
@@ -1555,9 +1890,34 @@ impl App {
             }
         }
         match ev {
+            Event::FocusGained => {
+                self.tab_active = true;
+                #[cfg(windows)]
+                {
+                    self.away_since = None;
+                }
+            }
+            Event::FocusLost => {
+                // Still the foreground window: a tab or pane switch inside
+                // the terminal. Otherwise another app took focus, and the
+                // video can stay put (the app covers it anyway).
+                #[cfg(windows)]
+                match self.overlay.as_ref().map(|o| crate::overlay::is_foreground(o.owner)) {
+                    Some(true) => self.tab_active = false,
+                    Some(false) => self.away_since = Some(Instant::now()),
+                    None => {}
+                }
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(t) => {
                 let t = t.replace("\r\n", "\n").replace('\r', "\n");
+                // Cookies pasted anywhere (that isn't a text box): sign in.
+                if self.compose.is_none() && self.edit.is_none() {
+                    if let Some(c) = crate::cookies::parse(&t) {
+                        self.take_cookies(c);
+                        return;
+                    }
+                }
                 if let Some(c) = &mut self.compose {
                     c.text.push_str(&t);
                 } else if let Some(e) = &mut self.edit {
@@ -1567,6 +1927,23 @@ impl App {
             }
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
+                MouseEventKind::Drag(MouseButton::Left) => match self.drag {
+                    Some(Drag::Volume(r)) => self.volume_at(r, m.column),
+                    // Seek on release, so dragging doesn't restart playback per cell.
+                    Some(Drag::Seek(_)) | None => {}
+                },
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let (Some(Drag::Seek(r)), Some(p)) = (self.drag.take(), &mut self.player) {
+                        if m.column != r.x || m.row != r.y {
+                            let frac = (m.column.saturating_sub(r.x)) as f64 / r.width.max(1) as f64;
+                            p.seek_to(frac.clamp(0.0, 1.0) * p.duration());
+                        }
+                    }
+                    self.drag = None;
+                }
+                // The wheel over the volume slider changes the volume.
+                MouseEventKind::ScrollDown if self.bar_hit(m.column, m.row).is_some_and(|h| h.0) => self.change_volume(-0.05),
+                MouseEventKind::ScrollUp if self.bar_hit(m.column, m.row).is_some_and(|h| h.0) => self.change_volume(0.05),
                 MouseEventKind::ScrollDown => self.scroll_by(3),
                 MouseEventKind::ScrollUp => self.scroll_by(-3),
                 _ => {}
@@ -1587,8 +1964,36 @@ impl App {
         self.page().layout.as_ref().map(|l| &l.1)
     }
 
+    /// Set the volume from a position on a slider (0-150%).
+    fn volume_at(&mut self, r: Rect, x: u16) {
+        let frac = ((x.saturating_sub(r.x) as f32 + 1.0) / r.width.max(1) as f32).clamp(0.0, 1.0);
+        let v = if x <= r.x && frac < 0.1 { 0.0 } else { frac * 1.5 };
+        self.change_volume(v - self.store.volume);
+    }
+
+    /// The player-bar control under (x, y): a volume slider, else a seek bar.
+    fn bar_hit(&self, x: u16, y: u16) -> Option<(bool, Rect)> {
+        let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y == r.y;
+        self.geo.vol.iter().find(|r| hit(r)).map(|r| (true, *r)).or_else(|| self.geo.seek.iter().find(|r| hit(r)).map(|r| (false, *r)))
+    }
+
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        match self.bar_hit(x, y) {
+            Some((true, r)) => {
+                self.drag = Some(Drag::Volume(r));
+                return self.volume_at(r, x);
+            }
+            Some((false, r)) => {
+                if let Some(p) = &mut self.player {
+                    self.drag = Some(Drag::Seek(r));
+                    let frac = (x.saturating_sub(r.x)) as f64 / r.width.max(1) as f64;
+                    p.seek_to(frac.clamp(0.0, 1.0) * p.duration());
+                    return;
+                }
+            }
+            None => {}
+        }
         if self.fullscreen {
             if let (Some(b), Some(p)) = (self.geo.fs_bar, &mut self.player) {
                 if hit(&b) {
@@ -1993,6 +2398,35 @@ impl App {
                     self.open_save_dialog(v);
                 }
             }
+            KeyCode::Char('N') => {
+                #[cfg(windows)]
+                {
+                    if let Some(o) = &self.overlay {
+                        self.store.native = !self.store.native;
+                        self.store.touch();
+                        self.opts.wid = self.store.native.then(|| o.wid());
+                        let wid = self.opts.wid;
+                        if let Some(p) = &mut self.player {
+                            p.set_native(wid);
+                        }
+                        self.flash(if self.store.native { "native video window" } else { "video in the terminal" });
+                    } else {
+                        self.flash("native video needs libmpv in Windows Terminal");
+                    }
+                }
+                #[cfg(not(windows))]
+                self.flash("native video window is Windows-only for now");
+            }
+            KeyCode::Char('S') => {
+                if let Some(p) = &mut self.player {
+                    let (msg, pref) = p.cycle_captions();
+                    if pref != self.store.captions {
+                        self.store.captions = pref;
+                        self.store_changed();
+                    }
+                    self.flash(msg);
+                }
+            }
             KeyCode::Char('C') => {
                 self.store.show_chat = !self.store.show_chat;
                 self.store_changed();
@@ -2093,7 +2527,9 @@ impl App {
 
     pub fn draw(&mut self, f: &mut Frame) {
         self.gfx_seq += 1;
+        self.native_rect = None;
         self.draw_ui(f);
+        self.place_overlay();
         if self.gfx_active() {
             if let Some(g) = &mut self.gfx {
                 let bytes = g.finish(f.buffer_mut());
@@ -2115,9 +2551,11 @@ impl App {
             }
             _ => (GW as f32, GH as f32),
         };
+        let burn = self.gfx.is_some() && self.store.gfx;
         if let Some(p) = &mut self.player {
             p.set_term(area.width as usize, area.height.saturating_sub(1) as usize);
             p.set_px_cell(px_cell);
+            p.set_caption_burn(burn);
         }
         if area.height < 8 || area.width < 30 {
             f.buffer_mut().set_string(0, 0, "window too small", Style::default());
@@ -2355,7 +2793,15 @@ impl App {
         let page = &mut t.pages[t.idx];
         let key = (w, vh, page.rev, key_store);
         if page.layout.as_ref().map(|l| l.0) != Some(key) {
-            let ctx = Ctx { autoplay, chat: show_chat, account: self.auth.as_ref().map(|a| a.channel()) };
+            let ctx = Ctx {
+                autoplay,
+                chat: show_chat,
+                account: self.auth.as_ref().map(|a| a.channel()),
+                yt_cookies: crate::cookies::status(),
+                yt_account: self.account_name.clone(),
+                capturing: self.capture.is_some(),
+                logging_in: self.login.is_some(),
+            };
             let doc = layout(page, &self.store, w, vh, &ctx);
             page.layout = Some((key, doc));
         }
@@ -2436,7 +2882,23 @@ impl App {
                         Some(p) => {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
                             let t = self.t0.elapsed().as_secs_f32();
-                            if self.viz && gfx_on {
+                            if p.native() && !self.viz {
+                                let full = Rect { x: r.x + x, y: (r.y as i64 + sy).max(0) as u16, width: pw, height: *h };
+                                let top = (r.y as i64 + sy).max(r.y as i64);
+                                let bot = (r.y as i64 + sy + *h as i64).min((r.y + vh) as i64);
+                                let vis = Rect { x: r.x + x, y: top as u16, width: pw, height: (bot - top).max(0) as u16 };
+                                let full = Rect { y: (r.y as i64 + sy) as u16, ..full };
+                                if r.y as i64 + sy >= 0 {
+                                    self.native_rect = Some((full, vis));
+                                } else {
+                                    // Scrolled partly above the screen: keep the window
+                                    // aligned to the visible part.
+                                    self.native_rect = Some((vis, vis));
+                                }
+                                if p.loading() {
+                                    center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
+                                }
+                            } else if self.viz && gfx_on {
                                 let samples = p.samples();
                                 let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
                                 if let Some(g) = self.gfx.as_mut() {
@@ -2467,6 +2929,9 @@ impl App {
                                         }
                                     }
                                 }
+                            }
+                            if !self.viz {
+                                draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
                             }
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
@@ -2518,7 +2983,9 @@ impl App {
                 Prim::PlayerBar { x, y, w: bw, id } => {
                     if *y >= scroll && *y < scroll + vh as usize {
                         if let Some(p) = self.player.as_ref().filter(|p| &p.video.id == id) {
-                            draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, self.renderer.mode, false);
+                            let (seek, vol) = draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, self.renderer.mode, false);
+                            self.geo.seek.push(seek);
+                            self.geo.vol.extend(vol);
                         }
                     }
                 }
@@ -2577,6 +3044,9 @@ impl App {
             let samples = p.samples();
             render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, mw as usize, vh as usize, &mut self.viz_cells);
             blit(buf, r, r.x, 0, &self.viz_cells, mw as usize, vh as usize);
+        } else if p.native() {
+            let b = Rect { x: r.x, y: r.y, width: mw, height: vh };
+            self.native_rect = Some((b, b));
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, mw as usize, vh as usize);
@@ -2587,6 +3057,9 @@ impl App {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
+        }
+        if !self.viz {
+            draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
         }
         // Overlay controls on the video, like YouTube's miniplayer.
         let ctl = Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
@@ -2605,7 +3078,7 @@ impl App {
         let pb = Rect { x: r.x + mw - 5, y: r.y + vh, width: 4, height: 1 };
         buf.set_string(pb.x, pb.y, if p.paused || p.ended { " ▶ " } else { " ❚❚" }, Style::default().fg(Color::White).bg(page::BUTTON));
         self.geo.mini_btns.push((pb, MiniBtn::Pause));
-        draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
+        let _ = draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
         self.geo.mini = Some(r);
         self.geo.mini_bar = Some(Rect { x: r.x, y: r.y + vh + 1, width: mw.saturating_sub(16), height: 1 });
     }
@@ -2631,6 +3104,9 @@ impl App {
             let samples = p.samples();
             render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, vw as usize, vh as usize, &mut self.viz_cells);
             blit(buf, varea, area.x, 0, &self.viz_cells, vw as usize, vh as usize);
+        } else if p.native() {
+            let b = Rect { x: area.x, y: area.y, width: vw, height: vh };
+            self.native_rect = Some((b, b));
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, vw as usize, vh as usize);
@@ -2643,13 +3119,18 @@ impl App {
                 None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
             }
         }
+        if !self.viz {
+            draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
+        }
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
             draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref(), inp);
         }
         let br = Rect { y: area.y + vh, height: 1, ..area };
         buf.set_style(br, Style::default().bg(Color::Rgb(40, 0, 0)));
-        draw_bar(buf, br.x, br.y, br.width, p, self.renderer.mode, false);
+        let (seek, vol) = draw_bar(buf, br.x, br.y, br.width, p, self.renderer.mode, false);
+        self.geo.seek.push(seek);
+        self.geo.vol.extend(vol);
         self.geo.fs_bar = Some(Rect { width: br.width.saturating_sub(18), ..br });
     }
 
@@ -2705,15 +3186,24 @@ impl App {
 
     // ------------------------------------------------------------ main loop
 
-    pub fn run(&mut self, terminal: &mut DefaultTerminal, rx: Receiver<Msg>) -> Result<()> {
-        use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+    pub fn run(&mut self, terminal: &mut Term, out: &crate::out::Out, rx: Receiver<Msg>) -> Result<()> {
+        use crossterm::terminal::BeginSynchronizedUpdate;
         self.sync_subs(false);
+        if self.api.signed_in() {
+            self.fetch_account();
+        }
         let mut last_save = Instant::now();
+        let mut last_draw = Instant::now();
+        let sync = std::env::var_os("YTUI_NO_SYNC").is_none();
         while !self.quit {
             while let Ok(m) = rx.try_recv() {
                 self.on_msg(m);
             }
-            let fresh = self.player.as_mut().is_some_and(|p| p.tick()) || self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading());
+            let ticked = self.player.as_mut().is_some_and(|p| p.tick());
+            // Spinners (resolving / loading) animate at ~30 fps, not as fast as
+            // the loop spins.
+            let spinning = (self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading())) && last_draw.elapsed() >= Duration::from_millis(33);
+            let fresh = ticked || spinning;
             self.after_tick();
             // Infinite scroll: fetch more when the viewport nears the end.
             if !self.fullscreen {
@@ -2728,26 +3218,33 @@ impl App {
             }
             if self.gfx_reset {
                 self.gfx_reset = false;
-                if let Some(g) = &mut self.gfx {
-                    let bytes = g.clear_all();
-                    let mut o = std::io::stdout();
-                    let _ = o.write_all(&bytes);
-                    let _ = o.flush();
-                }
+                let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
+                out.push(&bytes);
                 terminal.clear()?;
+                out.push(&[]);
                 self.dirty = true;
             }
             if self.dirty || fresh {
-                let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
-                terminal.draw(|f| self.draw(f))?;
-                if !self.gfx_out.is_empty() {
-                    let mut o = std::io::stdout();
-                    let _ = o.write_all(&self.gfx_out);
-                    let _ = o.flush();
-                    self.gfx_out.clear();
+                last_draw = Instant::now();
+                let t0 = Instant::now();
+                if sync {
+                    let _ = crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate);
                 }
-                let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+                terminal.draw(|f| self.draw(f))?;
+                let t1 = Instant::now();
+                let gfx_bytes = self.gfx_out.len();
+                if sync {
+                    self.gfx_out.extend_from_slice(b"\x1b[?2026l");
+                }
+                // The whole frame goes out as one write on the output thread;
+                // this waits only for the previous frame to be taken.
+                out.push(&self.gfx_out);
+                self.gfx_out.clear();
                 self.dirty = false;
+                if let Some(s) = &mut self.stats {
+                    let p = self.player.as_ref();
+                    s.frame(t1 - t0, t1.elapsed(), gfx_bytes, p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
+                }
             }
             if last_save.elapsed() > Duration::from_secs(20) {
                 self.store.save();
@@ -2768,12 +3265,9 @@ impl App {
         }
         self.stop();
         self.store.save();
-        if let Some(g) = &mut self.gfx {
-            let bytes = g.clear_all();
-            let mut o = std::io::stdout();
-            let _ = o.write_all(&bytes);
-            let _ = o.flush();
-        }
+        let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
+        out.push(&bytes);
+        out.drain();
         Ok(())
     }
 }
@@ -2871,6 +3365,53 @@ fn fill(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, color: Co
     }
 }
 
+/// Per-second frame timing, appended to the YTUI_STATS file.
+struct Stats {
+    path: String,
+    since: Instant,
+    n: u32,
+    draw: Duration,
+    gfx: Duration,
+    gfx_max: Duration,
+    bytes: usize,
+}
+
+impl Stats {
+    fn new(path: String) -> Stats {
+        let _ = std::fs::write(&path, "");
+        Stats { path, since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+    }
+
+    fn frame(&mut self, draw: Duration, gfx: Duration, bytes: usize, decoded_fps: f64, pos: f64, dbg: String) {
+        self.n += 1;
+        self.draw += draw;
+        self.gfx += gfx;
+        self.gfx_max = self.gfx_max.max(gfx);
+        self.bytes += bytes;
+        let el = self.since.elapsed().as_secs_f64();
+        if el >= 1.0 {
+            let n = self.n.max(1) as f64;
+            let line = format!(
+                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  gfx write {:6.2} ms (max {:6.1})  gfx {:7.1} KB/frame  {dbg}\n",
+                self.n as f64 / el,
+                self.draw.as_secs_f64() * 1000.0 / n,
+                self.gfx.as_secs_f64() * 1000.0 / n,
+                self.gfx_max.as_secs_f64() * 1000.0,
+                self.bytes as f64 / n / 1024.0
+            );
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&self.path) {
+                let _ = f.write_all(line.as_bytes());
+            }
+            *self = Stats { path: std::mem::take(&mut self.path), ..Stats::new_keep() };
+        }
+    }
+
+    fn new_keep() -> Stats {
+        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+    }
+}
+
 fn center_text(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, text: &str) {
     let y = sy + h as i64 / 2;
     if y < 0 || y >= clip.height as i64 {
@@ -2881,14 +3422,70 @@ fn center_text(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, te
     buf.set_string(tx, clip.y + y as u16, text, Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD));
 }
 
-fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) {
+/// Captions over the bottom of a w x h video box (top-left at column x,
+/// row sy of `clip`): centred lines, wrapped, white on black like YouTube's.
+fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, text: &str) {
+    if text.trim().is_empty() || w < 8 || h < 4 {
+        return;
+    }
+    let max = (w as usize * 9 / 10).max(8);
+    let mut lines: Vec<String> = Vec::new();
+    for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut cur = String::new();
+        for word in para.split_whitespace() {
+            if !cur.is_empty() && cur.width() + 1 + word.width() > max {
+                lines.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        if !cur.is_empty() {
+            lines.push(page::trunc(&cur, max));
+        }
+    }
+    // Newest lines win when there are more than fit.
+    let keep = (h as usize / 3).clamp(1, 3);
+    let lines = &lines[lines.len().saturating_sub(keep)..];
+    let style = Style::default().fg(Color::White).bg(Color::Rgb(8, 8, 8)).add_modifier(Modifier::BOLD);
+    let bottom = sy + h as i64 - 1 - (h > 10) as i64;
+    for (i, l) in lines.iter().enumerate() {
+        let y = bottom - (lines.len() - 1 - i) as i64;
+        if y < 0 || y >= clip.height as i64 {
+            continue;
+        }
+        let s = format!(" {l} ");
+        let tx = x + w.saturating_sub(s.width() as u16) / 2;
+        buf.set_string(tx, clip.y + y as u16, &s, style);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Drag {
+    Volume(Rect),
+    Seek(Rect),
+}
+
+/// Cells in the volume slider (0-150%).
+const VOL_CELLS: u16 = 12;
+
+/// The player bar: seek bar, time, and (full size) a volume slider.
+/// Returns where the seek bar and the volume slider were drawn.
+fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) -> (Rect, Option<Rect>) {
     let d = p.duration();
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
-    let vol = if p.muted() { "muted".to_string() } else { format!("vol {:.0}%", p.level() * 100.0) };
+    let pct = if p.muted() { "muted".to_string() } else { format!("{:>3.0}%", p.level() * 100.0) };
     let ae = if p.exposure.on { " AE" } else { "" };
-    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {}{ae} {:.0}fps ", mode.name(), p.fps) };
-    let tw = tail.width() as u16;
+    let cc = if p.caption_track().is_some() { " CC" } else { "" };
+    let rate = if p.native() { "gpu".to_string() } else { format!("{:.0}fps", p.fps) };
+    // [time]  vol [slider] pct  [mode AE CC rate]
+    let head = format!(" {time}  vol ");
+    let rest = format!(" {pct}  {}{ae}{cc} {rate} ", mode.name());
+    let slider = !compact && w > head.width() as u16 + VOL_CELLS + rest.width() as u16 + 16;
+    let tail = if compact || !slider { format!(" {time} ") } else { String::new() };
+    let tw = if slider { head.width() as u16 + VOL_CELLS + rest.width() as u16 } else { tail.width() as u16 };
     let bw = w.saturating_sub(tw.max(16) + 1);
     let filled = if d > 0.0 { ((p.pos / d).clamp(0.0, 1.0) * bw as f64) as u16 } else { 0 };
     for i in 0..bw {
@@ -2901,7 +3498,28 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
             c.set_char('━').set_fg(Color::Rgb(80, 80, 88));
         }
     }
-    buf.set_string(x + w.saturating_sub(tw), y, &tail, Style::default().fg(Color::White));
+    let seek = Rect { x, y, width: bw.max(1), height: 1 };
+    let tx = x + w.saturating_sub(tw);
+    if !slider {
+        buf.set_string(tx, y, &tail, Style::default().fg(Color::White));
+        return (seek, None);
+    }
+    let white = Style::default().fg(Color::White);
+    buf.set_string(tx, y, &head, white);
+    let sx = tx + head.width() as u16;
+    let lit = if p.muted() { 0 } else { ((p.level() / 1.5) * VOL_CELLS as f32).round() as u16 };
+    for i in 0..VOL_CELLS {
+        // Over 100% shows in a warmer colour, like a boost.
+        let over = i >= (VOL_CELLS * 2) / 3;
+        let c = &mut buf[(sx + i, y)];
+        if i < lit {
+            c.set_char('█').set_fg(if over { Color::Rgb(255, 150, 60) } else { Color::Rgb(235, 235, 235) });
+        } else {
+            c.set_char('▁').set_fg(Color::Rgb(90, 90, 100));
+        }
+    }
+    buf.set_string(sx + VOL_CELLS, y, &rest, white);
+    (seek, Some(Rect { x: sx, y, width: VOL_CELLS, height: 1 }))
 }
 
 fn role_color(r: Role) -> Color {

@@ -61,6 +61,8 @@ const FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
     "/System/Library/Fonts/Menlo.ttc",
+    "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+    "C:\\Windows\\Fonts\\consola.ttf",
 ];
 
 pub struct Glyphs {

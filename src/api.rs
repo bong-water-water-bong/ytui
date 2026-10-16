@@ -197,12 +197,41 @@ pub struct Api {
     agent: ureq::Agent,
     ver: String,
     visitor: String,
+    /// Signed in with browser cookies: requests carry them like youtube.com.
+    auth: std::sync::RwLock<Option<WebAuth>>,
+}
+
+/// The browser session ytui signs requests with.
+struct WebAuth {
+    /// Cookie header for youtube.com.
+    cookie: String,
+    /// SAPISID, for the SAPISIDHASH authorization youtube.com sends.
+    sapisid: String,
+}
+
+impl WebAuth {
+    fn load() -> Option<WebAuth> {
+        let cookies = crate::cookies::load();
+        let yt: Vec<_> = cookies.iter().filter(|c| c.domain.trim_start_matches('.').ends_with("youtube.com")).collect();
+        let sapisid = yt.iter().find(|c| c.name == "SAPISID").or_else(|| yt.iter().find(|c| c.name == "__Secure-3PAPISID"))?.value.clone();
+        let cookie = yt.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; ");
+        Some(WebAuth { cookie, sapisid })
+    }
+
+    /// "SAPISIDHASH <time>_<sha1(time sapisid origin)>", as youtube.com does.
+    fn authorization(&self) -> String {
+        use sha1::{Digest, Sha1};
+        let ts = now_secs();
+        let h = Sha1::digest(format!("{ts} {} https://www.youtube.com", self.sapisid));
+        let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        format!("SAPISIDHASH {ts}_{hex}")
+    }
 }
 
 fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
+        .unwrap_or_else(|_| crate::sys::home().join(".cache"));
     base.join("ytui")
 }
 
@@ -219,7 +248,7 @@ impl Api {
         if let Ok(v) = std::fs::read(&path).map(|b| serde_json::from_slice::<Value>(&b).unwrap_or_default()) {
             if now.saturating_sub(v["ts"].as_u64().unwrap_or(0)) < 86400 {
                 if let (Some(ver), Some(vis)) = (v["ver"].as_str(), v["visitor"].as_str()) {
-                    return Api { agent, ver: ver.into(), visitor: vis.into() };
+                    return Api { agent, ver: ver.into(), visitor: vis.into(), auth: std::sync::RwLock::new(WebAuth::load()) };
                 }
             }
         }
@@ -241,19 +270,92 @@ impl Api {
         let visitor = grab("VISITOR_DATA").unwrap_or_default();
         let _ = std::fs::create_dir_all(cache_dir());
         let _ = std::fs::write(&path, json!({"ver": ver, "visitor": visitor, "ts": now}).to_string());
-        Api { agent, ver, visitor }
+        Api { agent, ver, visitor, auth: std::sync::RwLock::new(WebAuth::load()) }
+    }
+
+    /// Pick up a new sign-in (or sign-out).
+    pub fn reload_auth(&self) {
+        *self.auth.write().unwrap() = WebAuth::load();
+    }
+
+    /// Requests are made as the signed-in user.
+    pub fn signed_in(&self) -> bool {
+        self.auth.read().unwrap().is_some()
+    }
+
+    /// The signed-in user's recommended Home feed.
+    pub fn home(&self) -> Result<Feed> {
+        Ok(feed_from(&self.post("browse", json!({"browseId": "FEwhat_to_watch"}))?))
+    }
+
+    /// Latest videos from the signed-in user's subscriptions.
+    pub fn subscriptions_feed(&self) -> Result<Feed> {
+        Ok(feed_from(&self.post("browse", json!({"browseId": "FEsubscriptions"}))?))
+    }
+
+    /// Channels the signed-in user subscribes to.
+    pub fn subscribed_channels(&self) -> Result<Vec<ChannelItem>> {
+        let mut out = Vec::new();
+        let mut feed = feed_from(&self.post("browse", json!({"browseId": "FEchannels"}))?);
+        // Long lists come in pages.
+        for _ in 0..20 {
+            for e in &feed.entries {
+                if let Entry::Item(Item::Channel(c)) = e {
+                    if !out.iter().any(|x: &ChannelItem| x.id == c.id) {
+                        out.push(c.clone());
+                    }
+                }
+            }
+            let Some(tok) = feed.cont.take() else { break };
+            feed = self.browse_more(&tok)?;
+        }
+        Ok(out)
+    }
+
+    /// The signed-in user's playlists (Library > Playlists).
+    pub fn my_playlists(&self) -> Result<Vec<PlaylistItem>> {
+        let feed = feed_from(&self.post("browse", json!({"browseId": "FEplaylist_aggregation"}))?);
+        Ok(feed
+            .entries
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item(Item::Playlist(p)) => Some(p),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// The signed-in user's name (and @handle) from the account menu.
+    pub fn account_name(&self) -> Result<String> {
+        let v = self.post("account/account_menu", json!({}))?;
+        let name = find(&v, "accountName").and_then(text).unwrap_or_default();
+        let handle = find(&v, "channelHandle").and_then(text);
+        if name.is_empty() {
+            bail!("not signed in");
+        }
+        Ok(match handle {
+            Some(h) if !h.is_empty() => format!("{name} ({h})"),
+            _ => name,
+        })
     }
 
     fn post(&self, ep: &str, mut body: Value) -> Result<Value> {
         body["context"] = json!({"client": {"clientName": "WEB", "clientVersion": self.ver, "hl": "en", "gl": "US", "visitorData": self.visitor}});
-        let r = self
+        let mut req = self
             .agent
             .post(&format!("https://www.youtube.com/youtubei/v1/{ep}?prettyPrint=false"))
             .set("Content-Type", "application/json")
             .set("X-YouTube-Client-Name", "1")
             .set("X-YouTube-Client-Version", &self.ver)
-            .set("Origin", "https://www.youtube.com")
-            .send_string(&body.to_string());
+            .set("Origin", "https://www.youtube.com");
+        if let Some(a) = self.auth.read().unwrap().as_ref() {
+            req = req
+                .set("Cookie", &a.cookie)
+                .set("Authorization", &a.authorization())
+                .set("X-Origin", "https://www.youtube.com")
+                .set("X-Goog-AuthUser", "0");
+        }
+        let r = req.send_string(&body.to_string());
         match r {
             Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
             Err(ureq::Error::Status(code, _)) => bail!("YouTube returned HTTP {code}"),
