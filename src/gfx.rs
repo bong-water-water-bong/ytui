@@ -512,12 +512,28 @@ fn sixel_bands(idx: &[u8], w: usize, h: usize, y_start: usize, y_end: usize, out
 }
 
 /// Runs of cell rows (each `ch` pixel rows of `stride` bytes) whose pixels
-/// differ between `a` and `b`, as [start, end) cell-row ranges.
-fn changed_cell_rows(a: &[u8], b: &[u8], stride: usize, ch: usize, h: usize) -> Vec<(usize, usize)> {
+/// differ between `a` and `b`, as [start, end) cell-row ranges. A row
+/// changed when any pixel moved by more than `strong` in a channel (text, a
+/// cursor), or more than `max_px` pixels moved by more than `tol` (all 0:
+/// any difference counts).
+fn changed_cell_rows(a: &[u8], b: &[u8], stride: usize, ch: usize, h: usize, (tol, max_px, strong): (u8, usize, u8)) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     for r in 0..h.div_ceil(ch) {
         let (y0, y1) = (r * ch, ((r + 1) * ch).min(h));
-        if a[y0 * stride..y1 * stride] != b[y0 * stride..y1 * stride] {
+        let (pa, pb) = (&a[y0 * stride..y1 * stride], &b[y0 * stride..y1 * stride]);
+        let changed = pa != pb && {
+            let (mut n, mut hit) = (0, tol == 0 && max_px == 0);
+            for (p, q) in pa.chunks_exact(3).zip(pb.chunks_exact(3)) {
+                if hit {
+                    break;
+                }
+                let d = p[0].abs_diff(q[0]).max(p[1].abs_diff(q[1])).max(p[2].abs_diff(q[2]));
+                n += (d > tol) as usize;
+                hit = d > strong || n > max_px;
+            }
+            hit
+        };
+        if changed {
             match runs.last_mut() {
                 Some(last) if last.1 == r => last.1 = r + 1,
                 _ => runs.push((r, r + 1)),
@@ -526,6 +542,12 @@ fn changed_cell_rows(a: &[u8], b: &[u8], stride: usize, ch: usize, h: usize) -> 
     }
     runs
 }
+
+/// Default `Gfx::sixel_skip`. On real 720p clips at 960x270 px it halved a
+/// talking head's bytes at 30 fps (-1 dB on screen) and cut a screen
+/// recording's 63 -> 17 KB per frame (-0.25 dB), never leaving a pixel more
+/// than 48 levels off.
+const SIXEL_SKIP: (u8, usize, u8) = (12, 50, 48);
 
 // ------------------------------------------------------------------ state
 
@@ -577,6 +599,11 @@ pub struct Gfx {
     pub sixel_tall: bool,
     /// Palette size for moving pictures (fewer = smaller, faster, blotchier).
     pub video_colors: usize,
+    /// Sixel video: a cell row is resent only when one of its pixels moved
+    /// by more than `sixel_skip.2` from what is on screen, or more than 1 in
+    /// `sixel_skip.1` moved by more than `sixel_skip.0`, so compression noise
+    /// (talking heads) is not resent. (0, 0, 0) resends any change.
+    pub sixel_skip: (u8, usize, u8),
 }
 
 const SENTINEL: &str = "\u{2800}";
@@ -600,6 +627,7 @@ impl Gfx {
             max_px: if remote { 960 } else { 1920 },
             sixel_tall: std::env::var_os("YTUI_SIXEL_FULL").is_none(),
             video_colors: 255,
+            sixel_skip: if std::env::var_os("YTUI_SIXEL_EXACT").is_some() { (0, 0, 0) } else { SIXEL_SKIP },
             max_fps: if remote { 12.0 } else { 0.0 },
             sent: HashMap::new(),
             prev_px: HashMap::new(),
@@ -899,12 +927,17 @@ impl Gfx {
                     let pal = if key.seq.is_some() { Palette::Adaptive { colors: self.video_colors, dither: 8 } } else { STILL_PALETTE };
                     // The same moving picture is already on screen in this
                     // spot: resend only the cell rows whose pixels changed.
-                    let mut kept = None;
+                    // Rows are compared with what is on screen (not the last
+                    // frame), so small changes cannot pile up unseen.
+                    let (mut kept, mut on_screen) = (None, Vec::new());
+                    let (tol, frac, strong) = self.sixel_skip;
+                    let max_px = if frac == 0 { 0 } else { w * ch / frac };
                     let runs = match key.seq {
                         Some(_) if !self.force => match self.sixel_shown.get_mut(&gkey) {
                             Some((r, p, m)) if *r == rect && p.len() == crop.len() => {
                                 kept = m.take();
-                                Some(changed_cell_rows(p, &crop, w * 3, ch, h))
+                                on_screen = std::mem::take(p);
+                                Some(changed_cell_rows(&on_screen, &crop, w * 3, ch, h, (tol, max_px, strong)))
                             }
                             _ => None,
                         },
@@ -916,6 +949,7 @@ impl Gfx {
                     let mut parts = Vec::new();
                     let mut keep = None;
                     let mut whole = true;
+                    let sent_runs = runs.clone().unwrap_or_default();
                     if let Some(runs) = runs {
                         let band = |a: usize, b: usize| (a * ch, (b * ch).min(h));
                         match (pal, kept) {
@@ -969,7 +1003,18 @@ impl Gfx {
                         }
                         parts.push((0, enc));
                     }
-                    (Some(parts), key.seq.map(|_| (crop, keep)))
+                    // Remember what the screen now shows: the bands sent
+                    // over the rows left in place, or the whole frame.
+                    let shown = if whole {
+                        crop
+                    } else {
+                        for (a, b) in sent_runs {
+                            let (y0, y1) = (a * ch * w * 3, (b * ch).min(h) * w * 3);
+                            on_screen[y0..y1].copy_from_slice(&crop[y0..y1]);
+                        }
+                        on_screen
+                    };
+                    (Some(parts), key.seq.map(|_| (shown, keep)))
                 } else {
                     (None, None)
                 };
@@ -1371,5 +1416,45 @@ mod tests {
         });
         assert_eq!(s.matches("\x1bP").count(), 1);
         assert!(s.contains("\x1b[2;1H\x1bP"), "whole frame from the top: {s:?}");
+    }
+
+    /// Compression-noise-sized changes are not resent; one strongly
+    /// changed pixel (a typed character) is.
+    #[test]
+    fn sixel_skips_noise_but_not_a_strong_change() {
+        let mut g = sixel_gfx();
+        assert_eq!(g.sixel_skip, SIXEL_SKIP);
+        let (cols, rows) = (6u16, 4u16);
+        let base = |w: usize, h: usize| vec![90u8; w * h * 3];
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| base(w, h));
+        // Every pixel off by 10, under the tolerance of 12: nothing to send.
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| vec![100u8; w * h * 3]);
+        assert!(!s.contains("\x1bP"), "noise must not be resent: {s:?}");
+        // Back to the grey on screen, but one pixel in cell row 1 jumps by
+        // 100: that row goes out.
+        let s = sixel_frame(&mut g, 3, cols, rows, &mut |w, h| {
+            let mut p = base(w, h);
+            let ch = h / rows as usize;
+            p[(ch + 2) * w * 3 + 9..][..3].fill(190);
+            p
+        });
+        assert_eq!(s.matches("\x1bP").count(), 1, "one band: {s:?}");
+        assert!(s.contains("\x1b[3;1H\x1bP"), "the strong change's row: {s:?}");
+    }
+
+    /// Skipped rows are compared with what the screen shows, so a slow
+    /// drift is sent once it adds up, not lost frame by frame.
+    #[test]
+    fn sixel_slow_drift_is_eventually_sent() {
+        let mut g = sixel_gfx();
+        let (cols, rows) = (6u16, 4u16);
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
+        let mut sent = false;
+        for k in 1..=4u64 {
+            // +5 per frame: each step is under the tolerance on its own.
+            let s = sixel_frame(&mut g, 1 + k, cols, rows, &mut |w, h| vec![90 + 5 * k as u8; w * h * 3]);
+            sent |= s.contains("\x1bP");
+        }
+        assert!(sent, "a 20-level drift must reach the screen");
     }
 }

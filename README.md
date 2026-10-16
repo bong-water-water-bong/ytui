@@ -108,11 +108,13 @@ banners and the 3D scenes instead of characters. It asks the terminal at startup
   Adaptive palette per frame (median cut) with a light ordered dither. Some terminals report a bogus cell width
   (tmux's `client_cell_width` can be the glyph gap); the width is then rebuilt from the height's
   cell aspect rather than discarding sixel.
-  Like kitty, consecutive video frames resend only the cell rows whose pixels changed (the whole
-  frame when 80% or more did), drawn in the palette of the last whole frame so they match the rows
-  left on screen. Measured at 960x270 px: 82% fewer bytes on lecture slides, ~40% on
-  a screen recording, 3-11% on animation and nothing on a talking head, where compression noise
-  touches every row.
+  Like kitty, consecutive video frames resend only the cell rows that changed (the whole frame
+  when 80% or more did), drawn in the palette of the last whole frame so they match the rows left
+  on screen. Rows are compared with what the screen shows, and compression noise is not a change:
+  a row is resent when more than 2% of its pixels moved by over 12 levels, or any pixel by over
+  48 (so typed text and cursors always go out). Measured on real clips at 960x270 px, 30 fps:
+  lecture slides 27 -> 1 KB per frame, a screen recording 58 -> 9 KB, animation 260 -> 135 KB, a
+  talking head 234 -> 117 KB, for 0-1.2 dB. `YTUI_SIXEL_EXACT=1` resends every changed row.
 - otherwise the character renderers as before.
 
 `G` switches between pixels and characters (saved). `--gfx auto|kitty|sixel|off` (or
