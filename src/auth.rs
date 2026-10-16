@@ -45,6 +45,37 @@ pub struct Auth {
     chat_ids: Mutex<std::collections::HashMap<String, String>>,
 }
 
+/// One of your playlists.
+#[derive(Clone, Debug, Default)]
+pub struct MyPlaylist {
+    pub id: String,
+    pub title: String,
+    pub count: u64,
+    /// "private" / "unlisted" / "public"
+    pub privacy: String,
+    pub thumb: Option<String>,
+}
+
+/// A video in one of your playlists.
+#[derive(Clone, Debug)]
+pub struct PlItem {
+    /// playlistItem id (needed to remove / move it)
+    pub item_id: String,
+    pub video: crate::api::VideoItem,
+    pub position: u64,
+}
+
+fn my_playlist(it: &Value) -> MyPlaylist {
+    let sn = &it["snippet"];
+    MyPlaylist {
+        id: it["id"].as_str().unwrap_or("").into(),
+        title: sn["title"].as_str().unwrap_or("").into(),
+        count: it["contentDetails"]["itemCount"].as_u64().unwrap_or(0),
+        privacy: it["status"]["privacyStatus"].as_str().unwrap_or("").into(),
+        thumb: ["medium", "default", "high"].iter().find_map(|k| sn["thumbnails"][*k]["url"].as_str()).map(String::from),
+    }
+}
+
 /// One of your YouTube subscriptions.
 pub struct RemoteSub {
     pub channel_id: String,
@@ -284,6 +315,116 @@ impl Auth {
             .set("Authorization", &format!("Bearer {tok}"))
             .call()
             .map_err(api_err)?;
+        Ok(())
+    }
+
+    fn send(&self, req: ureq::Request, body: Option<Value>) -> Result<Value> {
+        let tok = self.access()?;
+        let req = req.set("Authorization", &format!("Bearer {tok}"));
+        let r = match body {
+            Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
+            None => req.call(),
+        }
+        .map_err(api_err)?;
+        let s = r.into_string()?;
+        Ok(if s.trim().is_empty() { Value::Null } else { serde_json::from_str(&s)? })
+    }
+
+    pub fn playlists(&self) -> Result<Vec<MyPlaylist>> {
+        let mut out = Vec::new();
+        let mut page: Option<String> = None;
+        for _ in 0..10 {
+            let mut url = format!("{API}/playlists?part=snippet,contentDetails,status&mine=true&maxResults=50");
+            if let Some(p) = &page {
+                url.push_str(&format!("&pageToken={p}"));
+            }
+            let v = self.get_json(&url)?;
+            out.extend(v["items"].as_array().into_iter().flatten().map(my_playlist));
+            page = v["nextPageToken"].as_str().map(String::from);
+            if page.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn playlist_info(&self, id: &str) -> Result<MyPlaylist> {
+        let v = self.get_json(&format!("{API}/playlists?part=snippet,contentDetails,status&id={id}"))?;
+        v["items"].get(0).map(my_playlist).ok_or_else(|| anyhow!("playlist not found"))
+    }
+
+    pub fn playlist_items(&self, id: &str) -> Result<Vec<PlItem>> {
+        let mut out = Vec::new();
+        let mut page: Option<String> = None;
+        for _ in 0..20 {
+            let mut url = format!("{API}/playlistItems?part=snippet,contentDetails&playlistId={id}&maxResults=50");
+            if let Some(p) = &page {
+                url.push_str(&format!("&pageToken={p}"));
+            }
+            let v = self.get_json(&url)?;
+            for it in v["items"].as_array().into_iter().flatten() {
+                let sn = &it["snippet"];
+                let vid = sn["resourceId"]["videoId"].as_str().unwrap_or("").to_string();
+                out.push(PlItem {
+                    item_id: it["id"].as_str().unwrap_or("").into(),
+                    position: sn["position"].as_u64().unwrap_or(out.len() as u64),
+                    video: crate::api::VideoItem {
+                        id: vid,
+                        title: sn["title"].as_str().unwrap_or("").into(),
+                        channel: sn["videoOwnerChannelTitle"].as_str().unwrap_or("").into(),
+                        channel_id: sn["videoOwnerChannelId"].as_str().map(String::from),
+                        published: it["contentDetails"]["videoPublishedAt"].as_str().map(|d| d.get(..10).unwrap_or(d).to_string()),
+                        ..Default::default()
+                    },
+                });
+            }
+            page = v["nextPageToken"].as_str().map(String::from);
+            if page.is_none() {
+                break;
+            }
+        }
+        out.sort_by_key(|i| i.position);
+        Ok(out)
+    }
+
+    /// The playlistItem id of `video` in `playlist`, if it's there.
+    pub fn find_item(&self, playlist: &str, video: &str) -> Result<Option<String>> {
+        let v = self.get_json(&format!("{API}/playlistItems?part=id&playlistId={playlist}&videoId={video}&maxResults=1"))?;
+        Ok(v["items"][0]["id"].as_str().map(String::from))
+    }
+
+    pub fn create_playlist(&self, title: &str, privacy: &str) -> Result<String> {
+        let body = json!({"snippet": {"title": title}, "status": {"privacyStatus": privacy}});
+        let v = self.send(self.agent.post(&format!("{API}/playlists?part=snippet,status")), Some(body))?;
+        Ok(v["id"].as_str().unwrap_or("").into())
+    }
+
+    pub fn update_playlist(&self, id: &str, title: &str, privacy: &str) -> Result<()> {
+        let body = json!({"id": id, "snippet": {"title": title}, "status": {"privacyStatus": privacy}});
+        self.send(self.agent.put(&format!("{API}/playlists?part=snippet,status")), Some(body))?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(&self, id: &str) -> Result<()> {
+        self.send(self.agent.delete(&format!("{API}/playlists?id={id}")), None)?;
+        Ok(())
+    }
+
+    pub fn add_to_playlist(&self, playlist: &str, video: &str) -> Result<String> {
+        let body = json!({"snippet": {"playlistId": playlist, "resourceId": {"kind": "youtube#video", "videoId": video}}});
+        let v = self.send(self.agent.post(&format!("{API}/playlistItems?part=snippet")), Some(body))?;
+        Ok(v["id"].as_str().unwrap_or("").into())
+    }
+
+    pub fn remove_item(&self, item_id: &str) -> Result<()> {
+        self.send(self.agent.delete(&format!("{API}/playlistItems?id={item_id}")), None)?;
+        Ok(())
+    }
+
+    pub fn move_item(&self, playlist: &str, item: &PlItem, position: u64) -> Result<()> {
+        let body = json!({"id": item.item_id, "snippet": {"playlistId": playlist, "position": position,
+            "resourceId": {"kind": "youtube#video", "videoId": item.video.id}}});
+        self.send(self.agent.put(&format!("{API}/playlistItems?part=snippet")), Some(body))?;
         Ok(())
     }
 

@@ -4,7 +4,7 @@
 //! its watch page, in a miniplayer elsewhere, or fullscreen.
 
 use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
-use crate::auth::Auth;
+use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
 use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
@@ -45,6 +45,14 @@ pub enum Msg {
     /// Remote subscribe/unsubscribe finished: (channel, name, wanted on, new sub id).
     SubDone(String, String, bool, R<String>),
     ChatSent(R<()>),
+    /// Playlists for the Save dialog of this video.
+    DlgPlaylists(String, R<Vec<MyPlaylist>>),
+    /// Is the dialog's video in playlist? (video, playlist, item id)
+    DlgMember(String, String, Option<String>),
+    /// Add/remove from the dialog finished: (video, playlist, title, new item id or None if removed).
+    DlgToggled(String, String, String, R<Option<String>>),
+    /// A playlist edit finished; flash this and refresh playlist pages.
+    PlDone(R<String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,6 +73,43 @@ struct Compose {
     sending: bool,
     /// Sending to live chat rather than commenting.
     chat: bool,
+    /// Naming a playlist instead of writing a comment.
+    pl: Option<PlName>,
+}
+
+#[derive(Clone)]
+enum PlName {
+    /// New playlist, optionally adding this video to it.
+    New(Option<VideoItem>),
+    /// Rename (playlist id, privacy kept as is).
+    Rename(String, String),
+}
+
+/// Modal list dialog ("Save to…", confirmations).
+struct Dialog {
+    title: String,
+    rows: Vec<DRow>,
+    sel: usize,
+    video: Option<VideoItem>,
+    /// playlist id -> Some(item id) when the video is in it; missing = unknown yet.
+    member: std::collections::HashMap<String, Option<String>>,
+    loading: bool,
+}
+
+#[derive(Clone)]
+struct DRow {
+    label: String,
+    act: DAct,
+}
+
+#[derive(Clone)]
+enum DAct {
+    Later,
+    Playlist(String),
+    New,
+    /// Confirmed: delete (playlist id, title).
+    DeletePlaylist(String, String),
+    Close,
 }
 
 pub enum Load {
@@ -75,6 +120,8 @@ pub enum Load {
     Watch(R<WatchInfo>),
     Comments(R<CommentBatch>),
     Replies(usize, R<CommentBatch>),
+    Playlists(R<Vec<MyPlaylist>>),
+    MyPlaylist(R<(MyPlaylist, Vec<PlItem>)>),
 }
 
 struct Tab {
@@ -105,6 +152,7 @@ enum Side {
     Subs,
     History,
     Later,
+    Playlists,
     Help,
     Account,
     Channel(String),
@@ -118,6 +166,7 @@ struct Geo {
     btns: Vec<(Rect, Btn)>,
     side: Vec<(Rect, usize)>,
     sugg: Vec<(Rect, usize)>,
+    dlg: Vec<(Rect, usize)>,
     mini: Option<Rect>,
     mini_bar: Option<Rect>,
     mini_btns: Vec<(Rect, MiniBtn)>,
@@ -145,6 +194,7 @@ pub struct App {
     chat: Option<Chat>,
     auth: Option<Arc<Auth>>,
     compose: Option<Compose>,
+    dialog: Option<Dialog>,
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
@@ -198,6 +248,7 @@ impl App {
             chat: None,
             auth: Auth::load().map(Arc::new),
             compose: None,
+            dialog: None,
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
@@ -320,6 +371,7 @@ impl App {
         };
         let watched: std::collections::HashSet<String> = self.store.history.iter().map(|h| h.video.id.clone()).collect();
         let subs: Vec<String> = self.store.subs.iter().map(|c| c.id.clone()).collect();
+        let self_auth = self.auth.clone();
         let Some(p) = self.find(uid) else { return };
         p.loading = true;
         p.error = None;
@@ -361,6 +413,22 @@ impl App {
                     send(Load::Feed(Ok(Feed { entries, cont: None })));
                 });
             }
+            Kind::Playlists { .. } => match self_auth.clone() {
+                Some(a) => {
+                    std::thread::spawn(move || send(Load::Playlists(s(a.playlists()))));
+                }
+                None => p.loading = false,
+            },
+            Kind::MyPlaylist { id, .. } => match self_auth.clone() {
+                Some(a) => {
+                    let id = id.clone();
+                    std::thread::spawn(move || send(Load::MyPlaylist(s(a.playlist_info(&id).and_then(|i| Ok((i, a.playlist_items(&id)?)))))));
+                }
+                None => {
+                    p.loading = false;
+                    p.error = Some("sign in to manage playlists".into());
+                }
+            },
             _ => p.loading = false,
         }
     }
@@ -411,6 +479,12 @@ impl App {
                 }
             }
             (Load::Channel(Ok(c)), Kind::Channel { page, .. }) => *page = Some(c),
+            (Load::Playlists(Ok(l)), Kind::Playlists { list }) => *list = Some(l),
+            (Load::MyPlaylist(Ok((i, it))), Kind::MyPlaylist { info, items, .. }) => {
+                *info = Some(i);
+                *items = it;
+            }
+            (Load::Playlists(Err(e)) | Load::MyPlaylist(Err(e)), _) => p.error = Some(e),
             (Load::Playlist(Ok(pl)), Kind::Playlist { page, .. }) => *page = Some(pl),
             (Load::Watch(Ok(info)), Kind::Watch(w)) => {
                 if let Some(t) = &info.comments_token {
@@ -629,6 +703,65 @@ impl App {
                     self.flash(format!("⚠ couldn't send: {e}"));
                 }
             },
+            Msg::DlgPlaylists(vid, r) => {
+                let Some(d) = self.dialog.as_mut().filter(|d| d.video.as_ref().is_some_and(|v| v.id == vid)) else { return };
+                d.loading = false;
+                match r {
+                    Ok(list) => {
+                        let keep_new = d.rows.pop();
+                        for p in &list {
+                            d.rows.push(DRow { label: format!("{} · {}", p.title, p.privacy), act: DAct::Playlist(p.id.clone()) });
+                        }
+                        d.rows.extend(keep_new);
+                        if let Some(auth) = self.auth.clone() {
+                            for p in list {
+                                let (tx, a, v) = (self.tx.clone(), auth.clone(), vid.clone());
+                                std::thread::spawn(move || {
+                                    let found = a.find_item(&p.id, &v).ok().flatten();
+                                    let _ = tx.send(Msg::DlgMember(v, p.id, found));
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => d.title = format!("Save to…  (⚠ {e})"),
+                }
+            }
+            Msg::DlgMember(vid, pl, item) => {
+                if let Some(d) = self.dialog.as_mut().filter(|d| d.video.as_ref().is_some_and(|v| v.id == vid)) {
+                    d.member.insert(pl, item);
+                }
+            }
+            Msg::DlgToggled(vid, pl, title, r) => match r {
+                Ok(item) => {
+                    let added = item.is_some();
+                    if let Some(d) = self.dialog.as_mut().filter(|d| d.video.as_ref().is_some_and(|v| v.id == vid)) {
+                        d.member.insert(pl, item);
+                    }
+                    self.flash(if added { format!("saved to {title}") } else { format!("removed from {title}") });
+                    self.reload_playlist_pages();
+                }
+                Err(e) => {
+                    if let Some(d) = self.dialog.as_mut() {
+                        d.member.remove(&pl);
+                    }
+                    self.flash(format!("⚠ {e}"));
+                }
+            },
+            Msg::PlDone(r) => {
+                match r {
+                    Ok(m) => {
+                        self.compose = None;
+                        self.flash(m);
+                    }
+                    Err(e) => {
+                        if let Some(c) = &mut self.compose {
+                            c.sending = false;
+                        }
+                        self.flash(format!("⚠ {e}"));
+                    }
+                }
+                self.reload_playlist_pages();
+            }
             Msg::Chat(id, u) => {
                 if let Some(c) = self.chat.as_mut().filter(|c| c.video == id) {
                     c.apply(u);
@@ -975,6 +1108,7 @@ impl App {
                     label,
                     sending: false,
                     chat: false,
+                    pl: None,
                 });
             }
             Act::SyncSubs => self.sync_subs(true),
@@ -995,6 +1129,80 @@ impl App {
                 });
             }
             Act::ChatSend => self.open_chat_compose(),
+            Act::SaveTo(v) => self.open_save_dialog(v),
+            Act::NewPlaylist => self.name_playlist(PlName::New(None)),
+            Act::OpenMyPlaylist(id) => self.navigate(Kind::MyPlaylist { id, info: None, items: Vec::new() }),
+            Act::PlPlayAll => {
+                if let Kind::MyPlaylist { items, .. } = &self.page().kind {
+                    let vids: Vec<VideoItem> = items.iter().map(|i| i.video.clone()).collect();
+                    if let Some(v) = vids.first().cloned() {
+                        self.open_video(v, vids, 0);
+                    }
+                }
+            }
+            Act::PlRename => {
+                if let Kind::MyPlaylist { id, info: Some(i), .. } = &self.page().kind {
+                    let (id, pv, title) = (id.clone(), i.privacy.clone(), i.title.clone());
+                    self.name_playlist(PlName::Rename(id, pv));
+                    if let Some(c) = &mut self.compose {
+                        c.text = title;
+                    }
+                }
+            }
+            Act::PlPrivacy => {
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                if let Kind::MyPlaylist { id, info: Some(i), .. } = &self.page().kind {
+                    let next = match i.privacy.as_str() {
+                        "private" => "unlisted",
+                        "unlisted" => "public",
+                        _ => "private",
+                    };
+                    let (id, title, tx) = (id.clone(), i.title.clone(), self.tx.clone());
+                    std::thread::spawn(move || {
+                        let r = auth.update_playlist(&id, &title, next).map(|_| format!("“{title}” is now {next}"));
+                        let _ = tx.send(Msg::PlDone(s(r)));
+                    });
+                }
+            }
+            Act::PlDelete => {
+                if let Kind::MyPlaylist { id, info: Some(i), .. } = &self.page().kind {
+                    let (id, title) = (id.clone(), i.title.clone());
+                    self.dialog = Some(Dialog {
+                        title: format!("Delete “{}”? This can't be undone.", page::trunc(&title, 50)),
+                        rows: vec![
+                            DRow { label: "Delete playlist".into(), act: DAct::DeletePlaylist(id, title) },
+                            DRow { label: "Cancel".into(), act: DAct::Close },
+                        ],
+                        sel: 1,
+                        video: None,
+                        member: Default::default(),
+                        loading: false,
+                    });
+                }
+            }
+            Act::PlMove(idx, delta) => {
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                if let Kind::MyPlaylist { id, items, .. } = &self.page().kind {
+                    let Some(it) = items.get(idx).cloned() else { return };
+                    let pos = (it.position as i64 + delta).clamp(0, items.len() as i64 - 1) as u64;
+                    let (id, tx) = (id.clone(), self.tx.clone());
+                    std::thread::spawn(move || {
+                        let r = auth.move_item(&id, &it, pos).map(|_| format!("moved “{}”", it.video.title));
+                        let _ = tx.send(Msg::PlDone(s(r)));
+                    });
+                }
+            }
+            Act::PlRemove(idx) => {
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                if let Kind::MyPlaylist { items, .. } = &self.page().kind {
+                    let Some(it) = items.get(idx).cloned() else { return };
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        let r = auth.remove_item(&it.item_id).map(|_| format!("removed “{}”", it.video.title));
+                        let _ = tx.send(Msg::PlDone(s(r)));
+                    });
+                }
+            }
             Act::SignOut => {
                 if let Some(a) = self.auth.take() {
                     std::thread::spawn(move || a.sign_out());
@@ -1006,6 +1214,96 @@ impl App {
                 self.store.history.clear();
                 self.store_changed();
                 self.flash("history cleared");
+            }
+        }
+    }
+
+    fn reload_playlist_pages(&mut self) {
+        let uids: Vec<u64> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.pages.iter())
+            .filter(|p| matches!(p.kind, Kind::Playlists { .. } | Kind::MyPlaylist { .. }))
+            .map(|p| p.uid)
+            .collect();
+        for uid in uids {
+            self.load(uid);
+        }
+    }
+
+    fn open_save_dialog(&mut self, v: VideoItem) {
+        let mut rows = vec![DRow { label: "Watch later (ytui)".into(), act: DAct::Later }];
+        let signed_in = self.auth.is_some();
+        rows.push(DRow { label: if signed_in { "+ New playlist".into() } else { "Sign in to save to your YouTube playlists".into() }, act: DAct::New });
+        let title = format!("Save “{}” to…", page::trunc(&v.title, 50));
+        self.dialog = Some(Dialog { title, rows, sel: 0, video: Some(v.clone()), member: Default::default(), loading: signed_in });
+        if let Some(auth) = self.auth.clone() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::DlgPlaylists(v.id.clone(), s(auth.playlists())));
+            });
+        }
+    }
+
+    fn name_playlist(&mut self, what: PlName) {
+        if self.auth.is_none() {
+            return self.need_sign_in();
+        }
+        let label = match &what {
+            PlName::New(Some(v)) => format!("New playlist (will add “{}”) · created private", page::trunc(&v.title, 40)),
+            PlName::New(None) => "New playlist name · created private".into(),
+            PlName::Rename(..) => "Rename playlist".into(),
+        };
+        self.compose = Some(Compose { uid: self.page().uid, video: String::new(), parent: None, label, text: String::new(), sending: false, chat: false, pl: Some(what) });
+    }
+
+    /// Activate dialog row `i`.
+    fn dialog_pick(&mut self, i: usize) {
+        let Some(d) = &self.dialog else { return };
+        let Some(row) = d.rows.get(i).cloned() else { return };
+        let video = d.video.clone();
+        match row.act {
+            DAct::Close => self.dialog = None,
+            DAct::Later => {
+                if let Some(v) = video {
+                    self.activate(Act::ToggleLater(v), None, 0, 0);
+                }
+            }
+            DAct::New => {
+                self.dialog = None;
+                if self.auth.is_none() {
+                    return self.need_sign_in();
+                }
+                self.name_playlist(PlName::New(video));
+            }
+            DAct::Playlist(pl) => {
+                let (Some(v), Some(auth)) = (video, self.auth.clone()) else { return };
+                let Some(state) = self.dialog.as_ref().and_then(|d| d.member.get(&pl).cloned()) else {
+                    self.flash("still checking that playlist…");
+                    return;
+                };
+                let title = row.label.rsplit_once(" · ").map(|x| x.0.to_string()).unwrap_or(row.label.clone());
+                if let Some(d) = &mut self.dialog {
+                    d.member.remove(&pl); // shows "…" until the call returns
+                }
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let r = match state {
+                        Some(item) => auth.remove_item(&item).map(|_| None),
+                        None => auth.add_to_playlist(&pl, &v.id).map(Some),
+                    };
+                    let _ = tx.send(Msg::DlgToggled(v.id, pl, title, s(r)));
+                });
+            }
+            DAct::DeletePlaylist(id, title) => {
+                self.dialog = None;
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                let tx = self.tx.clone();
+                self.back();
+                std::thread::spawn(move || {
+                    let r = auth.delete_playlist(&id).map(|_| format!("deleted “{title}”"));
+                    let _ = tx.send(Msg::PlDone(s(r)));
+                });
             }
         }
     }
@@ -1053,6 +1351,7 @@ impl App {
             text: String::new(),
             sending: false,
             chat: true,
+            pl: None,
         });
     }
 
@@ -1068,6 +1367,25 @@ impl App {
             return;
         }
         c.sending = true;
+        if let Some(what) = c.pl.clone() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let r = match what {
+                    PlName::New(v) => auth.create_playlist(&text, "private").and_then(|id| {
+                        if let Some(v) = &v {
+                            auth.add_to_playlist(&id, &v.id)?;
+                        }
+                        Ok(match v {
+                            Some(v) => format!("created “{text}” and saved “{}”", v.title),
+                            None => format!("created “{text}”"),
+                        })
+                    }),
+                    PlName::Rename(id, pv) => auth.update_playlist(&id, &text, &pv).map(|_| format!("renamed to “{text}”")),
+                };
+                let _ = tx.send(Msg::PlDone(s(r)));
+            });
+            return;
+        }
         if c.chat {
             let (video, tx) = (c.video.clone(), self.tx.clone());
             std::thread::spawn(move || {
@@ -1134,6 +1452,7 @@ impl App {
             ("▤  Subscriptions".to_string(), Side::Subs),
             ("↺  History".to_string(), Side::History),
             ("◷  Watch later".to_string(), Side::Later),
+            ("≡  Playlists".to_string(), Side::Playlists),
             ("?  Help".to_string(), Side::Help),
             (if self.auth.is_some() { "@  Account ✓".to_string() } else { "@  Sign in".to_string() }, Side::Account),
         ];
@@ -1150,6 +1469,7 @@ impl App {
             Side::Subs => Kind::Subs { feed: Feed::default() },
             Side::History => Kind::History,
             Side::Later => Kind::Later,
+            Side::Playlists => Kind::Playlists { list: None },
             Side::Help => Kind::Help,
             Side::Account => Kind::Account,
             Side::Channel(id) => Kind::Channel { id, params: None, page: None },
@@ -1223,6 +1543,18 @@ impl App {
                     return;
                 }
                 p.toggle_pause();
+            }
+            return;
+        }
+        if self.dialog.is_some() {
+            match self.geo.dlg.iter().find(|(r, _)| hit(r)).map(|x| x.1) {
+                Some(i) => {
+                    if let Some(d) = &mut self.dialog {
+                        d.sel = i;
+                    }
+                    self.dialog_pick(i);
+                }
+                None => self.dialog = None,
             }
             return;
         }
@@ -1395,6 +1727,20 @@ impl App {
             self.quit = true;
             return;
         }
+        // Dialog
+        if let Some(d) = &mut self.dialog {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.dialog = None,
+                KeyCode::Up | KeyCode::Char('k') => d.sel = d.sel.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => d.sel = (d.sel + 1).min(d.rows.len().saturating_sub(1)),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let i = d.sel;
+                    self.dialog_pick(i);
+                }
+                _ => {}
+            }
+            return;
+        }
         // Comment composer
         if let Some(c) = &mut self.compose {
             if c.sending {
@@ -1559,6 +1905,16 @@ impl App {
                 }
             }
             KeyCode::Char('I') => self.open_chat_compose(),
+            KeyCode::Char('P') => {
+                let v = match self.focused() {
+                    Some(Act::Video(v)) => Some(v),
+                    Some(Act::QueueVideo(l, i)) => Some(l[i].clone()),
+                    _ => self.current_watch_video().map(|x| x.0).or(self.player.as_ref().map(|p| p.video.clone())),
+                };
+                if let Some(v) = v {
+                    self.open_save_dialog(v);
+                }
+            }
             KeyCode::Char('C') => {
                 self.store.show_chat = !self.store.show_chat;
                 self.store_changed();
@@ -1695,6 +2051,51 @@ impl App {
         if self.compose.is_some() {
             self.draw_compose(buf, area);
         }
+        if self.dialog.is_some() {
+            self.draw_dialog(buf, area);
+        }
+    }
+
+    fn draw_dialog(&mut self, buf: &mut Buffer, area: Rect) {
+        let Some(d) = &self.dialog else { return };
+        let later = d.video.as_ref().is_some_and(|v| self.store.later.iter().any(|x| x.id == v.id));
+        let w = area.width.saturating_sub(8).min(70);
+        let rows = d.rows.len().min(area.height as usize - 8);
+        let h = rows as u16 + 4 + d.loading as u16;
+        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + area.height.saturating_sub(h) / 2, width: w, height: h };
+        fill(buf, area, r.x, (r.y - area.y) as i64, w, h, Color::Rgb(30, 30, 38));
+        let border = Style::default().fg(ACCENT);
+        for x in r.x..r.x + w {
+            buf[(x, r.y)].set_char('─').set_style(border);
+            buf[(x, r.y + h - 1)].set_char('─').set_style(border);
+        }
+        buf.set_string(r.x + 2, r.y, format!(" {} ", page::trunc(&d.title, w as usize - 6)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        let mut y = r.y + 2;
+        let first = d.sel.saturating_sub(rows.saturating_sub(1));
+        for (i, row) in d.rows.iter().enumerate().skip(first).take(rows) {
+            let mark = match &row.act {
+                DAct::Later => if later { "[✓] " } else { "[ ] " }.to_string(),
+                DAct::Playlist(id) => match d.member.get(id) {
+                    Some(Some(_)) => "[✓] ".into(),
+                    Some(None) => "[ ] ".into(),
+                    None => "[…] ".into(),
+                },
+                _ => "    ".into(),
+            };
+            let sel = i == d.sel;
+            let style = if sel { Style::default().fg(Color::White).bg(ACCENT) } else { Style::default().fg(Color::Rgb(225, 225, 225)) };
+            let line = Rect { x: r.x + 1, y, width: w - 2, height: 1 };
+            if sel {
+                buf.set_style(line, style);
+            }
+            buf.set_string(r.x + 2, y, page::trunc(&format!("{mark}{}", row.label), w as usize - 4), style);
+            self.geo.dlg.push((line, i));
+            y += 1;
+        }
+        if d.loading {
+            buf.set_string(r.x + 2, y, "loading your playlists…", Style::default().fg(DIM));
+        }
+        buf.set_string(r.x + 2, r.y + h - 2, "↑↓ choose · Enter toggle · Esc close", Style::default().fg(DIM));
     }
 
     fn draw_compose(&self, buf: &mut Buffer, area: Rect) {
@@ -1807,8 +2208,9 @@ impl App {
             Kind::Subs { .. } => 1,
             Kind::History => 2,
             Kind::Later => 3,
-            Kind::Help => 4,
-            Kind::Account => 5,
+            Kind::Playlists { .. } | Kind::MyPlaylist { .. } => 4,
+            Kind::Help => 5,
+            Kind::Account => 6,
             _ => usize::MAX,
         };
         let cur_channel = match &self.page().kind {
@@ -1817,7 +2219,7 @@ impl App {
         };
         let mut y = r.y + 1;
         for (i, (label, item)) in items.iter().enumerate() {
-            if i == 6 {
+            if i == 7 {
                 y += 1;
                 if y < r.y + r.height {
                     buf.set_string(r.x + 2, y, "SUBSCRIPTIONS", Style::default().fg(DIM).add_modifier(Modifier::BOLD));

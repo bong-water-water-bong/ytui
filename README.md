@@ -44,7 +44,8 @@ It works like a browser for YouTube:
 - **Mouse**: click anything, wheel to scroll, click the progress bar to seek
 
 - **Sign in** (optional) to like / dislike videos, comment and reply, send live chat
-  messages, and sync subscriptions with your YouTube account, using Google's official OAuth
+  messages, save videos to playlists and manage your playlists, and sync subscriptions with
+  your YouTube account, using Google's official OAuth
   and the YouTube Data API (see below)
 
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
@@ -69,6 +70,12 @@ Signed in, your YouTube subscriptions are synced at startup and on the Subscript
 Subscribe / Unsubscribe change them on YouTube. Channels you subscribed to in ytui before
 signing in stay local until you press "Upload … to YouTube" there. Live chat gets a
 "Say something…" box (or press `I`).
+
+**Playlists**: `≡+ Save` on a video (or `P` on any focused video) opens *Save to…* with your
+playlists ticked where the video already is; tick/untick to add/remove, or create a new one.
+The **Playlists** page in the sidebar lists your playlists; each one has Play all, Rename,
+Privacy (private → unlisted → public), Delete, and ↑ ↓ ✕ on every video. YouTube's own
+"Watch later" isn't available through the API, so ytui's Watch later stays local.
 
 While the OAuth app is in *Testing*, Google expires the sign-in after 7 days (run `ytui --login`
 again, or publish the app). The free quota is 10,000 units/day; a like or comment costs 50.
@@ -103,6 +110,7 @@ and the nearest glyph wins.
 | `,` `.` / `<` `>` / `0`–`9` | seek 10 s / 60 s / jump |
 | `+` `-` `M` | volume up / down, mute |
 | `C` `I` | show / hide live chat, send a chat message |
+| `P` | save the focused / current video to a playlist |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |

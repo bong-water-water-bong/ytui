@@ -5,6 +5,7 @@
 //! between them, like a browser.
 
 use crate::api::{ChannelPage, Comment, Entry, Feed, Item, PlaylistPage, VideoItem, WatchInfo};
+use crate::auth::{MyPlaylist, PlItem};
 use crate::store::Store;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,6 +69,10 @@ pub enum Kind {
     Later,
     Help,
     Account,
+    /// Your playlists (signed in).
+    Playlists { list: Option<Vec<MyPlaylist>> },
+    /// One of your playlists, managed through the Data API.
+    MyPlaylist { id: String, info: Option<MyPlaylist>, items: Vec<PlItem> },
 }
 
 /// Per-draw context that isn't part of the page itself.
@@ -111,6 +116,8 @@ impl Page {
             Kind::Later => "Watch later".into(),
             Kind::Help => "Help".into(),
             Kind::Account => "Account".into(),
+            Kind::Playlists { .. } => "Playlists".into(),
+            Kind::MyPlaylist { info, .. } => info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| "Playlist".into()),
         }
     }
 
@@ -126,6 +133,8 @@ impl Page {
             Kind::Later => "ytui://watch-later".into(),
             Kind::Help => "ytui://help".into(),
             Kind::Account => "ytui://account".into(),
+            Kind::Playlists { .. } => "ytui://playlists".into(),
+            Kind::MyPlaylist { id, .. } => format!("youtube.com/playlist?list={id}"),
         }
     }
 
@@ -173,6 +182,17 @@ pub enum Act {
     UploadSubs,
     /// Open the composer to send a live chat message.
     ChatSend,
+    /// "Save to…" dialog for a video.
+    SaveTo(VideoItem),
+    NewPlaylist,
+    OpenMyPlaylist(String),
+    PlPlayAll,
+    PlRename,
+    PlPrivacy,
+    PlDelete,
+    /// Move item idx by -1 / +1.
+    PlMove(usize, i64),
+    PlRemove(usize),
 }
 
 #[derive(Clone)]
@@ -714,6 +734,76 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
             let entries: Vec<Entry> = store.later.iter().map(|v| Entry::Item(Item::Video(v.clone()))).collect();
             y = b.list(y, iw, &entries, true);
         }
+        Kind::Playlists { list } => {
+            b.line(1, y, vec![Span::styled("Your playlists", bold)]);
+            if ctx.account.is_some() {
+                b.button(iw.saturating_sub(16), y, "+ New playlist", Act::NewPlaylist, true);
+            }
+            y += 2;
+            if ctx.account.is_none() {
+                b.line(1, y, vec![Span::styled("Sign in to see and manage your YouTube playlists (see the Account page).".to_string(), st(META))]);
+                y += 2;
+            } else if let Some(e) = &page.error {
+                b.line(1, y, vec![Span::styled(format!("⚠ {e}"), st(ACCENT))]);
+                y += 2;
+            } else if page.loading || list.is_none() {
+                b.line(1, y, vec![Span::styled("Loading…".to_string(), st(META))]);
+                y += 2;
+            } else if list.as_ref().is_some_and(|l| l.is_empty()) {
+                b.line(1, y, vec![Span::styled("No playlists yet. Create one, or use ≡+ Save on any video.".to_string(), st(META))]);
+                y += 2;
+            }
+            let tw = (iw * 30 / 100).clamp(16, 36);
+            let th = ((tw as f32) * 0.28125).round() as u16;
+            for p in list.iter().flatten() {
+                match &p.thumb {
+                    Some(u) => b.prims.push(Prim::Image { x: 1, y, w: tw, h: th, url: u.clone(), badge: Some((format!(" ▤ {} ", p.count), Color::Black)), progress: None }),
+                    None => b.prims.push(Prim::Fill { x: 1, y, w: tw, h: th, color: PANEL }),
+                }
+                let tx = 1 + tw + 2;
+                let ww = iw.saturating_sub(tw + 2);
+                b.para(tx, y, ww, &p.title, bold, 2);
+                b.line(tx, y + 2, vec![Span::styled(format!("{} videos · {}", p.count, p.privacy), st(META))]);
+                b.tgt(1, y, iw, th, Act::OpenMyPlaylist(p.id.clone()));
+                y += th as usize + 1;
+            }
+        }
+        Kind::MyPlaylist { info, items, .. } => {
+            match info {
+                Some(i) => {
+                    y += b.para(1, y, iw, &i.title, bold, 2);
+                    b.line(1, y, vec![Span::styled(format!("{} videos · {} · your playlist", i.count, i.privacy), st(META))]);
+                    y += 2;
+                    let mut bx = 1;
+                    bx += b.button(bx, y, "▶ Play all", Act::PlPlayAll, true) + 1;
+                    bx += b.button(bx, y, "Rename", Act::PlRename, false) + 1;
+                    bx += b.button(bx, y, &format!("Privacy: {}", i.privacy), Act::PlPrivacy, false) + 1;
+                    b.button(bx, y, "Delete playlist", Act::PlDelete, false);
+                    y += 2;
+                }
+                None => {}
+            }
+            y = b.status(y, page, "This playlist is empty.", !items.is_empty());
+            let tw = (iw * 35 / 100).clamp(16, 44);
+            let vids: Vec<VideoItem> = items.iter().map(|i| i.video.clone()).collect();
+            for (idx, it) in items.iter().enumerate() {
+                let h = b.list_card(1, y, iw - 1, tw, &Item::Video(it.video.clone()), &vids, Some(format!("{}. ", idx + 1))).max(3);
+                // Leave the card's last row to the item buttons.
+                if let Some(t) = b.tg.last_mut() {
+                    t.h = (h as u16 - 1).max(1);
+                }
+                let by = y + h - 1;
+                let mut bx = 1 + tw + 2;
+                if idx > 0 {
+                    bx += b.button(bx, by, "↑", Act::PlMove(idx, -1), false) + 1;
+                }
+                if idx + 1 < items.len() {
+                    bx += b.button(bx, by, "↓", Act::PlMove(idx, 1), false) + 1;
+                }
+                b.button(bx, by, "✕ Remove", Act::PlRemove(idx), false);
+                y += h + 1;
+            }
+        }
         Kind::Account => {
             match &ctx.account {
                 Some(name) => {
@@ -808,7 +898,8 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, ctx: &Ctx) 
             v.title = i.title.clone();
             v.channel = i.channel.clone();
         }
-        bx += b.button(bx, y, if saved { "✓ Saved" } else { "+ Watch later" }, Act::ToggleLater(v), false) + 1;
+        bx += b.button(bx, y, if saved { "✓ Saved" } else { "+ Watch later" }, Act::ToggleLater(v.clone()), false) + 1;
+        bx += b.button(bx, y, "≡+ Save", Act::SaveTo(v), false) + 1;
         let rating = wt.rating.as_deref().unwrap_or("none");
         let likes = if i.likes.is_empty() { "Like".to_string() } else { i.likes.clone() };
         bx += b.button(bx, y, &format!("▲ {likes}"), Act::Rate("like".into()), rating == "like");
@@ -995,6 +1086,7 @@ Keys — player (anywhere while something is playing)
   composer: Enter posts, Alt-Enter new line, Esc cancels, paste works
   + -              volume up / down (0-150%)        M                mute
   C                show / hide live chat            I                send a live chat message (signed in)
+  P                save the focused / current video to a playlist (signed in)
   m                cycle render mode
   [ ] { }          ascii contrast / edges
   click the progress bar to seek; click the miniplayer to return to the video
