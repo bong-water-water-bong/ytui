@@ -84,7 +84,11 @@ struct Shared {
     done: AtomicBool,
     err: Mutex<String>,
     audio_failed: AtomicBool,
+    /// Newest mono samples (48 kHz) for the visualiser.
+    pcm: Mutex<std::collections::VecDeque<f32>>,
 }
+
+const PCM_KEEP: usize = 4096;
 
 /// Have the kernel kill the child if ytui dies (terminal closed, SIGKILL),
 /// so ffmpeg / audio players never outlive us.
@@ -182,17 +186,30 @@ impl NonBlock for std::fs::OpenOptions {
 /// Volume as f32 bits, shared with the audio thread.
 pub type Volume = Arc<AtomicU32>;
 
-/// Read PCM from the fifo, scale by the volume, feed the sink. If the sink
-/// dies, keep draining so video carries on.
-fn audio_pump(fifo: PathBuf, mut sink: Command, vol: Volume, sh: Arc<Shared>) {
+/// Read PCM from the fifo, keep a copy for the visualiser, scale by the
+/// volume, feed the sink (if any). If the sink dies, keep draining so video
+/// carries on.
+fn audio_pump(fifo: PathBuf, sink: Option<Command>, vol: Volume, sh: Arc<Shared>) {
     std::thread::spawn(move || {
         let Ok(mut f) = std::fs::File::open(&fifo) else { return };
-        let mut child = sink.spawn().ok();
-        if child.is_none() {
+        let had_sink = sink.is_some();
+        let mut child = sink.and_then(|mut s| s.spawn().ok());
+        if had_sink && child.is_none() {
             sh.audio_failed.store(true, Ordering::Relaxed);
         }
         let mut buf = vec![0u8; 4096];
         while f.read_exact(&mut buf).is_ok() {
+            {
+                let mut pcm = sh.pcm.lock().unwrap();
+                for fr in buf.chunks_exact(4) {
+                    let l = i16::from_le_bytes([fr[0], fr[1]]) as f32;
+                    let r = i16::from_le_bytes([fr[2], fr[3]]) as f32;
+                    pcm.push_back((l + r) / 65536.0);
+                }
+                while pcm.len() > PCM_KEEP {
+                    pcm.pop_front();
+                }
+            }
             let g = f32::from_bits(vol.load(Ordering::Relaxed));
             if (g - 1.0).abs() > 1e-3 {
                 for s in buf.chunks_exact_mut(2) {
@@ -232,13 +249,14 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         cmd.args(["-readrate", "1", "-i", url]);
     };
     input(&mut cmd, &s.video_url);
-    let audio_map = match (opts.audio, &s.audio_url) {
-        (Audio::None, _) => None,
-        (_, Some(a)) => {
+    // Audio is always decoded when the stream has it: played through the
+    // sink, or (sound off) only analysed for the visualiser.
+    let audio_map = match &s.audio_url {
+        Some(a) => {
             input(&mut cmd, a);
             Some("1:a:0")
         }
-        (_, None) => Some("0:a:0?"),
+        None => Some("0:a:0?"),
     };
     cmd.args(["-map", "0:v:0", "-vf"])
         .arg(format!("fps={fps:.3},scale={pw}:{ph}:flags=area,format=rgb24"))
@@ -247,11 +265,16 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
     let mut sink = None;
     if let Some(m) = audio_map {
         cmd.args(["-map", m]);
-        match (sink_cmd(opts.audio), make_fifo()) {
-            (Some(c), Some(f)) => {
+        let player = sink_cmd(opts.audio);
+        let raw_ok = player.is_some() || opts.audio == Audio::None;
+        match (raw_ok, make_fifo()) {
+            (true, Some(f)) => {
                 cmd.args(["-f", "s16le", "-ac", "2", "-ar", "48000", "-y"]).arg(&f);
-                sink = Some(c);
+                sink = player;
                 fifo = Some(f);
+            }
+            _ if opts.audio == Audio::None => {
+                cmd.args(["-f", "null", "-"]);
             }
             _ => {
                 // No raw player available: ffmpeg plays it, volume fixed per segment.
@@ -272,9 +295,10 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         done: AtomicBool::new(false),
         err: Mutex::new(String::new()),
         audio_failed: AtomicBool::new(false),
+        pcm: Mutex::new(std::collections::VecDeque::with_capacity(PCM_KEEP)),
     });
-    if let (Some(f), Some(c)) = (&fifo, sink) {
-        audio_pump(f.clone(), c, vol.clone(), sh.clone());
+    if let Some(f) = &fifo {
+        audio_pump(f.clone(), sink, vol.clone(), sh.clone());
     }
     let (mut stdout, mut stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let size = pw * ph * 3;
@@ -420,6 +444,11 @@ impl Player {
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
         self.apply_volume();
+    }
+
+    /// Newest mono samples for the visualiser (empty when there's no audio).
+    pub fn samples(&self) -> Vec<f32> {
+        self.dec.as_ref().map(|d| d.sh.pcm.lock().unwrap().iter().copied().collect()).unwrap_or_default()
     }
 
     pub fn set_term(&mut self, cols: usize, rows: usize) {

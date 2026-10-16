@@ -6,6 +6,9 @@
 use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
 use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
+use crate::engine3d::Engine;
+use crate::glyphs::{CH as GH, CW as GW};
+use crate::scenes::{Analyzer, Kind as SceneKind, Orbit, Scenes};
 use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Mode, Renderer};
@@ -195,6 +198,14 @@ pub struct App {
     auth: Option<Arc<Auth>>,
     compose: Option<Compose>,
     dialog: Option<Dialog>,
+    /// 3D audio visualiser instead of the video picture.
+    viz: bool,
+    engine3d: Engine,
+    scenes: Scenes,
+    analyzer: Analyzer,
+    viz_cells: Vec<Cell>,
+    viz_last: Instant,
+    t0: Instant,
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
@@ -249,6 +260,13 @@ impl App {
             auth: Auth::load().map(Arc::new),
             compose: None,
             dialog: None,
+            viz: false,
+            engine3d: Engine::new(),
+            scenes: Scenes::new(),
+            analyzer: Analyzer::default(),
+            viz_cells: Vec::new(),
+            viz_last: Instant::now(),
+            t0: Instant::now(),
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
@@ -1905,6 +1923,10 @@ impl App {
                 }
             }
             KeyCode::Char('I') => self.open_chat_compose(),
+            KeyCode::Char('V') => {
+                self.viz = !self.viz;
+                self.flash(if self.viz { "3D visualiser on (V to switch back to video)" } else { "video" });
+            }
             KeyCode::Char('P') => {
                 let v = match self.focused() {
                     Some(Act::Video(v)) => Some(v),
@@ -2318,9 +2340,26 @@ impl App {
                     match mine {
                         Some(p) => {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
-                            match p.cells(&mut self.renderer, pw as usize, *h as usize) {
-                                Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
-                                None => center_text(buf, r, r.x + x, sy, pw, *h, "Loading video…"),
+                            if self.viz {
+                                let t = self.t0.elapsed().as_secs_f32();
+                                let samples = p.samples();
+                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
+                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
+                            } else {
+                                match p.cells(&mut self.renderer, pw as usize, *h as usize) {
+                                    Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
+                                    None => {
+                                        // Connecting: keep the 3D logo spinning until the first frame.
+                                        let t = self.t0.elapsed().as_secs_f32();
+                                        render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
+                                        blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
+                                        let msg = " Loading video… ";
+                                        let y = sy + *h as i64 - 2;
+                                        if y >= 0 && y < vh as i64 {
+                                            buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+                                        }
+                                    }
+                                }
                             }
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
@@ -2329,13 +2368,25 @@ impl App {
                             }
                         }
                         None => {
-                            let url = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
-                            let (cw, ch, ox, oy) = fit(16.0 / 9.0, pw as usize, *h as usize);
-                            if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16, &mut self.renderer) {
-                                blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
+                            let loading = pending_id.as_deref() == Some(id.as_str());
+                            if loading {
+                                // Spinning 3D logo while the stream resolves.
+                                let t = self.t0.elapsed().as_secs_f32();
+                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
+                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
+                                let msg = " Loading video… ";
+                                let y = sy + *h as i64 - 2;
+                                if y >= 0 && y < vh as i64 {
+                                    buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+                                }
+                            } else {
+                                let url = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
+                                let (cw, ch, ox, oy) = fit(16.0 / 9.0, pw as usize, *h as usize);
+                                if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16, &mut self.renderer) {
+                                    blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
+                                }
+                                center_text(buf, r, r.x + x, sy, pw, *h, " ▶  Enter / click to play ");
                             }
-                            let msg = if pending_id.as_deref() == Some(id.as_str()) { " Loading video… " } else { " ▶  Enter / click to play " };
-                            center_text(buf, r, r.x + x, sy, pw, *h, msg);
                         }
                     }
                 }
@@ -2395,7 +2446,12 @@ impl App {
         let r = Rect { x: pr.x + pr.width - mw - 1, y: pr.y + pr.height - h, width: mw, height: h };
         fill(buf, pr, r.x.saturating_sub(1).max(pr.x), (r.y - pr.y) as i64, mw + 1, h, Color::Rgb(20, 20, 24));
         fill(buf, r, r.x, 0, mw, vh, Color::Black);
-        if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
+        if self.viz {
+            let t = self.t0.elapsed().as_secs_f32();
+            let samples = p.samples();
+            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, mw as usize, vh as usize, &mut self.viz_cells);
+            blit(buf, r, r.x, 0, &self.viz_cells, mw as usize, vh as usize);
+        } else if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
@@ -2429,9 +2485,16 @@ impl App {
         let side = self.store.show_chat && self.chat.as_ref().is_some_and(|c| c.video == p.video.id) && area.width >= 100;
         let vw = if side { area.width - 44 } else { area.width };
         let varea = Rect { width: vw, ..area };
-        match p.cells(&mut self.renderer, vw as usize, vh as usize) {
-            Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
-            None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
+        if self.viz {
+            let t = self.t0.elapsed().as_secs_f32();
+            let samples = p.samples();
+            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, vw as usize, vh as usize, &mut self.viz_cells);
+            blit(buf, varea, area.x, 0, &self.viz_cells, vw as usize, vh as usize);
+        } else {
+            match p.cells(&mut self.renderer, vw as usize, vh as usize) {
+                Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
+                None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
+            }
         }
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
@@ -2503,7 +2566,7 @@ impl App {
             while let Ok(m) = rx.try_recv() {
                 self.on_msg(m);
             }
-            let fresh = self.player.as_mut().is_some_and(|p| p.tick());
+            let fresh = self.player.as_mut().is_some_and(|p| p.tick()) || self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading());
             self.after_tick();
             // Infinite scroll: fetch more when the viewport nears the end.
             if !self.fullscreen {
@@ -2543,6 +2606,39 @@ impl App {
         self.store.save();
         Ok(())
     }
+}
+
+/// Render a 3D scene into `out` (w x h cells) through the glyph renderer,
+/// with settings suited to 3D (dark crush, colour-value density, classic
+/// ASCII in place of the two-tone mode).
+#[allow(clippy::too_many_arguments)]
+fn render_viz(
+    engine: &mut Engine,
+    scenes: &Scenes,
+    analyzer: &mut Analyzer,
+    r: &mut Renderer,
+    samples: &[f32],
+    kind: SceneKind,
+    t: f32,
+    last: &mut Instant,
+    w: usize,
+    h: usize,
+    out: &mut Vec<Cell>,
+) {
+    let dt = last.elapsed().as_secs_f32().clamp(0.0, 0.2);
+    *last = Instant::now();
+    analyzer.update(samples, dt);
+    let bands: &[f32] = if samples.is_empty() { &[] } else { &analyzer.bands };
+    let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
+    let px = engine.render(&scene, &cam, w * GW, h * GH);
+    let saved = (r.mode, r.black, r.value_density);
+    if r.mode == Mode::Ascii {
+        r.mode = Mode::Classic;
+    }
+    r.black = 0.2;
+    r.value_density = true;
+    r.render(&crate::render::Img { w: w * GW, h: h * GH, px }, w, h, out);
+    (r.mode, r.black, r.value_density) = saved;
 }
 
 fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize, h: usize) {

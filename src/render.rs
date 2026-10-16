@@ -67,6 +67,12 @@ pub struct Renderer {
     pub glob_exp: f32,
     /// Two-tone ASCII: cells whose luminance range is below this are flat.
     pub flat: f32,
+    /// Classic ASCII: luminance at or below this is empty space (the rest is
+    /// rescaled). Used for 3D scenes so dim floors / fog don't become noise.
+    pub black: f32,
+    /// Classic ASCII: glyph density from the brightest channel instead of
+    /// luminance, so saturated colours (a red object) still get solid glyphs.
+    pub value_density: bool,
     pub glyphs: Glyphs,
     inner: Vec<Vec<(i32, i32)>>,
     outer: Vec<Vec<(i32, i32)>>,
@@ -110,6 +116,8 @@ impl Renderer {
             dir_exp: 2.5,
             glob_exp: 1.8,
             flat: 0.10,
+            black: 0.0,
+            value_density: false,
             glyphs,
             inner,
             outer,
@@ -154,8 +162,14 @@ impl Renderer {
     fn ascii(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell], relative: bool) {
         let (w, h) = (img.w, img.h);
         self.lum.resize(w * h, 0.0);
+        let (black, scale) = if relative { (0.0, 1.0) } else { (self.black, 1.0 / (1.0 - self.black).max(0.05)) };
         for (i, p) in img.px[..w * h * 3].chunks_exact(3).enumerate() {
-            self.lum[i] = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+            let l = if self.value_density && !relative {
+                p[0].max(p[1]).max(p[2]) as f32 / 255.0
+            } else {
+                (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
+            };
+            self.lum[i] = ((l - black) * scale).max(0.0);
         }
         if self.cache.len() > 1 << 21 {
             self.cache.clear();

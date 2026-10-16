@@ -2,10 +2,13 @@ mod api;
 mod app;
 mod auth;
 mod chat;
+mod demo;
+mod engine3d;
 mod glyphs;
 mod page;
 mod player;
 mod render;
+mod scenes;
 mod store;
 mod term;
 mod thumbs;
@@ -31,6 +34,7 @@ USAGE:
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
   ytui --help-login             how to create the Google OAuth client
+  ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
 
 OPTIONS:
   --mode M       ascii | classic | sextant | quadrant | halfblock | braille
@@ -51,6 +55,7 @@ fn main() -> Result<()> {
     let mut snapshot: Option<String> = None;
     let mut import: Option<String> = None;
     let mut login = false;
+    let mut demo: Option<String> = None;
     let mut client: Option<String> = None;
     let mut at = 0.0;
     let (mut scols, mut srows) = (None, None);
@@ -80,6 +85,7 @@ fn main() -> Result<()> {
             "--snapshot" => snapshot = Some(val("--snapshot")?),
             "--import-subs" => import = Some(val("--import-subs")?),
             "--login" => login = true,
+            "--demo3d" => demo = Some(args.next().unwrap_or_default()),
             "--client" => client = Some(val("--client")?),
             "--logout" => return auth::logout(),
             "--help-login" => {
@@ -106,6 +112,19 @@ fn main() -> Result<()> {
     }
 
     let mut renderer = Renderer::new(mode.unwrap_or(Mode::Ascii));
+
+    if let (Some(d), Ok(path)) = (&demo, std::env::var("YTUI_3D_DUMP")) {
+        let kind = scenes::Kind::parse(d).unwrap_or(scenes::Kind::Logo);
+        let t = std::env::var("YTUI_3D_T").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+        return demo::dump(kind, t, 1080, 588, &path);
+    }
+    if let Some(d) = demo {
+        let kind = scenes::Kind::parse(&d).unwrap_or(scenes::Kind::Logo);
+        if mode.is_none() {
+            renderer.mode = Mode::Classic;
+        }
+        return demo::run(kind, renderer);
+    }
 
     if let Some(src) = snapshot {
         let (tc, tr) = crossterm::terminal::size().map(|(c, r)| (c as usize, r as usize)).unwrap_or((100, 30));

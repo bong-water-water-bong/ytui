@@ -36,6 +36,8 @@ It works like a browser for YouTube:
 - **Live chat** on live streams and **chat replay** on past streams, synced to the playhead
   (also beside the video in fullscreen)
 - **Volume control** (0–150%, mute), applied live without restarting playback
+- **3D audio visualiser** (`V`) in place of the video, driven by the real audio, and a
+  3D scene while videos load; `ytui --demo3d` shows the engine on its own
 - **Miniplayer** when you scroll or browse away, with overlay controls (↗ back to the
   video, ✕ close, play/pause), and **fullscreen** (`f`)
 - **Channel pages** (banner, avatar, Home/Videos/Shorts/Live/Playlists tabs) and **playlists**
@@ -50,6 +52,24 @@ It works like a browser for YouTube:
 
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
 to resolve stream URLs. Press `?` in the app for every key.
+
+## 3D ASCII engine
+
+ytui includes a small real-time 3D software renderer whose output goes through the same
+shape-matched glyph renderer as video: multi-threaded triangle rasterisation with a depth buffer,
+sun / ambient / rim lighting, specular highlights, shadow mapping, fog, procedural grid-line
+floors, and an ink-outline pass on depth and normal edges so silhouettes come out as crisp
+strokes. For 3D it crushes darks (empty space stays empty) and takes glyph density from colour
+value, so saturated objects still read as solid.
+
+```
+ytui --demo3d            # logo · press 1-4 for logo, knot, terrain, visualizer
+ytui --demo3d terrain    # m cycles render mode, arrows orbit, +/- zoom, space pause
+```
+
+In the app, `V` swaps the video for a 3D audio visualiser (an FFT of the audio, which also works
+with sound off), and a spinning 3D logo shows while a video loads. At 180×49 cells the engine
+renders 1080×588 px in 9–14 ms per frame on a 16-thread CPU.
 
 ## Signing in (likes and comments)
 
@@ -111,6 +131,7 @@ and the nearest glyph wins.
 | `+` `-` `M` | volume up / down, mute |
 | `C` `I` | show / hide live chat, send a chat message |
 | `P` | save the focused / current video to a playlist |
+| `V` | 3D audio visualiser instead of the video |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
