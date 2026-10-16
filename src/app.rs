@@ -35,6 +35,12 @@ type R<T> = std::result::Result<T, String>;
 
 pub enum Msg {
     Wake,
+    /// A status-line message from a background thread.
+    Flash(String),
+    /// Name of the signed-in YouTube account (None: signed out).
+    AccountName(Option<String>),
+    /// Channels the signed-in account subscribes to.
+    RemoteSubs(Vec<crate::api::ChannelItem>),
     Load(u64, Load),
     Stream(String, R<yt::Stream>),
     Suggest(String, Vec<String>),
@@ -178,6 +184,9 @@ struct Geo {
     mini_bar: Option<Rect>,
     mini_btns: Vec<(Rect, MiniBtn)>,
     fs_bar: Option<Rect>,
+    /// Player-bar volume sliders and seek bars drawn this frame.
+    vol: Vec<Rect>,
+    seek: Vec<Rect>,
 }
 
 pub struct App {
@@ -240,6 +249,15 @@ pub struct App {
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
+    /// Google sign-in window, and when it was last checked.
+    login: Option<crate::browser_login::Login>,
+    /// Signed-in YouTube account name, for the sidebar and Account page.
+    account_name: Option<String>,
+    /// A mouse drag that started on a player-bar control.
+    drag: Option<Drag>,
+    /// Waiting for a cookie extension's export on the clipboard since .0;
+    /// .1 is the clipboard sequence number last looked at.
+    capture: Option<(Instant, u32)>,
     /// --fullscreen: go fullscreen when the first video starts.
     fs_on_play: bool,
     /// YTUI_STATS: per-second frame timing log.
@@ -402,6 +420,10 @@ impl App {
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
+            login: None,
+            account_name: None,
+            drag: None,
+            capture: None,
             stats: std::env::var("YTUI_STATS").ok().map(Stats::new),
             fs_on_play: false,
             status: (String::new(), Instant::now()),
@@ -534,6 +556,14 @@ impl App {
                 let chip = *chip;
                 std::thread::spawn(move || {
                     if chip == 0 {
+                        // Signed in: YouTube's own recommendations for you.
+                        if api.signed_in() {
+                            if let Ok(f) = api.home() {
+                                if !f.entries.is_empty() {
+                                    return send(Load::Feed(Ok(f)));
+                                }
+                            }
+                        }
                         send(Load::Feed(Ok(for_you(&api, &hist, &subs, &watched))));
                     } else {
                         let (q, sp) = chip_query(CHIPS[chip]);
@@ -559,6 +589,14 @@ impl App {
             }
             Kind::Subs { .. } => {
                 std::thread::spawn(move || {
+                    // Signed in: your YouTube subscriptions feed.
+                    if api.signed_in() {
+                        if let Ok(f) = api.subscriptions_feed() {
+                            if !f.entries.is_empty() {
+                                return send(Load::Feed(Ok(f)));
+                            }
+                        }
+                    }
                     let entries = rss_all(&api, &subs).into_iter().take(90).map(|v| Entry::Item(Item::Video(v))).collect();
                     send(Load::Feed(Ok(Feed { entries, cont: None })));
                 });
@@ -566,6 +604,22 @@ impl App {
             Kind::Playlists { .. } => match self_auth.clone() {
                 Some(a) => {
                     std::thread::spawn(move || send(Load::Playlists(s(a.playlists()))));
+                }
+                None if api.signed_in() => {
+                    std::thread::spawn(move || {
+                        let r = api.my_playlists().map(|l| {
+                            l.into_iter()
+                                .map(|p| crate::auth::MyPlaylist {
+                                    count: p.count.as_deref().map(|c| c.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>()).and_then(|d| d.parse().ok()).unwrap_or(0),
+                                    id: p.id,
+                                    title: p.title,
+                                    privacy: String::new(),
+                                    thumb: p.thumb,
+                                })
+                                .collect()
+                        });
+                        send(Load::Playlists(s(r)));
+                    });
                 }
                 None => p.loading = false,
             },
@@ -723,6 +777,23 @@ impl App {
     fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::Wake => {}
+            Msg::Flash(m) => self.flash(m),
+            Msg::AccountName(n) => {
+                self.account_name = n;
+                self.store_rev += 1;
+            }
+            Msg::RemoteSubs(chs) => {
+                let before = self.store.subs.len();
+                for c in chs {
+                    if !self.store.subs.iter().any(|s| s.id == c.id) {
+                        self.store.subs.push(crate::store::ChannelRef { id: c.id, name: c.name, sub_id: None });
+                    }
+                }
+                if self.store.subs.len() != before {
+                    self.store_changed();
+                    self.refresh_signed_in_pages();
+                }
+            }
             Msg::Load(uid, l) => self.on_load(uid, l),
             Msg::Stream(id, r) => {
                 let Some((v, start)) = self.pending.take_if(|p| p.0.id == id) else { return };
@@ -1057,7 +1128,121 @@ impl App {
         }
     }
 
+    /// Look up the signed-in account: its name and subscribed channels.
+    fn fetch_account(&self) {
+        let (tx, api) = (self.tx.clone(), self.api.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::AccountName(api.account_name().ok()));
+            if let Ok(chs) = api.subscribed_channels() {
+                let _ = tx.send(Msg::RemoteSubs(chs));
+            }
+        });
+    }
+
+    /// Reload Home and Subscriptions after signing in or out, so they show
+    /// (or stop showing) the account's own feeds.
+    fn refresh_signed_in_pages(&mut self) {
+        for t in 0..self.tabs.len() {
+            for i in 0..self.tabs[t].pages.len() {
+                let p = &mut self.tabs[t].pages[i];
+                match &mut p.kind {
+                    Kind::Home { feed, .. } | Kind::Subs { feed } => *feed = Feed::default(),
+                    Kind::Playlists { list } => *list = None,
+                    _ => continue,
+                }
+                p.rev += 1;
+                let uid = p.uid;
+                self.load(uid);
+            }
+        }
+    }
+
+    /// While a sign-in window is open, check on it.
+    fn poll_login(&mut self) {
+        use crate::browser_login::Poll;
+        let Some(l) = self.login.as_mut() else { return };
+        let r = l.poll();
+        let timed_out = matches!(r, Poll::Waiting) && l.started.elapsed() > Duration::from_secs(900);
+        match r {
+            Poll::Waiting if !timed_out => return,
+            Poll::Waiting => {
+                if let Some(l) = self.login.take() {
+                    l.close();
+                }
+                self.flash("gave up waiting for the sign-in");
+            }
+            Poll::Done(c) => {
+                self.login = None;
+                self.take_cookies(c);
+            }
+            Poll::NotSignedIn => {
+                self.login = None;
+                self.flash("the sign-in window closed before you were signed in to YouTube");
+            }
+            Poll::Failed(e) => {
+                self.login = None;
+                self.flash(format!("sign-in failed: {e}; try \"use my cookie extension\""));
+            }
+        }
+        self.store_rev += 1;
+    }
+
+    /// While waiting on a cookie extension, look at the clipboard whenever
+    /// it changes.
+    fn poll_capture(&mut self) {
+        let Some((since, seq)) = self.capture else { return };
+        if since.elapsed() > Duration::from_secs(300) {
+            self.capture = None;
+            self.store_rev += 1;
+            self.flash("gave up waiting for cookies; try Sign in again");
+            return;
+        }
+        let now = crate::cookies::clipboard_seq();
+        if now == seq || now == 0 {
+            return;
+        }
+        self.capture = Some((since, now));
+        if let Some(c) = crate::cookies::clipboard_text().and_then(|t| crate::cookies::parse(&t)) {
+            self.take_cookies(c);
+        }
+    }
+
+    /// A sign-in arrived (window, clipboard or paste): save it, clear the
+    /// clipboard, and check it with YouTube.
+    fn take_cookies(&mut self, c: Vec<crate::cookies::Cookie>) {
+        if !crate::cookies::signed_in(&c) {
+            self.flash("those cookies aren't from a signed-in youtube.com tab: sign in there and try again");
+            return;
+        }
+        match crate::cookies::save(&c) {
+            Ok(_) => {
+                if self.capture.take().is_some() {
+                    crate::cookies::clear_clipboard();
+                }
+                self.store_rev += 1;
+                self.flash("signed in, checking with YouTube…");
+                self.api.reload_auth();
+                self.refresh_signed_in_pages();
+                self.fetch_account();
+                let (tx, api) = (self.tx.clone(), self.api.clone());
+                std::thread::spawn(move || {
+                    let name = api.account_name().ok();
+                    let m = match (crate::cookies::verify(), &name) {
+                        (Ok(()), Some(n)) => format!("signed in as {n} ✓"),
+                        (Ok(()), None) => "signed in ✓ videos will play".to_string(),
+                        (Err(e), _) => format!("YouTube didn't accept the sign-in: {e}"),
+                    };
+                    let _ = tx.send(Msg::AccountName(name));
+                    let _ = tx.send(Msg::Flash(m));
+                });
+            }
+            Err(e) => self.flash(format!("couldn't save the sign-in: {e}")),
+        }
+    }
+
     fn after_tick(&mut self) {
+        self.poll_login();
+        self.poll_capture();
         self.sync_chat();
         let Some(p) = &self.player else { return };
         if p.failed && self.retried.as_deref() != Some(p.video.id.as_str()) {
@@ -1358,6 +1543,43 @@ impl App {
                     });
                 }
             }
+            Act::SignIn => {
+                if let Some(l) = self.login.take() {
+                    l.close();
+                    self.flash("sign-in cancelled");
+                } else {
+                    match crate::browser_login::Login::start() {
+                        Ok(l) => {
+                            self.login = Some(l);
+                            self.flash("sign in with Google in the window that opened, then close it");
+                        }
+                        Err(e) => {
+                            // No usable browser: fall back to a cookie extension.
+                            self.capture = Some((Instant::now(), crate::cookies::clipboard_seq()));
+                            self.flash(format!("{e}; use your cookie extension instead"));
+                        }
+                    }
+                }
+                self.store_rev += 1;
+            }
+            Act::SignInCookies => {
+                if self.capture.take().is_some() {
+                    self.flash("sign-in cancelled");
+                } else {
+                    self.capture = Some((Instant::now(), crate::cookies::clipboard_seq()));
+                    crate::sys::open_url("https://www.youtube.com");
+                    self.flash("on youtube.com, click your cookie extension and press Export");
+                }
+                self.store_rev += 1;
+            }
+            Act::SignOutVideos => {
+                crate::cookies::remove();
+                self.api.reload_auth();
+                self.account_name = None;
+                self.refresh_signed_in_pages();
+                self.store_rev += 1;
+                self.flash("signed out");
+            }
             Act::SignOut => {
                 if let Some(a) = self.auth.take() {
                     std::thread::spawn(move || a.sign_out());
@@ -1609,7 +1831,14 @@ impl App {
             ("◷  Watch later".to_string(), Side::Later),
             ("≡  Playlists".to_string(), Side::Playlists),
             ("?  Help".to_string(), Side::Help),
-            (if self.auth.is_some() { "@  Account ✓".to_string() } else { "@  Sign in".to_string() }, Side::Account),
+            (
+                match (&self.account_name, self.auth.is_some()) {
+                    (Some(n), _) => format!("@  {}", page::trunc(n.split(" (").next().unwrap_or(n), 18)),
+                    (None, true) => "@  Account ✓".to_string(),
+                    (None, false) => "@  Sign in".to_string(),
+                },
+                Side::Account,
+            ),
         ];
         for c in &self.store.subs {
             v.push((c.name.clone(), Side::Channel(c.id.clone())));
@@ -1682,6 +1911,13 @@ impl App {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(t) => {
                 let t = t.replace("\r\n", "\n").replace('\r', "\n");
+                // Cookies pasted anywhere (that isn't a text box): sign in.
+                if self.compose.is_none() && self.edit.is_none() {
+                    if let Some(c) = crate::cookies::parse(&t) {
+                        self.take_cookies(c);
+                        return;
+                    }
+                }
                 if let Some(c) = &mut self.compose {
                     c.text.push_str(&t);
                 } else if let Some(e) = &mut self.edit {
@@ -1691,6 +1927,23 @@ impl App {
             }
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
+                MouseEventKind::Drag(MouseButton::Left) => match self.drag {
+                    Some(Drag::Volume(r)) => self.volume_at(r, m.column),
+                    // Seek on release, so dragging doesn't restart playback per cell.
+                    Some(Drag::Seek(_)) | None => {}
+                },
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let (Some(Drag::Seek(r)), Some(p)) = (self.drag.take(), &mut self.player) {
+                        if m.column != r.x || m.row != r.y {
+                            let frac = (m.column.saturating_sub(r.x)) as f64 / r.width.max(1) as f64;
+                            p.seek_to(frac.clamp(0.0, 1.0) * p.duration());
+                        }
+                    }
+                    self.drag = None;
+                }
+                // The wheel over the volume slider changes the volume.
+                MouseEventKind::ScrollDown if self.bar_hit(m.column, m.row).is_some_and(|h| h.0) => self.change_volume(-0.05),
+                MouseEventKind::ScrollUp if self.bar_hit(m.column, m.row).is_some_and(|h| h.0) => self.change_volume(0.05),
                 MouseEventKind::ScrollDown => self.scroll_by(3),
                 MouseEventKind::ScrollUp => self.scroll_by(-3),
                 _ => {}
@@ -1711,8 +1964,36 @@ impl App {
         self.page().layout.as_ref().map(|l| &l.1)
     }
 
+    /// Set the volume from a position on a slider (0-150%).
+    fn volume_at(&mut self, r: Rect, x: u16) {
+        let frac = ((x.saturating_sub(r.x) as f32 + 1.0) / r.width.max(1) as f32).clamp(0.0, 1.0);
+        let v = if x <= r.x && frac < 0.1 { 0.0 } else { frac * 1.5 };
+        self.change_volume(v - self.store.volume);
+    }
+
+    /// The player-bar control under (x, y): a volume slider, else a seek bar.
+    fn bar_hit(&self, x: u16, y: u16) -> Option<(bool, Rect)> {
+        let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y == r.y;
+        self.geo.vol.iter().find(|r| hit(r)).map(|r| (true, *r)).or_else(|| self.geo.seek.iter().find(|r| hit(r)).map(|r| (false, *r)))
+    }
+
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        match self.bar_hit(x, y) {
+            Some((true, r)) => {
+                self.drag = Some(Drag::Volume(r));
+                return self.volume_at(r, x);
+            }
+            Some((false, r)) => {
+                if let Some(p) = &mut self.player {
+                    self.drag = Some(Drag::Seek(r));
+                    let frac = (x.saturating_sub(r.x)) as f64 / r.width.max(1) as f64;
+                    p.seek_to(frac.clamp(0.0, 1.0) * p.duration());
+                    return;
+                }
+            }
+            None => {}
+        }
         if self.fullscreen {
             if let (Some(b), Some(p)) = (self.geo.fs_bar, &mut self.player) {
                 if hit(&b) {
@@ -2512,7 +2793,15 @@ impl App {
         let page = &mut t.pages[t.idx];
         let key = (w, vh, page.rev, key_store);
         if page.layout.as_ref().map(|l| l.0) != Some(key) {
-            let ctx = Ctx { autoplay, chat: show_chat, account: self.auth.as_ref().map(|a| a.channel()) };
+            let ctx = Ctx {
+                autoplay,
+                chat: show_chat,
+                account: self.auth.as_ref().map(|a| a.channel()),
+                yt_cookies: crate::cookies::status(),
+                yt_account: self.account_name.clone(),
+                capturing: self.capture.is_some(),
+                logging_in: self.login.is_some(),
+            };
             let doc = layout(page, &self.store, w, vh, &ctx);
             page.layout = Some((key, doc));
         }
@@ -2694,7 +2983,9 @@ impl App {
                 Prim::PlayerBar { x, y, w: bw, id } => {
                     if *y >= scroll && *y < scroll + vh as usize {
                         if let Some(p) = self.player.as_ref().filter(|p| &p.video.id == id) {
-                            draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, self.renderer.mode, false);
+                            let (seek, vol) = draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, self.renderer.mode, false);
+                            self.geo.seek.push(seek);
+                            self.geo.vol.extend(vol);
                         }
                     }
                 }
@@ -2787,7 +3078,7 @@ impl App {
         let pb = Rect { x: r.x + mw - 5, y: r.y + vh, width: 4, height: 1 };
         buf.set_string(pb.x, pb.y, if p.paused || p.ended { " ▶ " } else { " ❚❚" }, Style::default().fg(Color::White).bg(page::BUTTON));
         self.geo.mini_btns.push((pb, MiniBtn::Pause));
-        draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
+        let _ = draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
         self.geo.mini = Some(r);
         self.geo.mini_bar = Some(Rect { x: r.x, y: r.y + vh + 1, width: mw.saturating_sub(16), height: 1 });
     }
@@ -2837,7 +3128,9 @@ impl App {
         }
         let br = Rect { y: area.y + vh, height: 1, ..area };
         buf.set_style(br, Style::default().bg(Color::Rgb(40, 0, 0)));
-        draw_bar(buf, br.x, br.y, br.width, p, self.renderer.mode, false);
+        let (seek, vol) = draw_bar(buf, br.x, br.y, br.width, p, self.renderer.mode, false);
+        self.geo.seek.push(seek);
+        self.geo.vol.extend(vol);
         self.geo.fs_bar = Some(Rect { width: br.width.saturating_sub(18), ..br });
     }
 
@@ -2896,6 +3189,9 @@ impl App {
     pub fn run(&mut self, terminal: &mut Term, out: &crate::out::Out, rx: Receiver<Msg>) -> Result<()> {
         use crossterm::terminal::BeginSynchronizedUpdate;
         self.sync_subs(false);
+        if self.api.signed_in() {
+            self.fetch_account();
+        }
         let mut last_save = Instant::now();
         let mut last_draw = Instant::now();
         let sync = std::env::var_os("YTUI_NO_SYNC").is_none();
@@ -3165,16 +3461,31 @@ fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, 
     }
 }
 
-fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) {
+#[derive(Clone, Copy)]
+enum Drag {
+    Volume(Rect),
+    Seek(Rect),
+}
+
+/// Cells in the volume slider (0-150%).
+const VOL_CELLS: u16 = 12;
+
+/// The player bar: seek bar, time, and (full size) a volume slider.
+/// Returns where the seek bar and the volume slider were drawn.
+fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) -> (Rect, Option<Rect>) {
     let d = p.duration();
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
-    let vol = if p.muted() { "muted".to_string() } else { format!("vol {:.0}%", p.level() * 100.0) };
+    let pct = if p.muted() { "muted".to_string() } else { format!("{:>3.0}%", p.level() * 100.0) };
     let ae = if p.exposure.on { " AE" } else { "" };
     let cc = if p.caption_track().is_some() { " CC" } else { "" };
     let rate = if p.native() { "gpu".to_string() } else { format!("{:.0}fps", p.fps) };
-    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {}{ae}{cc} {rate} ", mode.name()) };
-    let tw = tail.width() as u16;
+    // [time]  vol [slider] pct  [mode AE CC rate]
+    let head = format!(" {time}  vol ");
+    let rest = format!(" {pct}  {}{ae}{cc} {rate} ", mode.name());
+    let slider = !compact && w > head.width() as u16 + VOL_CELLS + rest.width() as u16 + 16;
+    let tail = if compact || !slider { format!(" {time} ") } else { String::new() };
+    let tw = if slider { head.width() as u16 + VOL_CELLS + rest.width() as u16 } else { tail.width() as u16 };
     let bw = w.saturating_sub(tw.max(16) + 1);
     let filled = if d > 0.0 { ((p.pos / d).clamp(0.0, 1.0) * bw as f64) as u16 } else { 0 };
     for i in 0..bw {
@@ -3187,7 +3498,28 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
             c.set_char('━').set_fg(Color::Rgb(80, 80, 88));
         }
     }
-    buf.set_string(x + w.saturating_sub(tw), y, &tail, Style::default().fg(Color::White));
+    let seek = Rect { x, y, width: bw.max(1), height: 1 };
+    let tx = x + w.saturating_sub(tw);
+    if !slider {
+        buf.set_string(tx, y, &tail, Style::default().fg(Color::White));
+        return (seek, None);
+    }
+    let white = Style::default().fg(Color::White);
+    buf.set_string(tx, y, &head, white);
+    let sx = tx + head.width() as u16;
+    let lit = if p.muted() { 0 } else { ((p.level() / 1.5) * VOL_CELLS as f32).round() as u16 };
+    for i in 0..VOL_CELLS {
+        // Over 100% shows in a warmer colour, like a boost.
+        let over = i >= (VOL_CELLS * 2) / 3;
+        let c = &mut buf[(sx + i, y)];
+        if i < lit {
+            c.set_char('█').set_fg(if over { Color::Rgb(255, 150, 60) } else { Color::Rgb(235, 235, 235) });
+        } else {
+            c.set_char('▁').set_fg(Color::Rgb(90, 90, 100));
+        }
+    }
+    buf.set_string(sx + VOL_CELLS, y, &rest, white);
+    (seek, Some(Rect { x: sx, y, width: VOL_CELLS, height: 1 }))
 }
 
 fn role_color(r: Role) -> Color {

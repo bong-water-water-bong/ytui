@@ -1,8 +1,10 @@
 mod api;
 mod app;
 mod auth;
+mod browser_login;
 mod bench;
 mod chat;
+mod cookies;
 mod demo;
 mod diacritics;
 mod engine3d;
@@ -42,7 +44,11 @@ USAGE:
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
   ytui --help-login             how to create the Google OAuth client
-  ytui --help-cookies           what to do when YouTube says \"confirm you're not a bot\"
+  ytui --signin                 sign in for playback (when YouTube says
+                                \"confirm you're not a bot\"): copy cookies from
+                                your browser's cookie extension, ytui does the rest
+  ytui --signout-cookies        forget those cookies
+  ytui --help-cookies           more about that
   ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
 
 OPTIONS:
@@ -107,6 +113,7 @@ fn main() -> Result<()> {
     let mut query = Vec::new();
     let mut cookies: Option<String> = std::env::var("YTUI_COOKIES").ok();
     let mut cookies_browser: Option<String> = None;
+    let mut signin = false;
     while let Some(a) = args.next() {
         let mut val = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
         match a.as_str() {
@@ -146,6 +153,31 @@ fn main() -> Result<()> {
             "--demo3d" => demo = Some(args.next().unwrap_or_default()),
             "--client" => client = Some(val("--client")?),
             "--logout" => return auth::logout(),
+            "--signin" => signin = true,
+            "--signin-probe" => return browser_login::probe(),
+            "--signin-titles" => return browser_login::log_titles(),
+            "--signin-hold" => return browser_login::hold_test(),
+            "--whoami" => {
+                let api = api::Api::new();
+                println!("signed in: {}", api.signed_in());
+                println!("account: {:?}", api.account_name());
+                println!("home: {:?}", api.home().map(|f| f.videos().iter().take(3).map(|v| v.title.clone()).collect::<Vec<_>>()));
+                println!("subscriptions feed: {:?}", api.subscriptions_feed().map(|f| f.videos().len()));
+                match api.subscribed_channels() {
+                    Ok(c) => println!("subscribed channels: {} (first: {:?})", c.len(), c.iter().take(3).map(|c| c.name.clone()).collect::<Vec<_>>()),
+                    Err(e) => println!("subscribed channels: error {e}"),
+                }
+                match api.my_playlists() {
+                    Ok(l) => println!("playlists: {} (first: {:?})", l.len(), l.iter().take(3).map(|p| (p.title.clone(), p.count.clone())).collect::<Vec<_>>()),
+                    Err(e) => println!("playlists: error {e}"),
+                }
+                return Ok(());
+            }
+            "--signout-cookies" => {
+                cookies::remove();
+                println!("removed {}", cookies::path().display());
+                return Ok(());
+            }
             "--help-cookies" => {
                 print!("{}", yt::COOKIES_HELP.replace("COOKIES_PATH", &yt::cookies_path().display().to_string()));
                 return Ok(());
@@ -170,6 +202,9 @@ fn main() -> Result<()> {
     }
 
     yt::set_cookies(cookies, cookies_browser);
+    if signin {
+        return cookies::signin_cli();
+    }
 
     if login {
         return auth::login(client.as_deref());

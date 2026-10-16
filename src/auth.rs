@@ -91,7 +91,7 @@ pub fn config_dir() -> PathBuf {
         .join("ytui")
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::sys::home().join(".local/share"))

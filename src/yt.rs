@@ -95,7 +95,10 @@ fn js_runtime_args() -> Vec<String> {
 /// Cookies for yt-dlp, for when YouTube asks to "confirm you're not a bot":
 /// --cookies FILE, --cookies-from-browser NAME, or else cookies.txt in the
 /// config directory if it exists.
-static COOKIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static COOKIES: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
+/// --cookies / --cookies-from-browser given on the command line (these win
+/// over the saved file and survive reloads).
+static COOKIES_CLI: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
 
 /// Default location of an exported cookies.txt.
 pub fn cookies_path() -> std::path::PathBuf {
@@ -104,12 +107,24 @@ pub fn cookies_path() -> std::path::PathBuf {
 
 /// Set the cookie source from the command line (call before any lookup).
 pub fn set_cookies(file: Option<String>, browser: Option<String>) {
-    let args = match (file, browser) {
-        (Some(f), _) => vec!["--cookies".into(), f],
-        (None, Some(b)) => vec!["--cookies-from-browser".into(), b],
-        (None, None) => default_cookies(),
+    let cli = match (file, browser) {
+        (Some(f), _) => Some(vec!["--cookies".into(), f]),
+        (None, Some(b)) => Some(vec!["--cookies-from-browser".into(), b]),
+        (None, None) => None,
     };
-    let _ = COOKIES.set(args);
+    let _ = COOKIES_CLI.set(cli);
+    reload_cookies();
+}
+
+/// Re-read the cookie source (after signing in or out).
+pub fn reload_cookies() {
+    let args = COOKIES_CLI.get().cloned().flatten().unwrap_or_else(default_cookies);
+    *COOKIES.write().unwrap() = Some(args);
+}
+
+/// Whether YouTube will serve us (no bot check), using the current cookies.
+pub fn check_access() -> Result<()> {
+    run_json(&["--no-playlist", "-f", "b", "--flat-playlist", "https://www.youtube.com/watch?v=jNQXAC9IVRw"]).map(|_| ())
 }
 
 fn default_cookies() -> Vec<String> {
@@ -121,8 +136,11 @@ fn default_cookies() -> Vec<String> {
     }
 }
 
-fn cookie_args() -> &'static [String] {
-    COOKIES.get_or_init(default_cookies)
+fn cookie_args() -> Vec<String> {
+    if COOKIES.read().unwrap().is_none() {
+        reload_cookies();
+    }
+    COOKIES.read().unwrap().clone().unwrap_or_default()
 }
 
 /// Turn yt-dlp's error output into one readable line, with advice for the
@@ -130,12 +148,8 @@ fn cookie_args() -> &'static [String] {
 fn ytdlp_error(stderr: &str) -> String {
     let line = stderr.lines().rev().find(|l| l.contains("ERROR")).unwrap_or(stderr.trim()).trim();
     if line.contains("not a bot") || line.contains("Sign in to confirm") {
-        let how = if cookie_args().is_empty() {
-            format!("export YouTube cookies from a signed-in browser to {} (or use --cookies FILE)", cookies_path().display())
-        } else {
-            "your cookies were rejected: export fresh ones from a signed-in browser".to_string()
-        };
-        return format!("YouTube wants to confirm you're not a bot (too many requests from this connection). Wait a while, or {how}. See ytui --help-cookies");
+        let how = if cookie_args().is_empty() { "sign in" } else { "sign in again (your saved cookies were rejected)" };
+        return format!("YouTube wants to confirm you're not a bot: {how} on the Account page (@ in the sidebar), or run ytui --signin");
     }
     if line.contains("Could not copy Chrome cookie database") || line.contains("Failed to decrypt") {
         return "can't read the browser's cookies (Chrome/Edge lock and encrypt them): export cookies.txt with a browser extension instead; see ytui --help-cookies".into();
@@ -161,17 +175,18 @@ fn run_json(args: &[&str]) -> Result<Value> {
 pub const COOKIES_HELP: &str = "\
 YouTube sometimes stops serving videos to a connection it thinks is a bot
 (\"Sign in to confirm you're not a bot\"). It usually clears on its own after a
-few hours. To keep playing, give yt-dlp the cookies of a browser that's signed
-in to YouTube:
+few hours. To keep playing, sign in:
 
-  Chrome / Edge: they lock and encrypt their cookies, so export them instead.
-    1. Install a cookies.txt exporter extension (e.g. \"Get cookies.txt LOCALLY\").
-    2. Open youtube.com while signed in and export cookies for that site.
-    3. Save the file as the path below; ytui picks it up automatically:
-         COOKIES_PATH
-       (or point at it with  ytui --cookies FILE)
+  In ytui press @ (or click Sign in in the sidebar) and choose Sign in, or run
+  ytui --signin. A browser window opens on Google's sign-in page; sign in as
+  you would on any website and ytui takes it from there.
 
-  Firefox:  ytui --cookies-from-browser firefox
+  No browser window? Use your cookie extension instead: on youtube.com click
+  it and press Export / Copy while ytui is waiting (Account page, \"use my
+  cookie extension\"), or paste the export into ytui with Ctrl-V.
+
+  The sign-in is saved to  COOKIES_PATH
+  Also possible:  ytui --cookies FILE   or   ytui --cookies-from-browser firefox
 
 The cookies stay on this machine and are only passed to yt-dlp. Treat the
 file like a password: it signs in to your Google account.
@@ -183,6 +198,9 @@ file like a password: it signs in to your Google account.
 /// better per bit but is only worth it with mpv (hardware decoding, or
 /// dav1d); otherwise VP9 / H.264.
 pub fn resolve(url: &str, max_h: u32, av1: bool) -> Result<Stream> {
+    if std::path::Path::new(url).is_file() {
+        return local(url);
+    }
     let (fmt, sort) = if av1 {
         ("bv*+ba/b".to_string(), format!("res:{max_h},fps,vcodec:av01"))
     } else {
@@ -223,4 +241,30 @@ pub fn fmt_time(s: f64) -> String {
     } else {
         format!("{}:{:02}", s / 60, s % 60)
     }
+}
+
+/// A local media file (no yt-dlp): size, length and frame rate from ffprobe.
+fn local(path: &str) -> Result<Stream> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate:format=duration", "-of", "json", path])
+        .output()
+        .context("running ffprobe")?;
+    let v: Value = serde_json::from_slice(&out.stdout)?;
+    let s = &v["streams"][0];
+    let (w, h) = (s["width"].as_f64().unwrap_or(16.0), s["height"].as_f64().unwrap_or(9.0));
+    let fps = s["avg_frame_rate"].as_str().and_then(|r| {
+        let (a, b) = r.split_once('/')?;
+        let (a, b): (f64, f64) = (a.parse().ok()?, b.parse().ok()?);
+        (b > 0.0).then(|| a / b)
+    });
+    Ok(Stream {
+        title: std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        video_url: path.to_string(),
+        audio_url: None,
+        aspect: if h > 0.0 { w / h } else { 16.0 / 9.0 },
+        duration: v["format"]["duration"].as_str().and_then(|d| d.parse().ok()),
+        live: false,
+        fps: fps.filter(|f| *f > 0.0),
+        subs: Vec::new(),
+    })
 }
