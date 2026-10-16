@@ -1160,6 +1160,8 @@ Keys — player (anywhere while something is playing)
   P                save the focused / current video to a playlist (signed in)
   V                3D audio visualiser instead of the video picture (ytui --demo3d for the engine)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
+  o                look panel: render mode, brightness, saturation, background,
+                   contrast (glow mode is the coloured ASCII with the picture behind)
   S                captions: cycle off / each track (remembered across videos)
   N                native GPU video window over the terminal on / off (Windows, libmpv)
   G                pixel graphics (kitty / sixel) on / off, when the terminal supports them
