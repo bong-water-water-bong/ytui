@@ -238,9 +238,14 @@ pub struct App {
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
+    /// --fullscreen: go fullscreen when the first video starts.
+    fs_on_play: bool,
+    /// YTUI_STATS: per-second frame timing log.
+    stats: Option<Stats>,
     status: (String, Instant),
     opts: Opts,
-    max_h: u32,
+    /// --height: fixed stream height (None: chosen per output).
+    max_h: Option<u32>,
     dirty: bool,
     quit: bool,
     geo: Geo,
@@ -298,6 +303,29 @@ impl App {
         }
     }
 
+    /// Stream height to ask for: --height if given; for the native window,
+    /// its real pixel height (so fullscreen gets 1080p60); otherwise 720,
+    /// the lowest height YouTube serves at 60 fps. Terminal output is never
+    /// sharper than that, and 720p decodes cheaply in hardware.
+    fn stream_height(&self) -> u32 {
+        if let Some(h) = self.max_h {
+            return h;
+        }
+        #[cfg(windows)]
+        if self.opts.wid.is_some() {
+            if let Some(g) = *self.grid.lock().unwrap() {
+                let px = (self.term.1 as f32 * g.ch) as u32;
+                return [720, 1080, 1440, 2160].into_iter().find(|&h| h >= px).unwrap_or(2160).min(1440);
+            }
+            return 1080;
+        }
+        720
+    }
+
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.fs_on_play = on;
+    }
+
     pub fn set_gfx(&mut self, g: Option<Gfx>) {
         if let Some(g) = &g {
             self.flash(format!("pixel graphics: {} (G switches to characters)", g.proto.name()));
@@ -315,7 +343,7 @@ impl App {
         self.gfx.is_some() && self.store.gfx
     }
 
-    pub fn new(mut renderer: Renderer, opts: Opts, max_h: u32, mode_forced: bool) -> (App, Receiver<Msg>) {
+    pub fn new(mut renderer: Renderer, opts: Opts, max_h: Option<u32>, mode_forced: bool) -> (App, Receiver<Msg>) {
         let (tx, rx) = channel();
         let txw = tx.clone();
         let thumbs = Thumbs::new(move || {
@@ -372,6 +400,8 @@ impl App {
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
+            stats: std::env::var("YTUI_STATS").ok().map(Stats::new),
+            fs_on_play: false,
             status: (String::new(), Instant::now()),
             opts,
             max_h,
@@ -707,6 +737,9 @@ impl App {
                         let mut p = Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure);
                         p.set_caption_pref(self.store.captions.clone());
                         self.player = Some(p);
+                        if std::mem::take(&mut self.fs_on_play) {
+                            self.fullscreen = true;
+                        }
                         self.ended_handled = false;
                         self.last_record = Instant::now();
                         if start > 0.0 {
@@ -946,10 +979,10 @@ impl App {
         }
         let start = at.unwrap_or_else(|| self.store.resume_pos(&v.id));
         self.pending = Some((v.clone(), start));
-        let (api, tx, h) = (self.api.clone(), self.tx.clone(), self.max_h);
+        let (api, tx, h, av1) = (self.api.clone(), self.tx.clone(), self.stream_height(), self.opts.mpv);
         let id = v.id.clone();
         std::thread::spawn(move || {
-            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h));
+            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h, av1));
             let _ = tx.send(Msg::Stream(id.clone(), r));
             if let Ok(w) = api.watch(&id) {
                 let _ = tx.send(Msg::Related(id, w.related.videos(), w.chat));
@@ -2862,11 +2895,17 @@ impl App {
         use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
         self.sync_subs(false);
         let mut last_save = Instant::now();
+        let mut last_draw = Instant::now();
+        let sync = std::env::var_os("YTUI_NO_SYNC").is_none();
         while !self.quit {
             while let Ok(m) = rx.try_recv() {
                 self.on_msg(m);
             }
-            let fresh = self.player.as_mut().is_some_and(|p| p.tick()) || self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading());
+            let ticked = self.player.as_mut().is_some_and(|p| p.tick());
+            // Spinners (resolving / loading) animate at ~30 fps, not as fast as
+            // the loop spins.
+            let spinning = (self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading())) && last_draw.elapsed() >= Duration::from_millis(33);
+            let fresh = ticked || spinning;
             self.after_tick();
             // Infinite scroll: fetch more when the viewport nears the end.
             if !self.fullscreen {
@@ -2891,16 +2930,28 @@ impl App {
                 self.dirty = true;
             }
             if self.dirty || fresh {
-                let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+                last_draw = Instant::now();
+                let t0 = Instant::now();
+                if sync {
+                    let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+                }
                 terminal.draw(|f| self.draw(f))?;
+                let t1 = Instant::now();
+                let gfx_bytes = self.gfx_out.len();
                 if !self.gfx_out.is_empty() {
                     let mut o = std::io::stdout();
                     let _ = o.write_all(&self.gfx_out);
                     let _ = o.flush();
                     self.gfx_out.clear();
                 }
-                let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+                if sync {
+                    let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+                }
                 self.dirty = false;
+                if let Some(s) = &mut self.stats {
+                    let p = self.player.as_ref();
+                    s.frame(t1 - t0, t1.elapsed(), gfx_bytes, p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
+                }
             }
             if last_save.elapsed() > Duration::from_secs(20) {
                 self.store.save();
@@ -3021,6 +3072,53 @@ fn fill(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, color: Co
         for xx in r.x..r.x + r.width {
             buf[(xx, y)].set_char(' ').set_bg(color);
         }
+    }
+}
+
+/// Per-second frame timing, appended to the YTUI_STATS file.
+struct Stats {
+    path: String,
+    since: Instant,
+    n: u32,
+    draw: Duration,
+    gfx: Duration,
+    gfx_max: Duration,
+    bytes: usize,
+}
+
+impl Stats {
+    fn new(path: String) -> Stats {
+        let _ = std::fs::write(&path, "");
+        Stats { path, since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+    }
+
+    fn frame(&mut self, draw: Duration, gfx: Duration, bytes: usize, decoded_fps: f64, pos: f64, dbg: String) {
+        self.n += 1;
+        self.draw += draw;
+        self.gfx += gfx;
+        self.gfx_max = self.gfx_max.max(gfx);
+        self.bytes += bytes;
+        let el = self.since.elapsed().as_secs_f64();
+        if el >= 1.0 {
+            let n = self.n.max(1) as f64;
+            let line = format!(
+                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  gfx write {:6.2} ms (max {:6.1})  gfx {:7.1} KB/frame  {dbg}\n",
+                self.n as f64 / el,
+                self.draw.as_secs_f64() * 1000.0 / n,
+                self.gfx.as_secs_f64() * 1000.0 / n,
+                self.gfx_max.as_secs_f64() * 1000.0,
+                self.bytes as f64 / n / 1024.0
+            );
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&self.path) {
+                let _ = f.write_all(line.as_bytes());
+            }
+            *self = Stats { path: std::mem::take(&mut self.path), ..Stats::new_keep() };
+        }
+    }
+
+    fn new_keep() -> Stats {
+        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
     }
 }
 

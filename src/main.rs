@@ -49,8 +49,10 @@ OPTIONS:
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
   --no-native    never use the native GPU video window (Windows; N toggles it)
-  --fps N        max render frame rate (default 30)
-  --height N     max stream height to fetch (default 480)
+  --fullscreen   start the player fullscreen
+  --fps N        max frame rate for the ffmpeg engine (default 60)
+  --height N     max stream height to fetch (default: 720 in the terminal, so
+                 60 fps streams are picked; the window's height for native video)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
   --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
   --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
@@ -63,16 +65,24 @@ ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
 ";
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--color-test") {
+        if std::env::var_os("YTUI_NO_INIT").is_none() {
+            sys::init();
+        }
+        return bench::color_test(&std::env::args().skip(2).collect::<Vec<_>>());
+    }
     sys::init();
     let mut args = std::env::args().skip(1);
     let mut mode = None;
     let mut audio = Audio::auto();
-    let mut fps = 30;
+    let mut fps = 60;
     let mut engine = std::env::var("YTUI_ENGINE").unwrap_or_else(|_| "auto".into());
     let mut native = true;
-    let mut max_h = 480;
+    let mut fullscreen = false;
+    let mut max_h: Option<u32> = None;
     let mut snapshot: Option<String> = None;
     let mut bench: Option<String> = None;
+    let mut bench_render: Option<String> = None;
     let mut secs = 8.0;
     let mut import: Option<String> = None;
     let mut login = false;
@@ -110,9 +120,14 @@ fn main() -> Result<()> {
             "--fps" => fps = val("--fps")?.parse()?,
             "--engine" => engine = val("--engine")?,
             "--no-native" => native = false,
-            "--height" => max_h = val("--height")?.parse()?,
+            "--fullscreen" => fullscreen = true,
+            "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),
             "--bench" => bench = Some(val("--bench")?),
+            "--bench-render" => {
+                let src = val("--bench-render")?;
+                bench_render = Some(src);
+            }
             "--probe-term" => return overlay::probe(&val("--probe-term")?),
             "--seconds" => secs = val("--seconds")?.parse()?,
             "--import-subs" => import = Some(val("--import-subs")?),
@@ -163,9 +178,13 @@ fn main() -> Result<()> {
         return demo::run(kind, renderer);
     }
 
+    if let Some(src) = bench_render {
+        return bench::render(&src, if at > 0.0 { at } else { 60.0 }, scols.unwrap_or(184), srows.unwrap_or(39), max_h.unwrap_or(480));
+    }
+
     if let Some(src) = bench {
         let use_mpv = engine != "ffmpeg" && mpv::available();
-        return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, renderer, scols.unwrap_or(120), srows.unwrap_or(40));
+        return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
     }
 
     if let Some(src) = snapshot {
@@ -173,7 +192,7 @@ fn main() -> Result<()> {
         let (input, aspect) = if std::path::Path::new(&src).exists() {
             (src.clone(), 16.0 / 9.0)
         } else {
-            let s = yt::resolve(&src, max_h)?;
+            let s = yt::resolve(&src, max_h.unwrap_or(480), false)?;
             (s.video_url, s.aspect)
         };
         let (w, h, _, _) = player::fit(aspect, scols.unwrap_or(tc), srows.unwrap_or(tr.saturating_sub(1)));
@@ -249,8 +268,12 @@ fn main() -> Result<()> {
     let q = query.join(" ");
     let start = (!q.trim().is_empty()).then_some(q);
 
+    // NO_COLOR is for output that merely decorates; here colour is the
+    // picture itself, so keep it on.
+    crossterm::style::force_color_output(true);
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste, crossterm::event::EnableFocusChange);
+    app.set_fullscreen(fullscreen);
     if let Some(q) = start {
         app.open_query(&q);
     }

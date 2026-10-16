@@ -251,3 +251,17 @@ pub fn query_tty(q: &[u8], done: impl Fn(&[u8]) -> bool, ms: u64) -> Vec<u8> {
     }
     got
 }
+
+/// Console output mode bits and crossterm's ANSI verdict, for diagnostics.
+pub fn console_state() -> String {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::*;
+        let (mut o, mut i) = (0u32, 0u32);
+        GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mut o);
+        GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut i);
+        return format!("out {o:#x} in {i:#x} ansi {}", crossterm::ansi_support::supports_ansi());
+    }
+    #[allow(unreachable_code)]
+    String::new()
+}

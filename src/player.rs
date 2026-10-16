@@ -101,6 +101,9 @@ struct Shared {
 
 const PCM_KEEP: usize = 4096;
 
+/// No new frame or position change for this long while playing = stalled.
+const STALL_SECS: f64 = 10.0;
+
 pub use crate::sys::die_with_parent;
 use crate::sys::on_path;
 
@@ -414,6 +417,9 @@ pub struct Player {
     mpv_ready: bool,
     /// A seek asked for before the file loaded.
     mpv_seek: bool,
+    /// Last time playback visibly advanced (frame or position), for the
+    /// stall watchdog.
+    progress: (Instant, f64),
     /// Selected caption track (index into stream.subs).
     cc: Option<usize>,
     /// mpv's track id for each caption track once added.
@@ -458,6 +464,7 @@ impl Player {
             mpv_loaded: false,
             mpv_ready: false,
             mpv_seek: false,
+            progress: (Instant::now(), -1.0),
             cc: None,
             cc_ids: Vec::new(),
             cc_pref: None,
@@ -516,6 +523,7 @@ impl Player {
         self.mpv_loaded = false;
         self.mpv_ready = false;
         self.mpv_seek = false;
+        self.progress = (Instant::now(), -1.0);
         self.cc = None;
         self.cc_ids = vec![None; self.stream.subs.len()];
         let (pw, ph) = self.decode_size();
@@ -679,6 +687,7 @@ impl Player {
 
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
+        self.progress = (Instant::now(), self.pos);
         if let Some(m) = &self.mpv {
             if !self.paused && self.ended {
                 self.pos = 0.0;
@@ -784,6 +793,10 @@ impl Player {
         let Some(m) = self.mpv.as_mut() else { return false };
         if self.mpv_ready {
             if let Some(t) = m.get_f64("time-pos") {
+                // Native: no frames come back, so redraw for the clock.
+                if self.opts.wid.is_some() && (t.floor() != self.pos.floor() || (t - self.pos).abs() > 1.0) {
+                    fresh = true;
+                }
                 self.pos = t;
             }
         }
@@ -817,7 +830,37 @@ impl Player {
             self.paused = true;
             fresh = true;
         }
+        // Watchdog: a network read that never returns leaves mpv waiting
+        // forever. If nothing has moved for a while, report a failure so the
+        // app reconnects with a fresh stream at the same position.
+        if fresh || (self.pos - self.progress.1).abs() > 0.01 {
+            self.progress = (Instant::now(), self.pos);
+        } else if !self.paused && !self.ended && !self.failed && self.progress.0.elapsed().as_secs_f64() > STALL_SECS {
+            self.note = "stream stalled".into();
+            self.failed = true;
+            self.paused = true;
+            fresh = true;
+        }
         fresh
+    }
+
+    /// One-line internal state for YTUI_STATS.
+    pub fn debug(&self) -> String {
+        let mpv = self.mpv.as_ref().map(|m| {
+            let g = |k: &str| m.get_str(k).unwrap_or_else(|| "-".into());
+            format!(
+                " | {} {}x{} @{} hw {} | drops vo {} dec {} delayed {}",
+                g("video-codec-name"),
+                g("width"),
+                g("height"),
+                g("container-fps"),
+                g("hwdec-current"),
+                g("frame-drop-count"),
+                g("decoder-frame-drop-count"),
+                g("vo-delayed-frame-count")
+            )
+        });
+        format!("seen {} fw {}x{} ready {} paused {}{}", self.seen, self.fw, self.fh, self.mpv_ready, self.paused, mpv.unwrap_or_default())
     }
 
     /// Video is drawn by mpv in the native overlay window, not by us.
