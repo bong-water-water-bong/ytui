@@ -870,20 +870,24 @@ impl Gfx {
                     };
                     let runs = prev.map(|(_, p)| changed_cell_rows(p, &crop, w * 3, ch, h));
                     let nrows = h.div_ceil(ch);
+                    // One palette (and one dither pattern) for the whole
+                    // frame: bands are cut from it, so no two bands sent for
+                    // the same frame disagree on colour.
+                    let (colors, idx) = quantize(&crop, w, h, pal);
                     let mut parts = Vec::new();
                     match runs {
-                        // Mostly changed: one whole frame keeps one palette.
+                        // Mostly changed: send it whole.
                         Some(runs) if runs.iter().map(|(a, b)| b - a).sum::<usize>() * 5 < nrows * 4 => {
                             for (a, b) in runs {
                                 let (y0, y1) = (a * ch, (b * ch).min(h));
                                 let mut enc = Vec::new();
-                                sixel_encode_with(&crop[y0 * w * 3..y1 * w * 3], w, y1 - y0, aspect, pal, &mut enc);
+                                sixel_emit(&colors, &idx[y0 * w..y1 * w], w, y1 - y0, aspect, &mut enc);
                                 parts.push((a as u16, enc));
                             }
                         }
                         _ => {
                             let mut enc = Vec::new();
-                            sixel_encode_with(&crop, w, h, aspect, pal, &mut enc);
+                            sixel_emit(&colors, &idx, w, h, aspect, &mut enc);
                             parts.push((0, enc));
                         }
                     }
@@ -1220,5 +1224,36 @@ mod tests {
         let _ = g.finish(&mut buf);
         let s = sixel_frame(&mut g, 3, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
         assert!(s.contains("\x1b[2;1H\x1bP"), "the overlay erased part of it, so send it all: {s:?}");
+    }
+
+    /// Bands sent for one frame share its palette: a colour register means
+    /// the same colour in every band.
+    #[test]
+    fn sixel_bands_of_a_frame_share_one_palette() {
+        let mut g = sixel_gfx();
+        let (cols, rows) = (6u16, 6u16);
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
+        // Cell row 1 turns red and cell row 4 blue: two bands, different colours.
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| {
+            let mut p = vec![90u8; w * h * 3];
+            let ch = h / rows as usize;
+            for (row, rgb) in [(1, [220u8, 20, 20]), (4, [20, 20, 220])] {
+                for px in p[row * ch * w * 3..(row + 1) * ch * w * 3].chunks_exact_mut(3) {
+                    px.copy_from_slice(&rgb);
+                }
+            }
+            p
+        });
+        assert_eq!(s.matches("\x1bP").count(), 2, "two bands: {s:?}");
+        let mut defs: HashMap<String, String> = HashMap::new();
+        for d in s.split('#').skip(1) {
+            let mut f = d.split(';');
+            let (Some(n), Some("2")) = (f.next(), f.next()) else { continue };
+            let rgb: String = f.take(3).map(|v| v.chars().take_while(|c| c.is_ascii_digit()).collect::<String>()).collect::<Vec<_>>().join(",");
+            if let Some(old) = defs.insert(n.to_string(), rgb.clone()) {
+                assert_eq!(old, rgb, "register {n} redefined between bands");
+            }
+        }
+        assert!(defs.len() >= 2);
     }
 }
