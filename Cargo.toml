@@ -11,6 +11,7 @@ anyhow = "1"
 base64 = "0.22"
 crossterm = "0.28"
 fontdue = "0.9"
+libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }

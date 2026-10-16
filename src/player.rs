@@ -86,6 +86,18 @@ struct Shared {
     audio_failed: AtomicBool,
 }
 
+/// Have the kernel kill the child if ytui dies (terminal closed, SIGKILL),
+/// so ffmpeg / audio players never outlive us.
+pub fn die_with_parent(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+}
+
 fn on_path(cmd: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
 }
@@ -110,6 +122,7 @@ fn sink_cmd(audio: Audio) -> Option<Command> {
         _ => return None,
     }
     c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    die_with_parent(&mut c);
     Some(c)
 }
 
@@ -251,6 +264,7 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
             }
         }
     }
+    die_with_parent(&mut cmd);
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let sh = Arc::new(Shared {
         frame: Mutex::new(Vec::new()),

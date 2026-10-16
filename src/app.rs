@@ -40,6 +40,18 @@ pub enum Msg {
     Rated(u64, String, R<()>),
     /// A comment or reply was posted; Some(idx) = reply under comment idx.
     Posted(u64, Option<usize>, R<Comment>),
+    /// Account subscriptions: (channel id, title, subscription id); bool = user asked.
+    SubsSynced(R<Vec<(String, String, String)>>, bool),
+    /// Remote subscribe/unsubscribe finished: (channel, name, wanted on, new sub id).
+    SubDone(String, String, bool, R<String>),
+    ChatSent(R<()>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MiniBtn {
+    Expand,
+    Close,
+    Pause,
 }
 
 /// Comment / reply composer.
@@ -51,6 +63,8 @@ struct Compose {
     label: String,
     text: String,
     sending: bool,
+    /// Sending to live chat rather than commenting.
+    chat: bool,
 }
 
 pub enum Load {
@@ -106,6 +120,7 @@ struct Geo {
     sugg: Vec<(Rect, usize)>,
     mini: Option<Rect>,
     mini_bar: Option<Rect>,
+    mini_btns: Vec<(Rect, MiniBtn)>,
     fs_bar: Option<Rect>,
 }
 
@@ -572,6 +587,48 @@ impl App {
                     self.flash(format!("⚠ couldn't post: {e}"));
                 }
             },
+            Msg::SubsSynced(r, manual) => match r {
+                Ok(list) => {
+                    let (added, removed) = self.store.merge_remote(&list);
+                    self.store_changed();
+                    if manual || added + removed > 0 {
+                        self.flash(format!("subscriptions synced: {} on YouTube (+{added} −{removed})", list.len()));
+                    }
+                    if added + removed > 0 {
+                        self.reload_subs_page();
+                    }
+                }
+                Err(e) => self.flash(format!("⚠ couldn't sync subscriptions: {e}")),
+            },
+            Msg::SubDone(ch, name, on, r) => match r {
+                Ok(sub_id) => {
+                    if on {
+                        self.store.set_sub_id(&ch, Some(sub_id).filter(|s| !s.is_empty()));
+                    }
+                    self.store_changed();
+                }
+                Err(e) if e.contains("already subscribed") => self.sync_subs(false),
+                Err(e) => {
+                    // Undo the optimistic local change.
+                    if self.store.is_sub(&ch) == on {
+                        self.store.toggle_sub(&ch, &name);
+                    }
+                    self.store_changed();
+                    self.flash(format!("⚠ {}: {e}", if on { "couldn't subscribe" } else { "couldn't unsubscribe" }));
+                }
+            },
+            Msg::ChatSent(r) => match r {
+                Ok(()) => {
+                    self.compose = None;
+                    self.flash("message sent");
+                }
+                Err(e) => {
+                    if let Some(c) = &mut self.compose {
+                        c.sending = false;
+                    }
+                    self.flash(format!("⚠ couldn't send: {e}"));
+                }
+            },
             Msg::Chat(id, u) => {
                 if let Some(c) = self.chat.as_mut().filter(|c| c.video == id) {
                     c.apply(u);
@@ -806,9 +863,22 @@ impl App {
                 self.load(uid);
             }
             Act::ToggleSub(id, name) => {
+                let sub_id = self.store.sub_id(&id);
                 let on = self.store.toggle_sub(&id, &name);
                 self.store_changed();
-                self.flash(if on { format!("subscribed to {name}") } else { format!("unsubscribed from {name}") });
+                let remote = self.auth.clone().filter(|_| on || sub_id.is_some());
+                match remote {
+                    Some(auth) => {
+                        let tx = self.tx.clone();
+                        let (ch, nm) = (id.clone(), name.clone());
+                        std::thread::spawn(move || {
+                            let r = if on { auth.subscribe(&ch) } else { auth.unsubscribe(sub_id.as_deref().unwrap_or("")).map(|_| String::new()) };
+                            let _ = tx.send(Msg::SubDone(ch, nm, on, s(r)));
+                        });
+                        self.flash(if on { format!("subscribed to {name} on YouTube") } else { format!("unsubscribed from {name} on YouTube") });
+                    }
+                    None => self.flash(if on { format!("subscribed to {name}") } else { format!("unsubscribed from {name}") }),
+                }
             }
             Act::ToggleLater(v) => {
                 let on = self.store.toggle_later(&v);
@@ -904,8 +974,27 @@ impl App {
                     parent: parent.map(|(id, i, _)| (id, i)),
                     label,
                     sending: false,
+                    chat: false,
                 });
             }
+            Act::SyncSubs => self.sync_subs(true),
+            Act::UploadSubs => {
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                let local = self.store.local_only();
+                self.flash(format!("subscribing to {} channels on YouTube…", local.len()));
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    for c in local {
+                        let r = auth.subscribe(&c.id);
+                        let quota = matches!(&r, Err(e) if e.to_string().contains("quota"));
+                        let _ = tx.send(Msg::SubDone(c.id, c.name, true, s(r)));
+                        if quota {
+                            break;
+                        }
+                    }
+                });
+            }
+            Act::ChatSend => self.open_chat_compose(),
             Act::SignOut => {
                 if let Some(a) = self.auth.take() {
                     std::thread::spawn(move || a.sign_out());
@@ -921,6 +1010,52 @@ impl App {
         }
     }
 
+    fn sync_subs(&mut self, manual: bool) {
+        let Some(auth) = self.auth.clone() else {
+            if manual {
+                self.need_sign_in();
+            }
+            return;
+        };
+        if manual {
+            self.flash("syncing subscriptions…");
+        }
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = auth.subscriptions().map(|v| v.into_iter().map(|r| (r.channel_id, r.title, r.sub_id)).collect());
+            let _ = tx.send(Msg::SubsSynced(s(r), manual));
+        });
+    }
+
+    fn reload_subs_page(&mut self) {
+        let uids: Vec<u64> = self.tabs.iter().flat_map(|t| t.pages.iter()).filter(|p| matches!(p.kind, Kind::Subs { .. })).map(|p| p.uid).collect();
+        for uid in uids {
+            self.load(uid);
+        }
+    }
+
+    /// Composer for a live chat message on the playing (or shown) live stream.
+    fn open_chat_compose(&mut self) {
+        if self.auth.is_none() {
+            return self.need_sign_in();
+        }
+        let live = self.chat.as_ref().filter(|c| !c.replay).map(|c| c.video.clone());
+        let Some(video) = live else {
+            self.flash("no live chat running (chat replays are read-only)");
+            return;
+        };
+        let title = self.player.as_ref().map(|p| p.video.title.clone()).unwrap_or_default();
+        self.compose = Some(Compose {
+            uid: self.page().uid,
+            video,
+            parent: None,
+            label: format!("Live chat · {}", page::trunc(&title, 50)),
+            text: String::new(),
+            sending: false,
+            chat: true,
+        });
+    }
+
     fn need_sign_in(&mut self) {
         self.flash("sign in to do that: see the Account page");
         self.navigate(Kind::Account);
@@ -933,6 +1068,13 @@ impl App {
             return;
         }
         c.sending = true;
+        if c.chat {
+            let (video, tx) = (c.video.clone(), self.tx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::ChatSent(s(auth.send_chat(&video, &text))));
+            });
+            return;
+        }
         let (uid, video, parent, tx) = (c.uid, c.video.clone(), c.parent.clone(), self.tx.clone());
         std::thread::spawn(move || {
             let (r, idx) = match parent {
@@ -1112,6 +1254,21 @@ impl App {
                 Btn::Reload => self.reload(),
                 Btn::Addr => self.start_edit(false),
                 Btn::Help => self.navigate(Kind::Help),
+            }
+            return;
+        }
+        if let Some(&(_, b)) = self.geo.mini_btns.iter().find(|(r, _)| hit(r)) {
+            match b {
+                MiniBtn::Close => {
+                    self.stop();
+                    self.flash("player closed");
+                }
+                MiniBtn::Expand => self.return_to_player(),
+                MiniBtn::Pause => {
+                    if let Some(p) = &mut self.player {
+                        p.toggle_pause();
+                    }
+                }
             }
             return;
         }
@@ -1401,6 +1558,7 @@ impl App {
                     self.flash(msg);
                 }
             }
+            KeyCode::Char('I') => self.open_chat_compose(),
             KeyCode::Char('C') => {
                 self.store.show_chat = !self.store.show_chat;
                 self.store_changed();
@@ -1779,11 +1937,12 @@ impl App {
                         }
                     }
                 }
-                Prim::Chat { x, y, w: cw, h } => {
+                Prim::Chat { x, y, w: cw, h, input } => {
                     let sy = *y as i64 - scroll as i64;
                     if sy + *h as i64 > 0 && sy < vh as i64 {
                         let cw = (*cw).min(w.saturating_sub(*x + 1));
-                        draw_chat(buf, r, r.x + x, sy, cw, *h, self.chat.as_ref());
+                        let inp = input.then_some(self.auth.is_some());
+                        draw_chat(buf, r, r.x + x, sy, cw, *h, self.chat.as_ref(), inp);
                     }
                 }
                 Prim::PlayerBar { x, y, w: bw, id } => {
@@ -1839,8 +1998,23 @@ impl App {
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
         }
-        let title = page::trunc(&p.video.title, mw as usize - 2);
+        // Overlay controls on the video, like YouTube's miniplayer.
+        let ctl = Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
+        let expand = Rect { x: r.x, y: r.y, width: 4, height: 1 };
+        let close = Rect { x: r.x + mw - 4, y: r.y, width: 4, height: 1 };
+        buf.set_string(expand.x, expand.y, " ↗  ", ctl);
+        buf.set_string(close.x, close.y, "  ✕ ", ctl);
+        let pp = if p.paused || p.ended { "  ▶  " } else { " ❚❚  " };
+        let pr_ = Rect { x: r.x + mw / 2 - 2, y: r.y + vh / 2, width: 5, height: 1 };
+        if p.paused || p.ended {
+            buf.set_string(pr_.x, pr_.y, pp, ctl);
+        }
+        self.geo.mini_btns = vec![(expand, MiniBtn::Expand), (close, MiniBtn::Close), (pr_, MiniBtn::Pause)];
+        let title = page::trunc(&p.video.title, mw as usize - 8);
         buf.set_string(r.x + 1, r.y + vh, title, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        let pb = Rect { x: r.x + mw - 5, y: r.y + vh, width: 4, height: 1 };
+        buf.set_string(pb.x, pb.y, if p.paused || p.ended { " ▶ " } else { " ❚❚" }, Style::default().fg(Color::White).bg(page::BUTTON));
+        self.geo.mini_btns.push((pb, MiniBtn::Pause));
         draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
         self.geo.mini = Some(r);
         self.geo.mini_bar = Some(Rect { x: r.x, y: r.y + vh + 1, width: mw.saturating_sub(16), height: 1 });
@@ -1858,7 +2032,8 @@ impl App {
             None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
         }
         if side {
-            draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref());
+            let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
+            draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref(), inp);
         }
         let br = Rect { y: area.y + vh, height: 1, ..area };
         buf.set_style(br, Style::default().bg(Color::Rgb(40, 0, 0)));
@@ -1873,9 +2048,9 @@ impl App {
         if self.status.1.elapsed() < Duration::from_secs(4) && !self.status.0.is_empty() {
             left = self.status.0.clone();
         } else if self.page().loading || self.page().more_loading {
-            left = "⟳ loading…".into();
+            left = "↻ loading…".into();
         } else if let Some((v, _)) = &self.pending {
-            left = format!("⟳ opening {}…", v.title);
+            left = format!("↻ opening {}…", v.title);
         } else if let Some(p) = &self.player {
             let icon = if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
             left = format!("{icon} {} · {}", p.video.title, fmt_time(p.pos));
@@ -1920,6 +2095,7 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal, rx: Receiver<Msg>) -> Result<()> {
         use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+        self.sync_subs(false);
         let mut last_save = Instant::now();
         while !self.quit {
             while let Ok(m) = rx.try_recv() {
@@ -2045,10 +2221,23 @@ fn role_color(r: Role) -> Color {
 }
 
 /// Chat panel: header, then the newest messages that fit, bottom-aligned.
-fn draw_chat(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, chat: Option<&Chat>) {
-    if w < 12 || h < 3 {
+/// `input`: Some(signed_in) reserves the bottom row for the send box.
+fn draw_chat(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, chat: Option<&Chat>, input: Option<bool>) {
+    if w < 12 || h < 4 {
         return;
     }
+    let h = if let Some(signed_in) = input {
+        let y = sy + h as i64 - 1;
+        if y >= 0 && y < clip.height as i64 {
+            let r = Rect { x, y: clip.y + y as u16, width: w, height: 1 };
+            fill(buf, clip, x, y, w, 1, Color::Rgb(40, 40, 50));
+            let msg = if signed_in { " Say something…  (I)" } else { " Sign in to chat" };
+            buf.set_string(r.x, r.y, page::trunc(msg, w as usize), Style::default().fg(DIM));
+        }
+        h - 1
+    } else {
+        h
+    };
     fill(buf, clip, x, sy, w, h, Color::Rgb(24, 24, 30));
     let row = |i: u16| -> Option<u16> {
         let y = sy + i as i64;

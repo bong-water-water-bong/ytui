@@ -1306,6 +1306,7 @@ dependencies = [
  "crossterm",
  "fontdue",
  "image",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

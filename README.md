@@ -36,14 +36,16 @@ It works like a browser for YouTube:
 - **Live chat** on live streams and **chat replay** on past streams, synced to the playhead
   (also beside the video in fullscreen)
 - **Volume control** (0–150%, mute), applied live without restarting playback
-- **Miniplayer** when you scroll or browse away, and **fullscreen** (`f`)
+- **Miniplayer** when you scroll or browse away, with overlay controls (↗ back to the
+  video, ✕ close, play/pause), and **fullscreen** (`f`)
 - **Channel pages** (banner, avatar, Home/Videos/Shorts/Live/Playlists tabs) and **playlists**
 - **Subscriptions, history (with resume positions) and watch later**, stored locally in
   `~/.local/share/ytui/`
 - **Mouse**: click anything, wheel to scroll, click the progress bar to seek
 
-- **Sign in** (optional) to like / dislike videos, comment and reply, using Google's
-  official OAuth and the YouTube Data API (see below)
+- **Sign in** (optional) to like / dislike videos, comment and reply, send live chat
+  messages, and sync subscriptions with your YouTube account, using Google's official OAuth
+  and the YouTube Data API (see below)
 
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
 to resolve stream URLs. Press `?` in the app for every key.
@@ -62,6 +64,11 @@ are stored in `~/.local/share/ytui/oauth.json` (mode 0600).
 4. Run `ytui --login --client ~/Downloads/client_secret_XXXX.json` and open the link it prints.
    On a remote/SSH session the final page won't load (it points at `127.0.0.1`); copy that page's
    address from the browser and paste it into the terminal.
+
+Signed in, your YouTube subscriptions are synced at startup and on the Subscriptions page, and
+Subscribe / Unsubscribe change them on YouTube. Channels you subscribed to in ytui before
+signing in stay local until you press "Upload … to YouTube" there. Live chat gets a
+"Say something…" box (or press `I`).
 
 While the OAuth app is in *Testing*, Google expires the sign-in after 7 days (run `ytui --login`
 again, or publish the app). The free quota is 10,000 units/day; a like or comment costs 50.
@@ -95,7 +102,7 @@ and the nearest glyph wins.
 | `space` `f` | pause, fullscreen |
 | `,` `.` / `<` `>` / `0`–`9` | seek 10 s / 60 s / jump |
 | `+` `-` `M` | volume up / down, mute |
-| `C` | show / hide live chat |
+| `C` `I` | show / hide live chat, send a chat message |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |

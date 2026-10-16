@@ -9,6 +9,9 @@ use std::path::PathBuf;
 pub struct ChannelRef {
     pub id: String,
     pub name: String,
+    /// YouTube subscription id when the subscription exists on your account.
+    #[serde(default)]
+    pub sub_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,10 +95,54 @@ impl Store {
             self.subs.remove(i);
             false
         } else {
-            self.subs.push(ChannelRef { id: id.into(), name: name.into() });
+            self.subs.push(ChannelRef { id: id.into(), name: name.into(), sub_id: None });
             self.subs.sort_by_key(|c| c.name.to_lowercase());
             true
         }
+    }
+
+    pub fn sub_id(&self, channel: &str) -> Option<String> {
+        self.subs.iter().find(|c| c.id == channel).and_then(|c| c.sub_id.clone())
+    }
+
+    pub fn set_sub_id(&mut self, channel: &str, sub_id: Option<String>) {
+        if let Some(c) = self.subs.iter_mut().find(|c| c.id == channel) {
+            c.sub_id = sub_id;
+            self.dirty = true;
+        }
+    }
+
+    /// Channels subscribed in ytui only (not on the YouTube account).
+    pub fn local_only(&self) -> Vec<ChannelRef> {
+        self.subs.iter().filter(|c| c.sub_id.is_none()).cloned().collect()
+    }
+
+    /// Make the account's subscriptions authoritative: add/refresh every
+    /// remote one, drop ones that were on YouTube but no longer are, keep
+    /// local-only ones. Returns (added, removed).
+    pub fn merge_remote(&mut self, remote: &[(String, String, String)]) -> (usize, usize) {
+        let ids: std::collections::HashSet<&str> = remote.iter().map(|r| r.0.as_str()).collect();
+        let before = self.subs.len();
+        self.subs.retain(|c| c.sub_id.is_none() || ids.contains(c.id.as_str()));
+        let removed = before - self.subs.len();
+        let mut added = 0;
+        for (id, name, sub_id) in remote {
+            match self.subs.iter_mut().find(|c| &c.id == id) {
+                Some(c) => {
+                    c.sub_id = Some(sub_id.clone());
+                    if !name.is_empty() {
+                        c.name = name.clone();
+                    }
+                }
+                None => {
+                    self.subs.push(ChannelRef { id: id.clone(), name: name.clone(), sub_id: Some(sub_id.clone()) });
+                    added += 1;
+                }
+            }
+        }
+        self.subs.sort_by_key(|c| c.name.to_lowercase());
+        self.dirty = true;
+        (added, removed)
     }
 
     pub fn progress(&self, id: &str) -> Option<&HistEntry> {
@@ -143,7 +190,7 @@ impl Store {
         for line in csv.lines().skip(1) {
             let cols: Vec<&str> = line.splitn(3, ',').collect();
             if cols.len() == 3 && cols[0].starts_with("UC") && !self.is_sub(cols[0]) {
-                self.subs.push(ChannelRef { id: cols[0].trim().into(), name: cols[2].trim().into() });
+                self.subs.push(ChannelRef { id: cols[0].trim().into(), name: cols[2].trim().into(), sub_id: None });
                 n += 1;
             }
         }

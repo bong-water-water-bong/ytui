@@ -167,6 +167,12 @@ pub enum Act {
     /// Open the composer to reply to comment `idx`.
     ReplyTo(usize),
     SignOut,
+    /// Re-read subscriptions from the YouTube account.
+    SyncSubs,
+    /// Subscribe on YouTube to every local-only channel.
+    UploadSubs,
+    /// Open the composer to send a live chat message.
+    ChatSend,
 }
 
 #[derive(Clone)]
@@ -176,8 +182,9 @@ pub enum Prim {
     Fill { x: u16, y: usize, w: u16, h: u16, color: Color },
     Player { x: u16, y: usize, w: u16, h: u16, id: String },
     PlayerBar { x: u16, y: usize, w: u16, id: String },
-    /// Live chat / chat replay panel, filled in at draw time.
-    Chat { x: u16, y: usize, w: u16, h: u16 },
+    /// Live chat / chat replay panel, filled in at draw time. `input`
+    /// reserves the bottom row for the send box (live chats only).
+    Chat { x: u16, y: usize, w: u16, h: u16, input: bool },
 }
 
 #[derive(Clone)]
@@ -655,7 +662,18 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                 }
                 y += 4;
             } else {
-                let labels: Vec<String> = store.subs.iter().map(|c| c.name.clone()).collect();
+                if ctx.account.is_some() {
+                    let local = store.local_only().len();
+                    b.line(1, y, vec![Span::styled(format!("Synced with your YouTube account · {} channels", store.subs.len() - local), st(META))]);
+                    let mut bx = 1;
+                    y += 1;
+                    bx += b.button(bx, y, "↻ Sync now", Act::SyncSubs, false) + 1;
+                    if local > 0 {
+                        b.button(bx, y, &format!("Upload {local} local-only to YouTube"), Act::UploadSubs, false);
+                    }
+                    y += 2;
+                }
+                let labels: Vec<String> = store.subs.iter().map(|c| if ctx.account.is_some() && c.sub_id.is_none() { format!("{} (local)", c.name) } else { c.name.clone() }).collect();
                 let ids: Vec<String> = store.subs.iter().map(|c| c.id.clone()).collect();
                 y += b.chips(1, y, iw, &labels, None, |i| Act::Channel(ids[i].clone())) + 1;
                 b.line(1, y, vec![Span::styled("Latest", bold)]);
@@ -761,8 +779,12 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, ctx: &Ctx) 
     let mut y = ph as usize + 2;
     let info = wt.info.as_ref();
     let chat = chat && info.is_some_and(|i| i.chat.is_some());
+    let live_chat = chat && info.is_some_and(|i| i.chat.as_ref().is_some_and(|c| !c.1));
     if chat && !two {
-        b.prims.push(Prim::Chat { x: 1, y: y - 1, w: lw, h: 12 });
+        b.prims.push(Prim::Chat { x: 1, y: y - 1, w: lw, h: 12, input: live_chat });
+        if live_chat {
+            b.tgt(1, y - 1 + 11, lw, 1, Act::ChatSend);
+        }
         y += 12;
     }
     let title = info.map(|i| i.title.clone()).unwrap_or_else(|| wt.video.title.clone());
@@ -875,7 +897,10 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, ctx: &Ctx) 
         let rx = lw + 3;
         let top = if chat {
             let ch = ((vh as usize) * 55 / 100).clamp(10, 30);
-            b.prims.push(Prim::Chat { x: rx, y: 0, w: w - rx, h: ch as u16 });
+            b.prims.push(Prim::Chat { x: rx, y: 0, w: w - rx, h: ch as u16, input: live_chat });
+            if live_chat {
+                b.tgt(rx, ch - 1, w - rx - 1, 1, Act::ChatSend);
+            }
             ch + 1
         } else {
             0
@@ -969,7 +994,8 @@ Keys — player (anywhere while something is playing)
   sign-in: run `ytui --login` (setup steps on the Account page / --help-login)
   composer: Enter posts, Alt-Enter new line, Esc cancels, paste works
   + -              volume up / down (0-150%)        M                mute
-  C                show / hide live chat            m                cycle render mode
+  C                show / hide live chat            I                send a live chat message (signed in)
+  m                cycle render mode
   [ ] { }          ascii contrast / edges
   click the progress bar to seek; click the miniplayer to return to the video
 

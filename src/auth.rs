@@ -41,6 +41,16 @@ pub struct Auth {
     client: ClientCfg,
     tokens: Mutex<Tokens>,
     agent: ureq::Agent,
+    /// video id -> liveChatId
+    chat_ids: Mutex<std::collections::HashMap<String, String>>,
+}
+
+/// One of your YouTube subscriptions.
+pub struct RemoteSub {
+    pub channel_id: String,
+    pub title: String,
+    /// Subscription resource id (needed to unsubscribe).
+    pub sub_id: String,
 }
 
 fn config_dir() -> PathBuf {
@@ -108,6 +118,13 @@ fn api_err(e: ureq::Error) -> anyhow::Error {
             match reason {
                 "quotaExceeded" => anyhow!("YouTube API daily quota used up (resets at midnight Pacific)"),
                 "commentsDisabled" => anyhow!("comments are turned off for this video"),
+                "subscriptionDuplicate" => anyhow!("already subscribed"),
+                "subscriptionForbidden" => anyhow!("YouTube refused the subscription (too many recent subscriptions or the channel can't be subscribed to)"),
+                "subscriberNotFound" | "subscriptionNotFound" => anyhow!("not subscribed on YouTube"),
+                "liveChatDisabled" => anyhow!("live chat is turned off for this stream"),
+                "liveChatEnded" => anyhow!("this live chat has ended"),
+                "rateLimitExceeded" => anyhow!("sending too fast (slow mode?); wait a moment"),
+                "forbidden" if code == 403 => anyhow!("not allowed: {}", strip_tags(&msg)),
                 _ => anyhow!("HTTP {code}: {}", strip_tags(&msg)),
             }
         }
@@ -133,7 +150,7 @@ impl Auth {
     pub fn load() -> Option<Auth> {
         let client: ClientCfg = serde_json::from_slice(&std::fs::read(client_path()).ok()?).ok()?;
         let tokens: Tokens = serde_json::from_slice(&std::fs::read(token_path()).ok()?).ok()?;
-        Some(Auth { client, tokens: Mutex::new(tokens), agent: crate::api::agent() })
+        Some(Auth { client, tokens: Mutex::new(tokens), agent: crate::api::agent(), chat_ids: Mutex::default() })
     }
 
     pub fn channel(&self) -> String {
@@ -217,6 +234,78 @@ impl Auth {
         let body = json!({"snippet": {"parentId": parent, "textOriginal": text}});
         let v = self.post_json(&format!("{API}/comments?part=snippet"), body)?;
         Ok(posted(&v, 1))
+    }
+
+    fn get_json(&self, url: &str) -> Result<Value> {
+        let tok = self.access()?;
+        let r = self.agent.get(url).set("Authorization", &format!("Bearer {tok}")).call().map_err(api_err)?;
+        Ok(serde_json::from_str(&r.into_string()?)?)
+    }
+
+    /// All of your subscriptions (1 quota unit per 50).
+    pub fn subscriptions(&self) -> Result<Vec<RemoteSub>> {
+        let mut out = Vec::new();
+        let mut page: Option<String> = None;
+        for _ in 0..40 {
+            let mut url = format!("{API}/subscriptions?part=snippet&mine=true&maxResults=50&order=alphabetical");
+            if let Some(p) = &page {
+                url.push_str(&format!("&pageToken={p}"));
+            }
+            let v = self.get_json(&url)?;
+            for it in v["items"].as_array().into_iter().flatten() {
+                let sn = &it["snippet"];
+                if let Some(ch) = sn["resourceId"]["channelId"].as_str() {
+                    out.push(RemoteSub {
+                        channel_id: ch.into(),
+                        title: sn["title"].as_str().unwrap_or("").into(),
+                        sub_id: it["id"].as_str().unwrap_or("").into(),
+                    });
+                }
+            }
+            page = v["nextPageToken"].as_str().map(String::from);
+            if page.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Subscribe; returns the new subscription id.
+    pub fn subscribe(&self, channel: &str) -> Result<String> {
+        let body = json!({"snippet": {"resourceId": {"kind": "youtube#channel", "channelId": channel}}});
+        let v = self.post_json(&format!("{API}/subscriptions?part=snippet"), body)?;
+        Ok(v["id"].as_str().unwrap_or("").into())
+    }
+
+    pub fn unsubscribe(&self, sub_id: &str) -> Result<()> {
+        let tok = self.access()?;
+        self.agent
+            .delete(&format!("{API}/subscriptions?id={sub_id}"))
+            .set("Authorization", &format!("Bearer {tok}"))
+            .call()
+            .map_err(api_err)?;
+        Ok(())
+    }
+
+    fn live_chat_id(&self, video: &str) -> Result<String> {
+        if let Some(id) = self.chat_ids.lock().unwrap().get(video) {
+            return Ok(id.clone());
+        }
+        let v = self.get_json(&format!("{API}/videos?part=liveStreamingDetails&id={video}"))?;
+        let id = v["items"][0]["liveStreamingDetails"]["activeLiveChatId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("this video has no active live chat"))?
+            .to_string();
+        self.chat_ids.lock().unwrap().insert(video.into(), id.clone());
+        Ok(id)
+    }
+
+    /// Post a message to a live stream's chat.
+    pub fn send_chat(&self, video: &str, text: &str) -> Result<()> {
+        let chat = self.live_chat_id(video)?;
+        let body = json!({"snippet": {"liveChatId": chat, "type": "textMessageEvent", "textMessageDetails": {"messageText": text}}});
+        self.post_json(&format!("{API}/liveChat/messages?part=snippet"), body)?;
+        Ok(())
     }
 
     /// Revoke the grant and forget the tokens.
