@@ -41,6 +41,7 @@ OPTIONS:
   --audio A      auto | pulse | alsa | none   (auto: pulse if available, muted over ssh)
   --fps N        max render frame rate (default 30)
   --height N     max stream height to fetch (default 480)
+  --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
@@ -58,6 +59,7 @@ fn main() -> Result<()> {
     let mut demo: Option<String> = None;
     let mut client: Option<String> = None;
     let mut at = 0.0;
+    let mut exposure = true;
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
     while let Some(a) = args.next() {
@@ -93,6 +95,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--at" => at = val("--at")?.parse()?,
+            "--exposure" => exposure = !matches!(val("--exposure")?.as_str(), "off" | "no" | "0" | "false"),
             "--cols" => scols = Some(val("--cols")?.parse()?),
             "--rows" => srows = Some(val("--rows")?.parse()?),
             _ => query.push(a),
@@ -135,7 +138,14 @@ fn main() -> Result<()> {
             (s.video_url, s.aspect)
         };
         let (w, h, _, _) = player::fit(aspect, scols.unwrap_or(tc), srows.unwrap_or(tr.saturating_sub(1)));
-        let px = player::grab_frame(&input, at, w * CW, h * CH).ok_or_else(|| anyhow::anyhow!("could not decode a frame"))?;
+        let mut px = player::grab_frame(&input, at, w * CW, h * CH).ok_or_else(|| anyhow::anyhow!("could not decode a frame"))?;
+        let mut ae = render::Exposure::new(exposure);
+        ae.measure(&px, 1.0);
+        ae.apply(&mut px);
+        if exposure {
+            let (lo, gain) = ae.params();
+            eprintln!("auto-exposure: offset {lo:.3}, gain {gain:.2}");
+        }
         let mut cells = Vec::new();
         renderer.render(&Img { w: w * CW, h: h * CH, px: &px }, w, h, &mut cells);
         print!("{}", term::to_ansi(&cells, w, h));

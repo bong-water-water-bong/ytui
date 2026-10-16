@@ -112,6 +112,12 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 | `halfblock` | Top/bottom half blocks |
 | `braille` | 2×4 dot mosaic |
 
+**Auto-exposure** (on by default, `E` toggles) lifts under-exposed video so dark scenes stay
+readable: it measures each frame's 1st–99th percentile brightness, raises the highlights to white
+with one gain for all channels (hues hold), eases in over ~0.2 s and resets on seeks. Frames
+whose highlights already reach white are left alone, and the gain is capped at 3.5× so fades to
+black don't become noise. `AE` on the player bar shows when it's on.
+
 The ASCII modes match glyph *shape*, not just brightness, following the technique in Alex Harri's
 ["ASCII characters are not pixels"](https://alexharri.com/blog/ascii-rendering): each glyph is
 rasterised from a real monospace font and described by its ink coverage in six staggered sampling
@@ -132,6 +138,7 @@ and the nearest glyph wins.
 | `C` `I` | show / hide live chat, send a chat message |
 | `P` | save the focused / current video to a playlist |
 | `V` | 3D audio visualiser instead of the video |
+| `E` | auto-exposure on / off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |

@@ -604,7 +604,7 @@ impl App {
                         self.store.record(&v, start, dur);
                         self.store_changed();
                         let (c, r) = self.term;
-                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume));
+                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure));
                         self.ended_handled = false;
                         self.last_record = Instant::now();
                         if start > 0.0 {
@@ -1923,6 +1923,15 @@ impl App {
                 }
             }
             KeyCode::Char('I') => self.open_chat_compose(),
+            KeyCode::Char('E') => {
+                self.store.exposure = !self.store.exposure;
+                self.store.touch();
+                if let Some(p) = &mut self.player {
+                    p.exposure.on = self.store.exposure;
+                    p.exposure.reset();
+                }
+                self.flash(if self.store.exposure { "auto-exposure on" } else { "auto-exposure off" });
+            }
             KeyCode::Char('V') => {
                 self.viz = !self.viz;
                 self.flash(if self.viz { "3D visualiser on (V to switch back to video)" } else { "video" });
@@ -2691,7 +2700,8 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
     let vol = if p.muted() { "muted".to_string() } else { format!("vol {:.0}%", p.level() * 100.0) };
-    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {} {:.0}fps ", mode.name(), p.fps) };
+    let ae = if p.exposure.on { " AE" } else { "" };
+    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {}{ae} {:.0}fps ", mode.name(), p.fps) };
     let tw = tail.width() as u16;
     let bw = w.saturating_sub(tw.max(16) + 1);
     let filled = if d > 0.0 { ((p.pos / d).clamp(0.0, 1.0) * bw as f64) as u16 } else { 0 };

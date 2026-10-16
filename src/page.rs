@@ -1088,6 +1088,7 @@ Keys — player (anywhere while something is playing)
   C                show / hide live chat            I                send a live chat message (signed in)
   P                save the focused / current video to a playlist (signed in)
   V                3D audio visualiser instead of the video picture (ytui --demo3d for the engine)
+  E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
   m                cycle render mode
   [ ] { }          ascii contrast / edges
   click the progress bar to seek; click the miniplayer to return to the video

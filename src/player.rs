@@ -9,7 +9,7 @@
 
 use crate::api::VideoItem;
 use crate::glyphs::{CH, CW};
-use crate::render::{Cell, Img, Renderer};
+use crate::render::{Cell, Exposure, Img, Renderer};
 use crate::yt::Stream;
 use anyhow::Result;
 use std::io::{Read, Write};
@@ -346,12 +346,15 @@ pub struct Player {
     term: (usize, usize),
     scratch: Vec<u8>,
     cells: Vec<Cell>,
+    pub exposure: Exposure,
+    /// Frame number the exposure was last measured on.
+    exp_seen: u64,
     fps_win: (Instant, u32),
     pub fps: f64,
 }
 
 impl Player {
-    pub fn new(video: VideoItem, stream: Stream, start: f64, opts: Opts, term: (usize, usize), volume: f32) -> Player {
+    pub fn new(video: VideoItem, stream: Stream, start: f64, opts: Opts, term: (usize, usize), volume: f32, exposure: bool) -> Player {
         let mut p = Player {
             video,
             stream,
@@ -372,6 +375,8 @@ impl Player {
             term,
             scratch: Vec::new(),
             cells: Vec::new(),
+            exposure: Exposure::new(exposure),
+            exp_seen: u64::MAX,
             fps_win: (Instant::now(), 0),
             fps: 0.0,
         };
@@ -394,6 +399,9 @@ impl Player {
     fn restart(&mut self) {
         self.dec = None;
         self.seen = 0;
+        // A seek is a hard cut: measure the next frame afresh.
+        self.exposure.reset();
+        self.exp_seen = u64::MAX;
         self.ended = false;
         if self.paused {
             return;
@@ -537,13 +545,19 @@ impl Player {
         }
         let (cw, ch, x0, y0) = fit(self.fw as f64 / self.fh as f64, w, h);
         let (tw, th) = (cw * CW, ch * CH);
-        let px: &[u8] = if (tw, th) == (self.fw, self.fh) {
-            &self.frame
+        if self.exposure.on && self.seen != self.exp_seen {
+            // Once per decoded frame; ~0.15 per frame eases in over ~0.2 s.
+            self.exposure.measure(&self.frame, 0.15);
+            self.exp_seen = self.seen;
+        }
+        if (tw, th) == (self.fw, self.fh) {
+            self.scratch.clear();
+            self.scratch.extend_from_slice(&self.frame);
         } else {
             downsample(&self.frame, self.fw, self.fh, tw, th, &mut self.scratch);
-            &self.scratch
-        };
-        r.render(&Img { w: tw, h: th, px }, cw, ch, &mut self.cells);
+        }
+        self.exposure.apply(&mut self.scratch);
+        r.render(&Img { w: tw, h: th, px: &self.scratch }, cw, ch, &mut self.cells);
         Some((&self.cells, cw, ch, x0, y0))
     }
 }

@@ -365,3 +365,86 @@ fn mosaic(
         }
     }
 }
+
+/// Auto-exposure for video: measures each frame's brightness spread (1st to
+/// 99th percentile of luma) and, when the frame is under-exposed, lifts it
+/// so its highlights reach white, with one gain and offset for all three
+/// channels (so hues hold). Well-exposed frames are left as they are. The
+/// correction eases in over a few frames so it doesn't pump, and the gain is
+/// capped so fades to black don't turn into amplified noise.
+pub struct Exposure {
+    pub on: bool,
+    lo: f32,
+    gain: f32,
+    primed: bool,
+}
+
+const MAX_GAIN: f32 = 3.5;
+const MAX_OFFSET: f32 = 0.35;
+
+impl Exposure {
+    pub fn new(on: bool) -> Exposure {
+        Exposure { on, lo: 0.0, gain: 1.0, primed: false }
+    }
+
+    /// Forget history (after a seek or a new video) so the next frame applies at once.
+    pub fn reset(&mut self) {
+        self.primed = false;
+    }
+
+    /// Current (offset, gain), for display / tests.
+    pub fn params(&self) -> (f32, f32) {
+        (self.lo, self.gain)
+    }
+
+    /// Update the correction from a new RGB24 frame. `blend` is how much of
+    /// the new measurement to take (1.0 = jump straight to it).
+    pub fn measure(&mut self, px: &[u8], blend: f32) {
+        let mut hist = [0u32; 256];
+        let mut n = 0u32;
+        // Every 7th pixel is plenty for percentiles and keeps this cheap.
+        for p in px.chunks_exact(3).step_by(7) {
+            let l = (54 * p[0] as u32 + 183 * p[1] as u32 + 19 * p[2] as u32) >> 8;
+            hist[l.min(255) as usize] += 1;
+            n += 1;
+        }
+        if n == 0 {
+            return;
+        }
+        let pct = |q: f32| {
+            let target = (n as f32 * q) as u32;
+            let mut acc = 0;
+            for (i, &c) in hist.iter().enumerate() {
+                acc += c;
+                if acc > target {
+                    return i as f32 / 255.0;
+                }
+            }
+            1.0
+        };
+        let (lo, hi) = (pct(0.01), pct(0.99));
+        // Only correct under-exposure: a frame whose highlights already
+        // reach near-white is left alone (haze or low contrast there is
+        // usually intentional). The darker the highlights, the more the
+        // black level is also pulled down.
+        let dark = ((0.85 - hi) / 0.35).clamp(0.0, 1.0);
+        let lo = (lo * 0.5 * dark).min(MAX_OFFSET);
+        let gain = (1.0 / (hi - lo).max(1e-3)).clamp(1.0, MAX_GAIN);
+        let b = if self.primed { blend.clamp(0.0, 1.0) } else { 1.0 };
+        self.lo += (lo - self.lo) * b;
+        self.gain += (gain - self.gain) * b;
+        self.primed = true;
+    }
+
+    /// Apply the current correction in place.
+    pub fn apply(&self, px: &mut [u8]) {
+        if !self.on || (self.gain < 1.02 && self.lo < 0.01) {
+            return;
+        }
+        let mut lut = [0u8; 256];
+        for (i, v) in lut.iter_mut().enumerate() {
+            *v = (((i as f32 / 255.0 - self.lo) * self.gain).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+        px.iter_mut().for_each(|c| *c = lut[*c as usize]);
+    }
+}

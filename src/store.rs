@@ -38,6 +38,9 @@ pub struct Store {
     pub volume: f32,
     #[serde(default = "yes")]
     pub show_chat: bool,
+    /// Auto-exposure for video.
+    #[serde(default = "yes")]
+    pub exposure: bool,
     #[serde(skip)]
     dirty: bool,
 }
@@ -62,7 +65,7 @@ impl Store {
         std::fs::read(path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, ..Default::default() })
+            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, ..Default::default() })
     }
 
     pub fn touch(&mut self) {
