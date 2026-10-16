@@ -12,9 +12,10 @@ use crate::glyphs::{CH, CW};
 use crate::render::{Cell, Img, Renderer};
 use crate::yt::Stream;
 use anyhow::Result;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -82,6 +83,55 @@ struct Shared {
     count: AtomicU64,
     done: AtomicBool,
     err: Mutex<String>,
+    audio_failed: AtomicBool,
+}
+
+fn on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+}
+
+/// Player for raw s16le 48 kHz stereo on stdin, so we can apply volume
+/// ourselves. None means fall back to ffmpeg's own audio output.
+fn sink_cmd(audio: Audio) -> Option<Command> {
+    let mut c;
+    match audio {
+        Audio::Pulse if on_path("pw-cat") => {
+            c = Command::new("pw-cat");
+            c.args(["--playback", "--format", "s16", "--rate", "48000", "--channels", "2", "--latency", "80ms", "-"]);
+        }
+        Audio::Pulse if on_path("pacat") => {
+            c = Command::new("pacat");
+            c.args(["--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=80"]);
+        }
+        Audio::Alsa | Audio::Pulse if on_path("aplay") => {
+            c = Command::new("aplay");
+            c.args(["-q", "-t", "raw", "-f", "S16_LE", "-c", "2", "-r", "48000", "--buffer-time=100000"]);
+        }
+        _ => return None,
+    }
+    c.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    Some(c)
+}
+
+/// Remove audio pipes left behind by ytui processes that were killed.
+pub fn clean_stale_fifos() {
+    let dir = std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(pid) = name.strip_prefix("ytui-").and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if name.ends_with(".pcm") && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+fn make_fifo() -> Option<PathBuf> {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let p = dir.join(format!("ytui-{}-{}.pcm", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_file(&p);
+    let ok = Command::new("mkfifo").arg("-m").arg("600").arg(&p).status().is_ok_and(|s| s.success());
+    ok.then_some(p)
 }
 
 struct Decoder {
@@ -90,16 +140,71 @@ struct Decoder {
     start: f64,
     fps: f64,
     audio: Audio,
+    fifo: Option<PathBuf>,
 }
 
 impl Drop for Decoder {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(f) = &self.fifo {
+            // Unblock the audio thread if ffmpeg never opened the pipe.
+            let _ = std::fs::OpenOptions::new().write(true).custom_flags_nonblock().open(f);
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
-fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts) -> Result<Decoder> {
+trait NonBlock {
+    fn custom_flags_nonblock(&mut self) -> &mut Self;
+}
+
+impl NonBlock for std::fs::OpenOptions {
+    fn custom_flags_nonblock(&mut self) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.custom_flags(0o4000) // O_NONBLOCK
+    }
+}
+
+/// Volume as f32 bits, shared with the audio thread.
+pub type Volume = Arc<AtomicU32>;
+
+/// Read PCM from the fifo, scale by the volume, feed the sink. If the sink
+/// dies, keep draining so video carries on.
+fn audio_pump(fifo: PathBuf, mut sink: Command, vol: Volume, sh: Arc<Shared>) {
+    std::thread::spawn(move || {
+        let Ok(mut f) = std::fs::File::open(&fifo) else { return };
+        let mut child = sink.spawn().ok();
+        if child.is_none() {
+            sh.audio_failed.store(true, Ordering::Relaxed);
+        }
+        let mut buf = vec![0u8; 4096];
+        while f.read_exact(&mut buf).is_ok() {
+            let g = f32::from_bits(vol.load(Ordering::Relaxed));
+            if (g - 1.0).abs() > 1e-3 {
+                for s in buf.chunks_exact_mut(2) {
+                    let v = (i16::from_le_bytes([s[0], s[1]]) as f32 * g).clamp(-32768.0, 32767.0) as i16;
+                    s.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            if let Some(c) = &mut child {
+                if c.stdin.as_mut().is_none_or(|i| i.write_all(&buf).is_err()) {
+                    sh.audio_failed.store(true, Ordering::Relaxed);
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    child = None;
+                }
+            }
+        }
+        if let Some(mut c) = child {
+            drop(c.stdin.take());
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    });
+}
+
+fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -> Result<Decoder> {
     let fps = s.fps.map_or(opts.fps as f64, |f| f.min(opts.fps as f64));
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
@@ -125,12 +230,26 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts) -> Result<Decod
     cmd.args(["-map", "0:v:0", "-vf"])
         .arg(format!("fps={fps:.3},scale={pw}:{ph}:flags=area,format=rgb24"))
         .args(["-f", "rawvideo", "pipe:1"]);
+    let mut fifo = None;
+    let mut sink = None;
     if let Some(m) = audio_map {
         cmd.args(["-map", m]);
-        match opts.audio {
-            Audio::Pulse => cmd.args(["-f", "pulse", "ytui"]),
-            _ => cmd.args(["-f", "alsa", "default"]),
-        };
+        match (sink_cmd(opts.audio), make_fifo()) {
+            (Some(c), Some(f)) => {
+                cmd.args(["-f", "s16le", "-ac", "2", "-ar", "48000", "-y"]).arg(&f);
+                sink = Some(c);
+                fifo = Some(f);
+            }
+            _ => {
+                // No raw player available: ffmpeg plays it, volume fixed per segment.
+                let g = f32::from_bits(vol.load(Ordering::Relaxed));
+                cmd.args(["-af", &format!("volume={g:.2}")]);
+                match opts.audio {
+                    Audio::Pulse => cmd.args(["-f", "pulse", "ytui"]),
+                    _ => cmd.args(["-f", "alsa", "default"]),
+                };
+            }
+        }
     }
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let sh = Arc::new(Shared {
@@ -138,7 +257,11 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts) -> Result<Decod
         count: AtomicU64::new(0),
         done: AtomicBool::new(false),
         err: Mutex::new(String::new()),
+        audio_failed: AtomicBool::new(false),
     });
+    if let (Some(f), Some(c)) = (&fifo, sink) {
+        audio_pump(f.clone(), c, vol.clone(), sh.clone());
+    }
     let (mut stdout, mut stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let size = pw * ph * 3;
     let shr = sh.clone();
@@ -159,7 +282,7 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts) -> Result<Decod
         let _ = stderr.read_to_string(&mut s);
         *she.err.lock().unwrap() = s;
     });
-    Ok(Decoder { child, sh, start: if seek.is_some() { pos } else { 0.0 }, fps, audio: opts.audio })
+    Ok(Decoder { child, sh, start: if seek.is_some() { pos } else { 0.0 }, fps, audio: opts.audio, fifo })
 }
 
 pub struct Player {
@@ -172,6 +295,9 @@ pub struct Player {
     pub note: String,
     /// The stream failed part-way (e.g. the URL expired); worth re-resolving.
     pub failed: bool,
+    vol: Volume,
+    level: f32,
+    muted: bool,
     dec: Option<Decoder>,
     /// Decoded frame and its size in pixels.
     frame: Vec<u8>,
@@ -187,7 +313,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(video: VideoItem, stream: Stream, start: f64, opts: Opts, term: (usize, usize)) -> Player {
+    pub fn new(video: VideoItem, stream: Stream, start: f64, opts: Opts, term: (usize, usize), volume: f32) -> Player {
         let mut p = Player {
             video,
             stream,
@@ -197,6 +323,9 @@ impl Player {
             ended: false,
             note: String::new(),
             failed: false,
+            vol: Arc::new(AtomicU32::new(volume.to_bits())),
+            level: volume,
+            muted: false,
             dec: None,
             frame: Vec::new(),
             fw: 0,
@@ -233,7 +362,7 @@ impl Player {
         }
         let (w, h, _, _) = fit(self.stream.aspect, self.term.0, self.term.1);
         let (pw, ph) = (w * CW, h * CH);
-        match spawn(&self.stream, self.pos, pw, ph, self.opts) {
+        match spawn(&self.stream, self.pos, pw, ph, self.opts, &self.vol) {
             Ok(d) => {
                 self.dec = Some(d);
                 if self.fw != pw || self.fh != ph {
@@ -247,6 +376,36 @@ impl Player {
                 self.paused = true;
             }
         }
+    }
+
+    /// The user's volume level (kept while muted).
+    pub fn level(&self) -> f32 {
+        self.level
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Push the effective gain to the audio thread.
+    fn apply_volume(&mut self) {
+        let g = if self.muted { 0.0 } else { self.level };
+        self.vol.store(g.to_bits(), Ordering::Relaxed);
+        // Without our own audio pump the gain is baked into ffmpeg's filter.
+        if self.dec.as_ref().is_some_and(|d| d.fifo.is_none() && d.audio != Audio::None) {
+            self.restart();
+        }
+    }
+
+    pub fn set_volume(&mut self, v: f32) {
+        self.level = v.clamp(0.0, 1.5);
+        self.muted = false;
+        self.apply_volume();
+    }
+
+    pub fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        self.apply_volume();
     }
 
     pub fn set_term(&mut self, cols: usize, rows: usize) {
@@ -300,6 +459,10 @@ impl Player {
         if el >= 1.0 {
             self.fps = self.fps_win.1 as f64 / el;
             self.fps_win = (Instant::now(), 0);
+        }
+        if d.sh.audio_failed.swap(false, Ordering::Relaxed) {
+            self.note = "audio output failed; playing muted".into();
+            fresh = true;
         }
         if d.sh.done.load(Ordering::Acquire) && d.sh.count.load(Ordering::Acquire) == self.seen {
             let err = d.sh.err.lock().unwrap().trim().to_string();

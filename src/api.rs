@@ -133,6 +133,37 @@ pub struct WatchInfo {
     pub description: String,
     pub comments_token: Option<String>,
     pub related: Feed,
+    /// Live chat (or chat replay for past streams): (token, is_replay).
+    pub chat: Option<(String, bool)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    Normal,
+    Member,
+    Verified,
+    Moderator,
+    Owner,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatMsg {
+    pub author: String,
+    pub text: String,
+    pub role: Role,
+    /// Super Chat / Super Sticker amount.
+    pub amount: Option<String>,
+    /// Position in the video (chat replay only).
+    pub offset_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ChatBatch {
+    pub msgs: Vec<ChatMsg>,
+    pub next: Option<String>,
+    /// Replay only: token to restart from an arbitrary position.
+    pub seek: Option<String>,
+    pub timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -338,6 +369,12 @@ impl Api {
             }
         }
         w.related = feed_from(&res["secondaryResults"]);
+        if let Some(lc) = find(&v["contents"], "liveChatRenderer") {
+            let tok = find(&lc["continuations"], "continuation").and_then(|c| c.as_str());
+            if let Some(t) = tok {
+                w.chat = Some((t.to_string(), lc["isReplay"].as_bool() == Some(true)));
+            }
+        }
         if w.title.is_empty() {
             bail!("video unavailable");
         }
@@ -395,6 +432,15 @@ impl Api {
         }
         walk(&v["onResponseReceivedEndpoints"], &payloads, &mut out, 0);
         Ok(out)
+    }
+
+    pub fn live_chat(&self, token: &str) -> Result<ChatBatch> {
+        Ok(chat_batch(&self.post("live_chat/get_live_chat", json!({"continuation": token}))?))
+    }
+
+    pub fn chat_replay(&self, token: &str, offset_ms: u64) -> Result<ChatBatch> {
+        let body = json!({"continuation": token, "currentPlayerState": {"playerOffsetMs": offset_ms.to_string()}});
+        Ok(chat_batch(&self.post("live_chat/get_live_chat_replay", body)?))
     }
 
     pub fn resolve_url(&self, url: &str) -> Result<Target> {
@@ -835,4 +881,83 @@ fn comment(p: &Value, level: u8) -> Comment {
         creator: p["author"]["isCreator"].as_bool() == Some(true),
         level: pr["replyLevel"].as_u64().map(|l| l as u8).unwrap_or(level),
     }
+}
+
+fn chat_batch(v: &Value) -> ChatBatch {
+    let lcc = &v["continuationContents"]["liveChatContinuation"];
+    let mut b = ChatBatch { timeout_ms: 2000, ..Default::default() };
+    for c in lcc["continuations"].as_array().into_iter().flatten() {
+        for (k, d) in c.as_object().into_iter().flatten() {
+            let tok = d["continuation"].as_str().map(String::from);
+            match k.as_str() {
+                "playerSeekContinuationData" => b.seek = tok,
+                _ => {
+                    if b.next.is_none() {
+                        b.next = tok;
+                    }
+                    if let Some(t) = d["timeoutMs"].as_u64() {
+                        b.timeout_ms = t;
+                    }
+                }
+            }
+        }
+    }
+    for a in lcc["actions"].as_array().into_iter().flatten() {
+        if let Some(r) = a.get("replayChatItemAction") {
+            let off = r["videoOffsetTimeMsec"].as_str().and_then(|s| s.parse().ok());
+            for inner in r["actions"].as_array().into_iter().flatten() {
+                if let Some(mut m) = chat_item(&inner["addChatItemAction"]["item"]) {
+                    m.offset_ms = off;
+                    b.msgs.push(m);
+                }
+            }
+        } else if let Some(m) = chat_item(&a["addChatItemAction"]["item"]) {
+            b.msgs.push(m);
+        }
+    }
+    b
+}
+
+fn chat_item(item: &Value) -> Option<ChatMsg> {
+    let (r, amount) = if let Some(r) = item.get("liveChatTextMessageRenderer") {
+        (r, None)
+    } else if let Some(r) = item.get("liveChatPaidMessageRenderer") {
+        (r, text(&r["purchaseAmountText"]))
+    } else if let Some(r) = item.get("liveChatPaidStickerRenderer") {
+        (r, text(&r["purchaseAmountText"]))
+    } else if let Some(r) = item.get("liveChatMembershipItemRenderer") {
+        (r, None)
+    } else {
+        return None;
+    };
+    let mut body = String::new();
+    for run in r["message"]["runs"].as_array().into_iter().flatten() {
+        if let Some(t) = run["text"].as_str() {
+            body.push_str(t);
+        } else if let Some(e) = run.get("emoji") {
+            let custom = e["isCustomEmoji"].as_bool() == Some(true);
+            let id = e["emojiId"].as_str().filter(|_| !custom);
+            let short = e["shortcuts"][0].as_str();
+            body.push_str(id.or(short).unwrap_or(""));
+        }
+    }
+    if body.is_empty() {
+        body = text(&r["headerSubtext"]).unwrap_or_default();
+    }
+    let mut role = Role::Normal;
+    for badge in r["authorBadges"].as_array().into_iter().flatten() {
+        let b = &badge["liveChatAuthorBadgeRenderer"];
+        let r2 = match b["icon"]["iconType"].as_str() {
+            Some("OWNER") => Role::Owner,
+            Some("MODERATOR") => Role::Moderator,
+            Some("VERIFIED") => Role::Verified,
+            _ if b.get("customThumbnail").is_some() => Role::Member,
+            _ => Role::Normal,
+        };
+        let rank = |r: Role| r as u8;
+        if rank(r2) > rank(role) {
+            role = r2;
+        }
+    }
+    Some(ChatMsg { author: text(&r["authorName"]).unwrap_or_default(), text: body, role, amount, offset_ms: None })
 }

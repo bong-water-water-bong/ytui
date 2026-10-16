@@ -3,7 +3,8 @@
 //! spatial keyboard navigation, and one video player that plays inline on
 //! its watch page, in a miniplayer elsewhere, or fullscreen.
 
-use crate::api::{self, Api, ChannelPage, CommentBatch, Entry, Feed, Item, PlaylistPage, Target, VideoItem, WatchInfo};
+use crate::api::{self, Api, ChannelPage, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
+use crate::chat::{self, Chat};
 use crate::page::{self, chip_query, layout, Act, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Mode, Renderer};
@@ -29,8 +30,9 @@ pub enum Msg {
     Load(u64, Load),
     Stream(String, R<yt::Stream>),
     Suggest(String, Vec<String>),
-    Related(String, Vec<VideoItem>),
+    Related(String, Vec<VideoItem>, Option<(String, bool)>),
     Open(R<Target>, bool),
+    Chat(String, chat::Update),
 }
 
 pub enum Load {
@@ -106,6 +108,9 @@ pub struct App {
     ended_handled: bool,
     /// Video id we already re-resolved after a stream failure.
     retried: Option<String>,
+    chat: Option<Chat>,
+    /// Chat source for a video: (video id, token, is_replay).
+    chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
     queue: Vec<VideoItem>,
     qpos: usize,
@@ -154,6 +159,8 @@ impl App {
             pending: None,
             ended_handled: false,
             retried: None,
+            chat: None,
+            chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
             qpos: 0,
@@ -377,7 +384,7 @@ impl App {
                     w.video.channel_id = Some(info.channel_id.clone());
                 }
                 if player_id.as_deref() == Some(w.video.id.as_str()) {
-                    related = Some((w.video.id.clone(), info.related.videos(), w.video.clone()));
+                    related = Some((w.video.id.clone(), info.related.videos(), w.video.clone(), info.chat.clone()));
                 }
                 w.info = Some(info);
             }
@@ -424,7 +431,10 @@ impl App {
                 let _ = tx.send(Msg::Load(uid, Load::Comments(s(api.comments(&tok)))));
             });
         }
-        if let Some((id, rel, v)) = related {
+        if let Some((id, rel, v, chat)) = related {
+            if let Some((tok, replay)) = chat {
+                self.chat_src = Some((id.clone(), tok, replay));
+            }
             self.up_next = (id, rel);
             if let Some(pl) = self.player.as_mut().filter(|p| p.video.id == v.id) {
                 if pl.video.title.is_empty() {
@@ -454,7 +464,7 @@ impl App {
                         self.store.record(&v, start, dur);
                         self.store_changed();
                         let (c, r) = self.term;
-                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize)));
+                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume));
                         self.ended_handled = false;
                         self.last_record = Instant::now();
                         if start > 0.0 {
@@ -472,9 +482,17 @@ impl App {
                     }
                 }
             }
-            Msg::Related(id, rel) => {
+            Msg::Related(id, rel, chat) => {
                 if self.player.as_ref().is_some_and(|p| p.video.id == id) || self.pending.as_ref().is_some_and(|p| p.0.id == id) {
+                    if let Some((tok, replay)) = chat {
+                        self.chat_src = Some((id.clone(), tok, replay));
+                    }
                     self.up_next = (id, rel);
+                }
+            }
+            Msg::Chat(id, u) => {
+                if let Some(c) = self.chat.as_mut().filter(|c| c.video == id) {
+                    c.apply(u);
                 }
             }
             Msg::Open(r, new_tab) => match r {
@@ -541,7 +559,7 @@ impl App {
             let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h));
             let _ = tx.send(Msg::Stream(id.clone(), r));
             if let Ok(w) = api.watch(&id) {
-                let _ = tx.send(Msg::Related(id, w.related.videos()));
+                let _ = tx.send(Msg::Related(id, w.related.videos(), w.chat));
             }
         });
     }
@@ -554,6 +572,7 @@ impl App {
         }
         self.pending = None;
         self.fullscreen = false;
+        self.chat = None;
     }
 
     /// Next video: the playlist queue first, then "Up next".
@@ -586,7 +605,32 @@ impl App {
         }
     }
 
+    fn sync_chat(&mut self) {
+        let Some(p) = &self.player else {
+            self.chat = None;
+            return;
+        };
+        let id = p.video.id.clone();
+        if let Some(c) = &self.chat {
+            if c.video == id {
+                c.set_pos(p.pos);
+                return;
+            }
+            self.chat = None;
+        }
+        if let Some((sid, tok, replay)) = self.chat_src.clone() {
+            if sid == id {
+                let tx = self.tx.clone();
+                let pos = (p.pos * 1000.0) as u64;
+                self.chat = Some(Chat::start(self.api.clone(), id, tok, replay, pos, move |vid, u| {
+                    let _ = tx.send(Msg::Chat(vid, u));
+                }));
+            }
+        }
+    }
+
     fn after_tick(&mut self) {
+        self.sync_chat();
         let Some(p) = &self.player else { return };
         if p.failed && self.retried.as_deref() != Some(p.video.id.as_str()) {
             // Stream URLs expire; fetch a fresh one once and carry on.
@@ -618,6 +662,18 @@ impl App {
     }
 
     // ------------------------------------------------------------ actions
+
+    fn change_volume(&mut self, by: f32) {
+        let v = (self.store.volume + by).clamp(0.0, 1.5);
+        let v = (v * 20.0).round() / 20.0;
+        self.store.volume = v;
+        self.store.touch();
+        if let Some(p) = &mut self.player {
+            p.set_volume(v);
+        }
+        let bar = "█".repeat((v * 10.0).round() as usize) + &"░".repeat(15 - (v * 10.0).round() as usize);
+        self.flash(format!("volume {bar} {:.0}%", v * 100.0));
+    }
 
     fn current_watch_video(&self) -> Option<(VideoItem, Vec<VideoItem>, usize)> {
         match &self.page().kind {
@@ -1154,6 +1210,20 @@ impl App {
                 self.flash(format!("render mode: {}", self.renderer.mode.name()));
             }
             KeyCode::Char('B') => self.renderer.ascii_bg = !self.renderer.ascii_bg,
+            KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
+            KeyCode::Char('M') => {
+                if let Some(p) = &mut self.player {
+                    p.toggle_mute();
+                    let msg = if p.muted() { "muted".to_string() } else { format!("volume {:.0}%", p.level() * 100.0) };
+                    self.flash(msg);
+                }
+            }
+            KeyCode::Char('C') => {
+                self.store.show_chat = !self.store.show_chat;
+                self.store_changed();
+                self.flash(if self.store.show_chat { "chat shown" } else { "chat hidden" });
+            }
             KeyCode::Char('[') => self.renderer.glob_exp = (self.renderer.glob_exp - 0.2).max(1.0),
             KeyCode::Char(']') => self.renderer.glob_exp += 0.2,
             KeyCode::Char('{') => self.renderer.dir_exp = (self.renderer.dir_exp - 0.25).max(1.0),
@@ -1412,11 +1482,12 @@ impl App {
         let (w, vh) = (r.width, r.height);
         let key_store = self.store_rev;
         let autoplay = self.store.autoplay;
+        let show_chat = self.store.show_chat;
         let t = &mut self.tabs[self.cur];
         let page = &mut t.pages[t.idx];
         let key = (w, vh, page.rev, key_store);
         if page.layout.as_ref().map(|l| l.0) != Some(key) {
-            let doc = layout(page, &self.store, w, vh, autoplay);
+            let doc = layout(page, &self.store, w, vh, autoplay, show_chat);
             page.layout = Some((key, doc));
         }
         let doc = &page.layout.as_ref().unwrap().1;
@@ -1498,6 +1569,13 @@ impl App {
                         }
                     }
                 }
+                Prim::Chat { x, y, w: cw, h } => {
+                    let sy = *y as i64 - scroll as i64;
+                    if sy + *h as i64 > 0 && sy < vh as i64 {
+                        let cw = (*cw).min(w.saturating_sub(*x + 1));
+                        draw_chat(buf, r, r.x + x, sy, cw, *h, self.chat.as_ref());
+                    }
+                }
                 Prim::PlayerBar { x, y, w: bw, id } => {
                     if *y >= scroll && *y < scroll + vh as usize {
                         if let Some(p) = self.player.as_ref().filter(|p| &p.video.id == id) {
@@ -1562,9 +1640,15 @@ impl App {
         let Some(p) = &mut self.player else { return };
         buf.set_style(area, Style::default().bg(Color::Black));
         let vh = area.height - 1;
-        match p.cells(&mut self.renderer, area.width as usize, vh as usize) {
-            Some((cells, cw, ch, ox, oy)) => blit(buf, area, area.x + ox as u16, oy as i64, cells, cw, ch),
-            None => center_text(buf, area, area.x, 0, area.width, vh, "Loading video…"),
+        let side = self.store.show_chat && self.chat.as_ref().is_some_and(|c| c.video == p.video.id) && area.width >= 100;
+        let vw = if side { area.width - 44 } else { area.width };
+        let varea = Rect { width: vw, ..area };
+        match p.cells(&mut self.renderer, vw as usize, vh as usize) {
+            Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
+            None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
+        }
+        if side {
+            draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref());
         }
         let br = Rect { y: area.y + vh, height: 1, ..area };
         buf.set_style(br, Style::default().bg(Color::Rgb(40, 0, 0)));
@@ -1589,7 +1673,14 @@ impl App {
                 left.push_str(&format!(" · {}", p.note));
             }
         }
-        let right = format!(" {} · {} │ / search  ↵ open  H back  f full  m mode  ? help ", self.renderer.mode.name(), if self.opts.audio == crate::player::Audio::None { "muted" } else { "audio" });
+        let audio = if self.opts.audio == crate::player::Audio::None {
+            "no audio".to_string()
+        } else if self.player.as_ref().is_some_and(|p| p.muted()) {
+            "muted".to_string()
+        } else {
+            format!("vol {:.0}%", self.store.volume * 100.0)
+        };
+        let right = format!(" {} · {audio} │ / search  ↵ open  H back  f full  +- vol  C chat  ? help ", self.renderer.mode.name());
         let rw = right.width() as u16;
         let lw = r.width.saturating_sub(rw + 1) as usize;
         buf.set_string(r.x + 1, r.y, page::trunc(&left, lw), style);
@@ -1715,7 +1806,8 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
     let d = p.duration();
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
-    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {} {:.0}fps ", mode.name(), p.fps) };
+    let vol = if p.muted() { "muted".to_string() } else { format!("vol {:.0}%", p.level() * 100.0) };
+    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {} {:.0}fps ", mode.name(), p.fps) };
     let tw = tail.width() as u16;
     let bw = w.saturating_sub(tw.max(16) + 1);
     let filled = if d > 0.0 { ((p.pos / d).clamp(0.0, 1.0) * bw as f64) as u16 } else { 0 };
@@ -1730,6 +1822,99 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
         }
     }
     buf.set_string(x + w.saturating_sub(tw), y, &tail, Style::default().fg(Color::White));
+}
+
+fn role_color(r: Role) -> Color {
+    match r {
+        Role::Owner => Color::Rgb(255, 214, 0),
+        Role::Moderator => Color::Rgb(94, 132, 241),
+        Role::Member => Color::Rgb(43, 186, 74),
+        Role::Verified => Color::Rgb(230, 230, 230),
+        Role::Normal => Color::Rgb(160, 160, 170),
+    }
+}
+
+/// Chat panel: header, then the newest messages that fit, bottom-aligned.
+fn draw_chat(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, chat: Option<&Chat>) {
+    if w < 12 || h < 3 {
+        return;
+    }
+    fill(buf, clip, x, sy, w, h, Color::Rgb(24, 24, 30));
+    let row = |i: u16| -> Option<u16> {
+        let y = sy + i as i64;
+        (y >= 0 && y < clip.height as i64).then(|| clip.y + y as u16)
+    };
+    let head = match chat {
+        Some(c) if c.replay => vec![Span::styled(" Chat replay", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))],
+        _ => vec![
+            Span::styled(" ● ", Style::default().fg(ACCENT)),
+            Span::styled("Live chat", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ],
+    };
+    if let Some(y) = row(0) {
+        buf.set_line(x, y, &Line::from(head), w);
+        let hint = "C hide ";
+        buf.set_string(x + w - hint.len() as u16, y, hint, Style::default().fg(DIM));
+    }
+    if let Some(y) = row(1) {
+        buf.set_string(x, y, "─".repeat(w as usize), Style::default().fg(Color::Rgb(50, 50, 60)));
+    }
+    let body = h.saturating_sub(2) as usize;
+    let tw = (w - 2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(c) = chat {
+        for m in c.visible().rev() {
+            let prefix_w = m.author.width() + 2 + m.amount.as_ref().map_or(0, |a| a.width() + 3);
+            // Non-breaking spaces: the wrapper collapses ordinary space runs.
+            let pad = "\u{a0}".repeat(prefix_w);
+            let wrapped = page::wrap(&format!("{pad}{}", m.text), tw, 6);
+            let mut ls: Vec<Line> = Vec::new();
+            for (i, l) in wrapped.into_iter().enumerate() {
+                if i == 0 {
+                    let mut spans = Vec::new();
+                    if let Some(a) = &m.amount {
+                        spans.push(Span::styled(format!(" {a} "), Style::default().fg(Color::Black).bg(Color::Rgb(255, 202, 40)).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::raw(" "));
+                    }
+                    let name_style = match m.role {
+                        Role::Owner => Style::default().fg(Color::Black).bg(role_color(m.role)),
+                        r => Style::default().fg(role_color(r)),
+                    };
+                    spans.push(Span::styled(m.author.clone(), name_style.add_modifier(Modifier::BOLD)));
+                    spans.push(Span::raw("  "));
+                    let rest: String = l.chars().skip(pad.chars().count()).collect();
+                    spans.push(Span::styled(rest, Style::default().fg(Color::Rgb(225, 225, 225))));
+                    ls.push(Line::from(spans));
+                } else {
+                    ls.push(Line::from(Span::styled(l, Style::default().fg(Color::Rgb(225, 225, 225)))));
+                }
+            }
+            for l in ls.into_iter().rev() {
+                lines.push(l);
+            }
+            if lines.len() >= body {
+                break;
+            }
+        }
+    }
+    lines.truncate(body);
+    lines.reverse();
+    if lines.is_empty() {
+        let msg = match chat {
+            Some(c) => c.error.clone().unwrap_or_else(|| if c.replay { "Waiting for messages…".into() } else { "Connecting to chat…".into() }),
+            None => "Chat starts when the video plays".into(),
+        };
+        if let Some(y) = row(2) {
+            buf.set_string(x + 1, y, page::trunc(&msg, tw), Style::default().fg(DIM));
+        }
+        return;
+    }
+    let top = 2 + (body - lines.len()) as u16;
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(y) = row(top + i as u16) {
+            buf.set_line(x + 1, y, l, w - 1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- feeds

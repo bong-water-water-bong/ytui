@@ -31,12 +31,20 @@ pub struct Store {
     pub mode: Option<String>,
     #[serde(default = "yes")]
     pub autoplay: bool,
+    #[serde(default = "one")]
+    pub volume: f32,
+    #[serde(default = "yes")]
+    pub show_chat: bool,
     #[serde(skip)]
     dirty: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 fn path() -> PathBuf {
@@ -51,7 +59,7 @@ impl Store {
         std::fs::read(path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Store { autoplay: true, ..Default::default() })
+            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, ..Default::default() })
     }
 
     pub fn touch(&mut self) {

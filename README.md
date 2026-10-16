@@ -33,6 +33,9 @@ It works like a browser for YouTube:
 - **Search** with filters (videos, shorts, channels, playlists, live, newest) and infinite scroll
 - **Watch page**: inline player, description with clickable chapter timestamps, likes/views,
   comments with replies, "Up next" with autoplay, playlist queue
+- **Live chat** on live streams and **chat replay** on past streams, synced to the playhead
+  (also beside the video in fullscreen)
+- **Volume control** (0–150%, mute), applied live without restarting playback
 - **Miniplayer** when you scroll or browse away, and **fullscreen** (`f`)
 - **Channel pages** (banner, avatar, Home/Videos/Shorts/Live/Playlists tabs) and **playlists**
 - **Subscriptions, history (with resume positions) and watch later**, stored locally in
@@ -69,12 +72,16 @@ and the nearest glyph wins.
 | `Ctrl-T` `Ctrl-W` `J` `K` | new tab, close tab, next / previous tab |
 | `space` `f` | pause, fullscreen |
 | `,` `.` / `<` `>` / `0`–`9` | seek 10 s / 60 s / jump |
+| `+` `-` `M` | volume up / down, mute |
+| `C` | show / hide live chat |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | `m` | cycle render mode |
 | `?` `q` | help, quit |
 
-Audio goes through PulseAudio or ALSA (`--audio`); it is muted by default over SSH.
+Audio goes through PipeWire/PulseAudio (`pw-cat` or `pacat`) or ALSA (`aplay`), with ytui
+applying the volume itself; without those tools ffmpeg plays audio directly. Pick the output
+with `--audio`; it is off by default over SSH.
 
 ## License
 

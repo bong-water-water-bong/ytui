@@ -156,6 +156,8 @@ pub enum Prim {
     Fill { x: u16, y: usize, w: u16, h: u16, color: Color },
     Player { x: u16, y: usize, w: u16, h: u16, id: String },
     PlayerBar { x: u16, y: usize, w: u16, id: String },
+    /// Live chat / chat replay panel, filled in at draw time.
+    Chat { x: u16, y: usize, w: u16, h: u16 },
 }
 
 #[derive(Clone)]
@@ -530,7 +532,7 @@ impl B<'_> {
 }
 
 /// Lay out `page` for a content area `w` wide and `vh` tall.
-pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool) -> Doc {
+pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool, chat: bool) -> Doc {
     let mut b = B { prims: Vec::new(), tg: Vec::new(), store };
     let w = w.max(20);
     let iw = w - 1; // inner width after the 1-col focus gutter
@@ -616,7 +618,7 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool) -> Do
                 y = b.status(y, page, "", false);
             }
         }
-        Kind::Watch(wt) => y = watch_layout(&mut b, page, wt, w, vh, autoplay),
+        Kind::Watch(wt) => y = watch_layout(&mut b, page, wt, w, vh, autoplay, chat),
         Kind::Subs { feed } => {
             b.line(1, y, vec![Span::styled("Subscriptions", bold)]);
             y += 2;
@@ -685,7 +687,7 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool) -> Do
     Doc { h: y + 1, prims: b.prims, targets: b.tg }
 }
 
-fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: bool) -> usize {
+fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: bool, chat: bool) -> usize {
     let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let two = w >= 120;
     let lw = if two { w * 64 / 100 } else { w } - 1;
@@ -704,6 +706,11 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: b
     b.tgt(1, ph as usize, lw, 1, Act::PlayerBar);
     let mut y = ph as usize + 2;
     let info = wt.info.as_ref();
+    let chat = chat && info.is_some_and(|i| i.chat.is_some());
+    if chat && !two {
+        b.prims.push(Prim::Chat { x: 1, y: y - 1, w: lw, h: 12 });
+        y += 12;
+    }
     let title = info.map(|i| i.title.clone()).unwrap_or_else(|| wt.video.title.clone());
     y += b.para(1, y, lw, &title, bold, 3);
     y += 1;
@@ -808,7 +815,14 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: b
     let (mut left_end, mut right_end) = (y, 0usize);
     if two {
         let rx = lw + 3;
-        right_end = side(b, rx, 0, w - rx, 40);
+        let top = if chat {
+            let ch = ((vh as usize) * 55 / 100).clamp(10, 30);
+            b.prims.push(Prim::Chat { x: rx, y: 0, w: w - rx, h: ch as u16 });
+            ch + 1
+        } else {
+            0
+        };
+        right_end = side(b, rx, top, w - rx, 40);
     } else if info.is_some() {
         left_end = side(b, 1, y, lw, 6) + 1;
     }
@@ -878,7 +892,9 @@ Keys — player (anywhere while something is playing)
   , .              back / forward 10 s              < >              back / forward 60 s
   0-9              jump to 0%..90%                  n                next video
   x                stop and close the player        a                autoplay on / off
-  m                cycle render mode                [ ] { }          ascii contrast / edges
+  + -              volume up / down (0-150%)        M                mute
+  C                show / hide live chat            m                cycle render mode
+  [ ] { }          ascii contrast / edges
   click the progress bar to seek; click the miniplayer to return to the video
 
 Render modes

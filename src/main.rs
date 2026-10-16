@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod chat;
 mod glyphs;
 mod page;
 mod player;
@@ -105,6 +106,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    player::clean_stale_fifos();
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
     let chip = app.default_chip();
     app.open_tab(Kind::Home { chip, feed: api::Feed::default() });
