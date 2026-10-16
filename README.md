@@ -49,3 +49,7 @@ space pause · ←/→ 10s · ↑/↓ 60s · 0–9 jump · m mode · b ascii bac
 `[ ]` global contrast · `{ }` edge contrast · n/p next/prev · q back
 
 Audio goes through PulseAudio or ALSA (`--audio`); it is muted by default over SSH.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

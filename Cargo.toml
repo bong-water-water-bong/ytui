@@ -2,6 +2,8 @@
 name = "ytui"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/bong-water-water-bong/ytui"
 description = "YouTube in the terminal: search, browse, and watch videos rendered as colour ASCII / Unicode mosaics"
 
 [dependencies]
