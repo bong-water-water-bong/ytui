@@ -78,8 +78,9 @@ impl Thumbs {
     pub fn cells(&mut self, url: &str, w: u16, h: u16, r: &mut Renderer) -> Option<&Vec<Cell>> {
         // Small images read best as mosaics; follow the user's mode only when
         // it is itself a mosaic (e.g. quadrant for fonts without sextants).
+        // Half blocks render in every font (sextant glyphs are missing from many).
         let mode = match r.mode {
-            Mode::Ascii | Mode::Classic => Mode::Sextant,
+            Mode::Art | Mode::Ascii | Mode::Classic => Mode::HalfBlock,
             m => m,
         };
         let key = (url.to_string(), w, h, mode);

@@ -244,6 +244,11 @@ impl App {
         self.gfx = g;
     }
 
+    /// Show a startup hint in the status bar (longer than a normal flash).
+    pub fn hint(&mut self, msg: String) {
+        self.status = (msg, Instant::now() + Duration::from_secs(8));
+    }
+
     /// Pixel backend, when present and switched on.
     fn gfx_active(&self) -> bool {
         self.gfx.is_some() && self.store.gfx
@@ -2818,7 +2823,7 @@ fn render_viz(
     let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
     let px = engine.render(&scene, &cam, w * GW, h * GH);
     let saved = (r.mode, r.black, r.value_density);
-    if r.mode == Mode::Ascii {
+    if matches!(r.mode, Mode::Ascii | Mode::Art) {
         r.mode = Mode::Classic;
     }
     r.black = 0.2;

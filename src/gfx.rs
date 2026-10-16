@@ -40,6 +40,23 @@ pub struct Caps {
     /// Cell size in pixels, if the terminal told us.
     pub cell: Option<(u16, u16)>,
     pub tmux: bool,
+    /// Inside tmux: kitty passthrough is enabled.
+    pub passthrough: bool,
+    /// Inside tmux: the outer terminal lacks truecolor as far as tmux knows,
+    /// so tmux squeezes colours into its 256-colour palette.
+    pub tmux_256: bool,
+}
+
+/// Terminal cell sizes outside this range are bogus reports.
+fn plausible(c: (u16, u16)) -> bool {
+    let (w, h) = (c.0 as f32, c.1 as f32);
+    (5.0..=64.0).contains(&w) && (9.0..=128.0).contains(&h) && (1.3..=3.2).contains(&(h / w))
+}
+
+/// Ask tmux about the client terminal it is drawing to.
+fn tmux_query(fmt: &str) -> Option<String> {
+    let out = std::process::Command::new("tmux").args(["display-message", "-p", fmt]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 impl Caps {
@@ -48,16 +65,34 @@ impl Caps {
     /// sixel is preferred when available.
     pub fn choose(&self) -> Option<Proto> {
         let n = self.name.to_lowercase();
+        let kitty = self.kitty && (!self.tmux || self.passthrough);
         let placeholders = n.contains("kitty") || n.contains("ghostty") || self.tmux;
-        if self.kitty && placeholders {
+        // Sixel can't scale, so it needs a believable cell size.
+        let sixel = self.sixel && self.cell.is_some_and(plausible);
+        if kitty && placeholders {
             Some(Proto::Kitty)
-        } else if self.sixel {
+        } else if sixel {
             Some(Proto::Sixel)
-        } else if self.kitty {
+        } else if kitty {
             Some(Proto::Kitty)
         } else {
             None
         }
+    }
+
+    /// Why pixel graphics weren't chosen, for a hint in the UI.
+    pub fn why_not(&self) -> Option<String> {
+        if self.choose().is_some() {
+            return None;
+        }
+        if self.sixel && !self.cell.is_some_and(plausible) {
+            let c = self.cell.map(|c| format!("{}x{}", c.0, c.1)).unwrap_or_else(|| "no".into());
+            return Some(format!("sixel off: the terminal reported a {c} pixel cell size"));
+        }
+        if self.tmux && self.kitty && !self.passthrough {
+            return Some("kitty graphics need `set -g allow-passthrough on` in tmux".into());
+        }
+        None
     }
 }
 
@@ -123,10 +158,28 @@ pub fn detect() -> Caps {
     }
     let _ = crossterm::terminal::disable_raw_mode();
     let s = String::from_utf8_lossy(&got).to_string();
+    if caps.tmux {
+        // tmux answers DA1 itself; ask it what the real (outer) terminal can do.
+        if let Some(f) = tmux_query("#{client_termfeatures}") {
+            let feats: Vec<&str> = f.split(',').collect();
+            caps.sixel = feats.contains(&"sixel");
+            caps.tmux_256 = !feats.contains(&"RGB");
+        }
+        if let (Some(w), Some(h)) = (tmux_query("#{client_cell_width}"), tmux_query("#{client_cell_height}")) {
+            if let (Ok(w), Ok(h)) = (w.parse::<u16>(), h.parse::<u16>()) {
+                caps.cell = Some((w, h));
+            }
+        }
+        caps.passthrough = tmux_query("#{allow-passthrough}").or_else(|| {
+            std::process::Command::new("tmux").args(["show", "-gv", "allow-passthrough"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        }).is_some_and(|v| v == "on" || v == "all");
+    }
     caps.kitty = s.contains("\x1b_Gi=31;OK");
-    if let Some((a, b)) = da1_end(&got) {
-        let params = &s[a..b];
-        caps.sixel = params.split(';').any(|p| p == "4");
+    if !caps.tmux {
+        if let Some((a, b)) = da1_end(&got) {
+            let params = &s[a..b];
+            caps.sixel = params.split(';').any(|p| p == "4");
+        }
     }
     if let Some(i) = s.find("\x1bP>|") {
         let rest = &s[i + 4..];

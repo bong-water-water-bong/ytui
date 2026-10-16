@@ -19,6 +19,9 @@ impl Default for Cell {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Mode {
+    /// Clean ASCII art: directional strokes on edges, a short density ramp
+    /// elsewhere, coloured ink on black, stable from frame to frame.
+    Art,
     /// Two-tone shape ASCII: glyphs only where there is edge detail.
     Ascii,
     /// Harri-style absolute brightness ASCII, colour ink on a dark ground.
@@ -30,10 +33,11 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 6] = [Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille];
+    pub const ALL: [Mode; 7] = [Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille];
 
     pub fn name(self) -> &'static str {
         match self {
+            Mode::Art => "art",
             Mode::Ascii => "ascii",
             Mode::Classic => "classic",
             Mode::Sextant => "sextant",
@@ -78,7 +82,33 @@ pub struct Renderer {
     outer: Vec<Vec<(i32, i32)>>,
     cache: HashMap<u32, u8>,
     lum: Vec<f32>,
+    /// Art mode: keep characters steady across frames (set for video).
+    pub temporal: bool,
+    /// Art mode detail glyphs: symbols only, since letters and digits
+    /// scattered through texture read as noise.
+    art_glyphs: Glyphs,
+    art_cache: HashMap<u32, u8>,
+    art_prev: Vec<u8>,
+    art_dims: (usize, usize),
+    blur: Vec<f32>,
+    gx: Vec<f32>,
+    gy: Vec<f32>,
 }
+
+/// Art mode density ramp, darkest to brightest.
+/// No directional characters here, so strokes always mean edges.
+const RAMP: [char; 7] = [' ', '.', ':', '+', '*', '#', '@'];
+/// Bends the ramp so the densest glyphs are kept for highlights; colour
+/// carries the rest of the brightness.
+const TONE_GAMMA: f32 = 1.4;
+/// Art mode strokes by edge direction: bottom horizontal, mid horizontal,
+/// vertical, rising diagonal, falling diagonal.
+const STROKES: [char; 5] = ['_', '-', '|', '/', '\\'];
+const EDGE: u8 = 100;
+/// Art mode states from here up are shape-matched glyphs (index into `glyphs`).
+const DETAIL: u8 = 128;
+/// Luminance range inside a cell (0..1) needed for a shape-matched glyph.
+const DETAIL_CONTRAST: f32 = 0.35;
 
 const QUAD: [char; 16] = [
     ' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█',
@@ -110,6 +140,10 @@ impl Renderer {
         let glyphs = Glyphs::load();
         let inner = INNER.iter().map(|&(u, v)| glyphs::circle_offsets(u, v, CW, CH)).collect();
         let outer = OUTER.iter().map(|&(u, v)| glyphs::circle_offsets(u, v, CW, CH)).collect();
+        let art_glyphs = Glyphs {
+            chars: glyphs.chars.iter().copied().filter(|c| !c.is_ascii_alphanumeric()).collect(),
+            vecs: glyphs.chars.iter().zip(&glyphs.vecs).filter(|(c, _)| !c.is_ascii_alphanumeric()).map(|(_, v)| *v).collect(),
+        };
         Renderer {
             mode,
             ascii_bg: true,
@@ -123,6 +157,14 @@ impl Renderer {
             outer,
             cache: HashMap::new(),
             lum: Vec::new(),
+            temporal: false,
+            art_glyphs,
+            art_cache: HashMap::new(),
+            art_prev: Vec::new(),
+            art_dims: (0, 0),
+            blur: Vec::new(),
+            gx: Vec::new(),
+            gy: Vec::new(),
         }
     }
 
@@ -133,6 +175,7 @@ impl Renderer {
             return;
         }
         match self.mode {
+            Mode::Art => self.art(img, cols, rows, out),
             Mode::Ascii => self.ascii(img, cols, rows, out, true),
             Mode::Classic => self.ascii(img, cols, rows, out, false),
             Mode::HalfBlock => {
@@ -157,6 +200,204 @@ impl Renderer {
                 char::from_u32(0x2800 + b).unwrap()
             }, true),
         }
+    }
+
+    /// Clean ASCII art. Edges (from Sobel gradients on a lightly blurred
+    /// luminance image, summarised per cell with a structure tensor) become
+    /// stroke characters along the edge direction; everything else maps to a
+    /// 10-step density ramp. With `temporal` set, each cell keeps its
+    /// previous character until the picture moves clearly past it, which
+    /// removes frame-to-frame flicker.
+    fn art(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell]) {
+        let (w, h) = (img.w, img.h);
+        let n = w * h;
+        self.lum.resize(n, 0.0);
+        for (i, p) in img.px[..n * 3].chunks_exact(3).enumerate() {
+            self.lum[i] = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+        }
+        // 3x3 box blur: steadier gradients, less sensor / compression noise.
+        self.blur.resize(n, 0.0);
+        let at = |v: &[f32], x: isize, y: isize| v[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let mut s = 0.0;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        s += at(&self.lum, x + dx, y + dy);
+                    }
+                }
+                self.blur[y as usize * w + x as usize] = s / 9.0;
+            }
+        }
+        self.gx.resize(n, 0.0);
+        self.gy.resize(n, 0.0);
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let b = &self.blur;
+                let gx = (at(b, x + 1, y - 1) + 2.0 * at(b, x + 1, y) + at(b, x + 1, y + 1)) - (at(b, x - 1, y - 1) + 2.0 * at(b, x - 1, y) + at(b, x - 1, y + 1));
+                let gy = (at(b, x - 1, y + 1) + 2.0 * at(b, x, y + 1) + at(b, x + 1, y + 1)) - (at(b, x - 1, y - 1) + 2.0 * at(b, x, y - 1) + at(b, x + 1, y - 1));
+                self.gx[y as usize * w + x as usize] = gx;
+                self.gy[y as usize * w + x as usize] = gy;
+            }
+        }
+        let keep = self.temporal && self.art_dims == (cols, rows) && self.art_prev.len() == cols * rows;
+        if !keep {
+            self.art_prev = vec![0; cols * rows];
+            self.art_dims = (cols, rows);
+        }
+        // Sobel answers 4x a luminance step; this is a step of ~0.12.
+        const T: f32 = 0.5;
+        let area = (CW * CH) as f32;
+        // Pass 1: per-cell structure tensor, edge coverage and luminance.
+        struct Stat {
+            jxx: f32,
+            jyy: f32,
+            jxy: f32,
+            frac: f32,
+            low: bool,
+            lum: f32,
+        }
+        let mut stats = Vec::with_capacity(cols * rows);
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let (x0, y0) = (cx * CW, cy * CH);
+                let (mut jxx, mut jyy, mut jxy) = (0f32, 0f32, 0f32);
+                let (mut strong, mut wsum, mut ysum, mut lsum) = (0f32, 0f32, 0f32, 0f32);
+                for py in 0..CH {
+                    let row = (y0 + py) * w + x0;
+                    for px in 0..CW {
+                        let (gx, gy) = (self.gx[row + px], self.gy[row + px]);
+                        jxx += gx * gx;
+                        jyy += gy * gy;
+                        jxy += gx * gy;
+                        lsum += self.blur[row + px];
+                        let m = (gx * gx + gy * gy).sqrt();
+                        if m > T {
+                            strong += 1.0;
+                            wsum += m;
+                            ysum += m * py as f32;
+                        }
+                    }
+                }
+                let low = wsum > 0.0 && ysum / wsum / CH as f32 > 0.62;
+                stats.push(Stat { jxx, jyy, jxy, frac: strong / area, low, lum: lsum / area });
+            }
+        }
+        // Tone is smoothed over neighbouring cells so flat areas get one
+        // even texture instead of ragged bands where the ramp steps.
+        let tone: Vec<f32> = (0..rows * cols)
+            .map(|i| {
+                let (cx, cy) = (i % cols, i / cols);
+                let mut s = 4.0 * stats[i].lum;
+                let mut n = 4.0;
+                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (x, y) = (cx as i32 + dx, cy as i32 + dy);
+                    if x >= 0 && y >= 0 && (x as usize) < cols && (y as usize) < rows {
+                        s += stats[y as usize * cols + x as usize].lum;
+                        n += 1.0;
+                    }
+                }
+                s / n
+            })
+            .collect();
+        // Pass 2: pick each cell's character.
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let i = cy * cols + cx;
+                let (x0, y0) = (cx * CW, cy * CH);
+                let st = &stats[i];
+                let (jxx, jyy, jxy, frac) = (st.jxx, st.jyy, st.jxy, st.frac);
+                let coherence = ((jxx - jyy).powi(2) + 4.0 * jxy * jxy).sqrt() / (jxx + jyy + 1e-6);
+                let prev = if keep { self.art_prev[i] } else { 0 };
+                let was_edge = (EDGE..DETAIL).contains(&prev);
+                let busy = frac > if was_edge || prev >= DETAIL { 0.10 } else { 0.18 };
+                let state = if busy && coherence > 0.45 {
+                    // Gradient angle (screen coords, y down); the edge runs across it.
+                    let theta = 0.5 * (2.0 * jxy).atan2(jxx - jyy);
+                    let phi = (theta + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI);
+                    let deg = phi.to_degrees();
+                    let bin = if !(22.5..157.5).contains(&deg) {
+                        // Horizontal: '_' when the edge sits low in the cell.
+                        if st.low { 0 } else { 1 }
+                    } else if (67.5..112.5).contains(&deg) {
+                        2
+                    } else if deg < 90.0 {
+                        4 // runs right-and-down on screen
+                    } else {
+                        3
+                    };
+                    // Near a direction boundary, keep the previous stroke.
+                    let near_boundary = [22.5f32, 67.5, 112.5, 157.5].iter().any(|b| (deg - b).abs() < 9.0);
+                    if was_edge && near_boundary { prev } else { EDGE + bin }
+                } else if busy && self.art_contrast(x0, y0, w, h) > DETAIL_CONTRAST {
+                    // Strong detail with no single direction (lettering,
+                    // corners): match the cell's light pattern to a shape.
+                    let mut v = [0f32; 6];
+                    for (k, pts) in self.inner.iter().enumerate() {
+                        let mut s = 0.0;
+                        for &(dx, dy) in pts {
+                            let x = (x0 as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                            let y = (y0 as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                            s += self.blur[y * w + x];
+                        }
+                        v[k] = s / pts.len() as f32;
+                    }
+                    let lo = v.iter().copied().fold(1f32, f32::min);
+                    let hi = v.iter().copied().fold(0f32, f32::max);
+                    let k = 1.0 / (hi - lo).max(1e-3);
+                    v.iter_mut().for_each(|x| *x = (*x - lo) * k);
+                    let mut key = 0u32;
+                    for x in v {
+                        key = key << 5 | (x.clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
+                    }
+                    let gi = *self.art_cache.entry(key).or_insert_with(|| self.art_glyphs.nearest(&v) as u8);
+                    // A blank match means the detail is too faint to draw.
+                    if self.art_glyphs.chars[gi as usize] == ' ' { 1 } else { DETAIL + gi }
+                } else {
+                    let x = tone[i].clamp(0.0, 1.0).powf(TONE_GAMMA) * RAMP.len() as f32;
+                    let mut level = (x as usize).min(RAMP.len() - 1);
+                    if (1..=RAMP.len() as u8).contains(&prev) {
+                        let p = (prev - 1) as usize;
+                        if (x - (p as f32 + 0.5)).abs() < 0.85 {
+                            level = p;
+                        }
+                    }
+                    level as u8 + 1
+                };
+                if keep || self.temporal {
+                    self.art_prev[i] = state;
+                }
+                let ch = if state >= DETAIL {
+                    self.art_glyphs.chars[(state - DETAIL) as usize]
+                } else if state >= EDGE {
+                    STROKES[(state - EDGE) as usize]
+                } else {
+                    RAMP[(state - 1) as usize]
+                };
+                let avg = box_avg(img, x0, y0, CW, CH);
+                let mx = avg[0].max(avg[1]).max(avg[2]).max(1.0);
+                // Ink on black: lift the colour, keeping its hue.
+                let lift = 255.0 * (mx / 255.0).powf(0.5) / mx;
+                out[i] = Cell { ch, fg: to_u8([avg[0] * lift, avg[1] * lift, avg[2] * lift]), bg: [0, 0, 0] };
+            }
+        }
+    }
+
+    /// Luminance range (max - min of the six sample circles) in a cell.
+    fn art_contrast(&self, x0: usize, y0: usize, w: usize, h: usize) -> f32 {
+        let (mut lo, mut hi) = (1f32, 0f32);
+        for pts in &self.inner {
+            let mut s = 0.0;
+            for &(dx, dy) in pts {
+                let x = (x0 as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                let y = (y0 as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                s += self.blur[y * w + x];
+            }
+            let m = s / pts.len() as f32;
+            lo = lo.min(m);
+            hi = hi.max(m);
+        }
+        hi - lo
     }
 
     fn ascii(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell], relative: bool) {
@@ -446,5 +687,48 @@ impl Exposure {
             *v = (((i as f32 / 255.0 - self.lo) * self.gain).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         }
         px.iter_mut().for_each(|c| *c = lut[*c as usize]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A smooth gradient with a bright disc, plus per-pixel noise.
+    fn frame(cols: usize, rows: usize, seed: u32) -> Vec<u8> {
+        let (w, h) = (cols * CW, rows * CH);
+        let mut px = Vec::with_capacity(w * h * 3);
+        let mut s = seed.wrapping_mul(2654435761).wrapping_add(1);
+        for y in 0..h {
+            for x in 0..w {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                let noise = (s % 17) as f32 - 8.0;
+                let (dx, dy) = (x as f32 - w as f32 / 2.0, (y as f32 - h as f32 / 2.0) * 0.5);
+                let disc = if dx * dx + dy * dy < (w as f32 / 5.0).powi(2) { 120.0 } else { 0.0 };
+                let v = (x as f32 / w as f32 * 120.0 + disc + noise).clamp(0.0, 255.0) as u8;
+                px.extend_from_slice(&[v, v / 2, 255 - v]);
+            }
+        }
+        px
+    }
+
+    fn changed(temporal: bool) -> usize {
+        let (cols, rows) = (60, 20);
+        let mut r = Renderer::new(Mode::Art);
+        r.temporal = temporal;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let (f1, f2) = (frame(cols, rows, 1), frame(cols, rows, 2));
+        r.render(&Img { w: cols * CW, h: rows * CH, px: &f1 }, cols, rows, &mut a);
+        r.render(&Img { w: cols * CW, h: rows * CH, px: &f2 }, cols, rows, &mut b);
+        a.iter().zip(&b).filter(|(x, y)| x.ch != y.ch).count()
+    }
+
+    #[test]
+    fn art_is_stable_across_noisy_frames() {
+        let (loose, steady) = (changed(false), changed(true));
+        eprintln!("cells whose character changed between two noisy frames: {loose} without hysteresis, {steady} with");
+        assert!(steady * 3 <= loose.max(1), "hysteresis should remove most flicker");
     }
 }

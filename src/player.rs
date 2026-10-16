@@ -619,7 +619,10 @@ impl Player {
             downsample(&self.frame, self.fw, self.fh, tw, th, &mut self.scratch);
         }
         self.exposure.apply(&mut self.scratch);
+        // Video: keep art-mode characters steady between frames.
+        r.temporal = true;
         r.render(&Img { w: tw, h: th, px: &self.scratch }, cw, ch, &mut self.cells);
+        r.temporal = false;
         Some((&self.cells, cw, ch, x0, y0))
     }
 }

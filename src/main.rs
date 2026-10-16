@@ -39,7 +39,7 @@ USAGE:
   ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
 
 OPTIONS:
-  --mode M       ascii | classic | sextant | quadrant | halfblock | braille
+  --mode M       art | ascii | classic | sextant | quadrant | halfblock | braille
   --audio A      auto | pulse | alsa | none   (auto: pulse if available, muted over ssh)
   --fps N        max render frame rate (default 30)
   --height N     max stream height to fetch (default 480)
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Ascii));
+    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Art));
 
     if let (Some(d), Ok(path)) = (&demo, std::env::var("YTUI_3D_DUMP")) {
         let kind = scenes::Kind::parse(d).unwrap_or(scenes::Kind::Logo);
@@ -164,11 +164,16 @@ fn main() -> Result<()> {
     }
 
     player::clean_stale_fifos();
+    let mut hints: Vec<String> = Vec::new();
     // Ask the terminal about pixel graphics before the UI takes it over.
     let gfx = match gfx_mode.as_str() {
         "off" | "none" | "no" => None,
         m => {
             let caps = gfx::detect();
+            hints = caps.why_not().into_iter().collect();
+            if caps.tmux_256 {
+                hints.push("tmux is cutting colours to 256: add  set -as terminal-features ',xterm-256color:RGB'  to ~/.tmux.conf".into());
+            }
             let proto = match m {
                 "kitty" => Some(gfx::Proto::Kitty),
                 "sixel" => Some(gfx::Proto::Sixel),
@@ -188,6 +193,9 @@ fn main() -> Result<()> {
     };
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
     app.set_gfx(gfx);
+    if let Some(h) = hints.last() {
+        app.hint(h.clone());
+    }
     let chip = app.default_chip();
     app.open_tab(Kind::Home { chip, feed: api::Feed::default() });
     let q = query.join(" ");

@@ -121,6 +121,7 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 
 | Mode | Description |
 |---|---|
+| `art` | Clean ASCII art (default): stroke characters (`_ - | / \`) along edges, a short density ramp for tone, symbols where there is fine detail, coloured ink on black; characters hold steady between video frames instead of flickering |
 | `ascii` | Two-tone shape-matched ASCII: flat areas are clean colour, glyphs only where there is edge detail |
 | `classic` | Shape-matched ASCII, colour ink on a dark ground |
 | `sextant` | 2×3 two-colour mosaic per cell (sharpest) |
