@@ -2472,7 +2472,7 @@ impl App {
                 p.scroll = 0;
                 p.focus = None;
             }
-            KeyCode::End | KeyCode::Char('G') => {
+            KeyCode::End => {
                 let h = self.doc().map(|d| d.h).unwrap_or(0);
                 self.page_mut().scroll = h;
             }
