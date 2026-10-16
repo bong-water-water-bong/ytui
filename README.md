@@ -2,6 +2,16 @@
 
 YouTube in the terminal: search, browse, and watch videos rendered as truecolour ASCII / Unicode mosaics.
 
+**[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS.
+
+![ytui in Windows Terminal, playing video in the native GPU window](docs/screenshots/native-window.jpg)
+*Native GPU video window in Windows Terminal: hardware-decoded 1080p60, with ytui's player bar and volume slider underneath.*
+
+![ytui drawing the video with sixel graphics inside the terminal](docs/screenshots/sixel.jpg)
+*The same video drawn inside the terminal with sixel graphics, at about 30 fps.*
+
+<sub>Screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
+
 ## Requirements
 
 - `yt-dlp` (plus Node.js 22+ or Deno, which yt-dlp needs for YouTube)
