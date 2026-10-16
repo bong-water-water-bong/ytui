@@ -163,24 +163,72 @@ pub fn render(src: &str, at: f64, cols: usize, rows: usize, max_h: u32) -> Resul
             bytes as f64 / fr.len() as f64 * 30.0 / 1e6
         );
     }
-    // Sixel at Windows Terminal's nominal 10x20 cell.
-    let (sw, sh) = (cols * 10, rows * 20);
-    let sf = frames(&input, at, 20, sw, sh)?;
-    let (mut ms, mut bytes) = (Vec::new(), 0usize);
-    for f in &sf {
-        let mut out = Vec::new();
-        let t = Instant::now();
-        crate::gfx::sixel_encode(f, sw, sh, &mut out);
-        ms.push(t.elapsed().as_secs_f64() * 1000.0);
-        bytes += out.len();
+    // Sixel at Windows Terminal's nominal 10x20 cell: palettes x aspect.
+    use crate::gfx::{quantize, sixel_emit, Palette};
+    for aspect in [1, 2] {
+        let (sw, sh) = (cols * 10, rows * 20 / aspect);
+        let sf = frames(&input, at, 20, sw, sh)?;
+        let mut pals = vec![Palette::Fixed];
+        for colors in [32, 64, 128, 255] {
+            for dither in [0, 8, 16, 32] {
+                pals.push(Palette::Adaptive { colors, dither });
+            }
+        }
+        if aspect == 1 {
+            pals = vec![Palette::Fixed, crate::gfx::VIDEO_PALETTE];
+        }
+        for pal in pals {
+            let (mut ms, mut bytes, mut se, mut n) = (Vec::new(), 0usize, 0f64, 0usize);
+            for (fi, f) in sf.iter().enumerate() {
+                let mut out = Vec::new();
+                let t = Instant::now();
+                let (colors, idx) = quantize(f, sw, sh, pal);
+                let tq = t.elapsed().as_secs_f64() * 1000.0;
+                if fi == 0 && aspect == 2 && matches!(pal, Palette::Adaptive { colors: 255, dither: 8 }) {
+                    let te = Instant::now();
+                    let mut tmp = Vec::new();
+                    sixel_emit(&colors, &idx, sw, sh, aspect, &mut tmp);
+                    println!("  breakdown 255c d8 2:1: quantize {tq:.2} ms, emit {:.2} ms", te.elapsed().as_secs_f64() * 1000.0);
+                }
+                if let (0, Ok(dir)) = (fi, std::env::var("YTUI_BENCH_PNG")) {
+                    // The quantised picture as shown (rows repeated for 2:1).
+                    let mut img = image::RgbImage::new(sw as u32, (sh * aspect) as u32);
+                    for (y, row) in idx.chunks_exact(sw).enumerate() {
+                        for (x, &i) in row.iter().enumerate() {
+                            for k in 0..aspect {
+                                img.put_pixel(x as u32, (y * aspect + k) as u32, image::Rgb(colors[i as usize]));
+                            }
+                        }
+                    }
+                    let name = match pal { Palette::Fixed => "fixed".to_string(), Palette::Adaptive { colors, dither } => format!("{colors}c-d{dither}") };
+                    let _ = img.save(format!("{dir}/q-{aspect}x-{name}.png"));
+                    if pal == Palette::Fixed {
+                        let src = image::RgbImage::from_raw(sw as u32, sh as u32, f.clone()).unwrap();
+                        let _ = image::imageops::resize(&src, sw as u32, (sh * aspect) as u32, image::imageops::FilterType::Nearest).save(format!("{dir}/q-{aspect}x-source.png"));
+                    }
+                }
+                sixel_emit(&colors, &idx, sw, sh, aspect, &mut out);
+                ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                bytes += out.len();
+                for (p, &i) in f.chunks_exact(3).zip(&idx) {
+                    let c = colors[i as usize];
+                    for k in 0..3 {
+                        se += (p[k] as f64 - c[k] as f64).powi(2);
+                    }
+                    n += 3;
+                }
+            }
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let psnr = 10.0 * (255f64 * 255.0 / (se / n as f64)).log10();
+            println!(
+                "sixel {aspect}:1 {:9} encode median {:6.2} ms ({sw}x{sh}) | {:6.1} KB/frame = {:5.1} MB/s at 60 fps | PSNR {psnr:5.2} dB",
+                match pal { Palette::Fixed => "fixed".to_string(), Palette::Adaptive { colors, dither } => format!("{colors}c d{dither}") },
+                ms[ms.len() / 2],
+                bytes as f64 / sf.len() as f64 / 1024.0,
+                bytes as f64 / sf.len() as f64 * 60.0 / 1e6
+            );
+        }
     }
-    ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!(
-        "sixel     encode median {:6.2} ms  ({sw}x{sh} px)  | output {:6.1} KB/frame = {:5.2} MB/s at 30 fps",
-        ms[ms.len() / 2],
-        bytes as f64 / sf.len() as f64 / 1024.0,
-        bytes as f64 / sf.len() as f64 * 30.0 / 1e6
-    );
     Ok(())
 }
 

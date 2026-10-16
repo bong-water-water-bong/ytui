@@ -22,9 +22,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::{Frame, Terminal};
+
+/// ratatui writing into the frame buffer that `out::Out` sends.
+pub type Term = Terminal<ratatui::backend::CrosstermBackend<crate::out::Buf>>;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -2891,8 +2893,8 @@ impl App {
 
     // ------------------------------------------------------------ main loop
 
-    pub fn run(&mut self, terminal: &mut DefaultTerminal, rx: Receiver<Msg>) -> Result<()> {
-        use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+    pub fn run(&mut self, terminal: &mut Term, out: &crate::out::Out, rx: Receiver<Msg>) -> Result<()> {
+        use crossterm::terminal::BeginSynchronizedUpdate;
         self.sync_subs(false);
         let mut last_save = Instant::now();
         let mut last_draw = Instant::now();
@@ -2920,33 +2922,28 @@ impl App {
             }
             if self.gfx_reset {
                 self.gfx_reset = false;
-                if let Some(g) = &mut self.gfx {
-                    let bytes = g.clear_all();
-                    let mut o = std::io::stdout();
-                    let _ = o.write_all(&bytes);
-                    let _ = o.flush();
-                }
+                let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
+                out.push(&bytes);
                 terminal.clear()?;
+                out.push(&[]);
                 self.dirty = true;
             }
             if self.dirty || fresh {
                 last_draw = Instant::now();
                 let t0 = Instant::now();
                 if sync {
-                    let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
+                    let _ = crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate);
                 }
                 terminal.draw(|f| self.draw(f))?;
                 let t1 = Instant::now();
                 let gfx_bytes = self.gfx_out.len();
-                if !self.gfx_out.is_empty() {
-                    let mut o = std::io::stdout();
-                    let _ = o.write_all(&self.gfx_out);
-                    let _ = o.flush();
-                    self.gfx_out.clear();
-                }
                 if sync {
-                    let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
+                    self.gfx_out.extend_from_slice(b"\x1b[?2026l");
                 }
+                // The whole frame goes out as one write on the output thread;
+                // this waits only for the previous frame to be taken.
+                out.push(&self.gfx_out);
+                self.gfx_out.clear();
                 self.dirty = false;
                 if let Some(s) = &mut self.stats {
                     let p = self.player.as_ref();
@@ -2972,12 +2969,9 @@ impl App {
         }
         self.stop();
         self.store.save();
-        if let Some(g) = &mut self.gfx {
-            let bytes = g.clear_all();
-            let mut o = std::io::stdout();
-            let _ = o.write_all(&bytes);
-            let _ = o.flush();
-        }
+        let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
+        out.push(&bytes);
+        out.drain();
         Ok(())
     }
 }

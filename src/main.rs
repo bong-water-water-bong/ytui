@@ -9,6 +9,7 @@ mod engine3d;
 mod gfx;
 mod glyphs;
 mod mpv;
+mod out;
 mod overlay;
 mod page;
 mod player;
@@ -58,6 +59,8 @@ OPTIONS:
   --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
   --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
   --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
+  --sixel-colors N  colours per sixel video frame, 2-255 (default 255; 64 is
+                 ~40% faster to send but posterises soft shading)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
@@ -93,6 +96,7 @@ fn main() -> Result<()> {
     let mut gfx_mode = std::env::var("YTUI_GFX").unwrap_or_else(|_| "auto".into());
     let mut gfx_fps: Option<f32> = None;
     let mut gfx_px: Option<usize> = None;
+    let mut sixel_colors: Option<usize> = None;
     let mut colors = std::env::var("YTUI_COLORS").unwrap_or_else(|_| "auto".into());
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
@@ -144,6 +148,7 @@ fn main() -> Result<()> {
             "--colors" => colors = val("--colors")?,
             "--gfx-fps" => gfx_fps = Some(val("--gfx-fps")?.parse()?),
             "--gfx-px" => gfx_px = Some(val("--gfx-px")?.parse()?),
+            "--sixel-colors" => sixel_colors = Some(val("--sixel-colors")?.parse()?),
             "--exposure" => exposure = !matches!(val("--exposure")?.as_str(), "off" | "no" | "0" | "false"),
             "--cols" => scols = Some(val("--cols")?.parse()?),
             "--rows" => srows = Some(val("--rows")?.parse()?),
@@ -231,6 +236,9 @@ fn main() -> Result<()> {
                 if let Some(px) = gfx_px {
                     g.max_px = px.max(64);
                 }
+                if let Some(c) = sixel_colors {
+                    g.video_colors = c.clamp(2, 255);
+                }
                 g
             })
         }
@@ -271,13 +279,18 @@ fn main() -> Result<()> {
     // NO_COLOR is for output that merely decorates; here colour is the
     // picture itself, so keep it on.
     crossterm::style::force_color_output(true);
-    let mut terminal = ratatui::init();
+    // Raw mode, alternate screen and the panic hook; drawing goes through
+    // our own output thread instead of straight to stdout.
+    drop(ratatui::init());
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste, crossterm::event::EnableFocusChange);
+    let (out, buf) = out::Out::new();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(buf))?;
     app.set_fullscreen(fullscreen);
     if let Some(q) = start {
         app.open_query(&q);
     }
-    let res = app.run(&mut terminal, rx);
+    let res = app.run(&mut terminal, &out, rx);
+    out.drain();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste, crossterm::event::DisableFocusChange);
     ratatui::restore();
     res

@@ -183,14 +183,48 @@ fn da1_end(b: &[u8]) -> Option<(usize, usize)> {
 const LEVELS: (usize, usize, usize) = (6, 7, 6);
 const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
-/// Encode RGB24 as a sixel image (fixed 6x7x6 palette, Bayer-dithered).
-pub fn sixel_encode(rgb: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
-    let (lr, lg, lb) = LEVELS;
-    let _ = write!(out, "\x1bP0;1;0q\"1;1;{w};{h}");
-    for i in 0..lr * lg * lb {
-        let (r, g, b) = (i / (lg * lb), (i / lb) % lg, i % lb);
-        let _ = write!(out, "#{i};2;{};{};{}", r * 100 / (lr - 1), g * 100 / (lg - 1), b * 100 / (lb - 1));
+/// How a sixel image picks its colours.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Palette {
+    /// Fixed 6x7x6 colour cube with ordered dithering: works everywhere,
+    /// grainy, and the noise defeats run-length compression.
+    Fixed,
+    /// The `colors` colours that best fit this picture (median cut over a
+    /// 15-bit histogram), with an ordered dither of `dither` (0-16) to hide
+    /// banding.
+    Adaptive { colors: usize, dither: i32 },
+}
+
+/// 255 adaptive colours with a light dither: by eye (`--bench-render`
+/// with YTUI_BENCH_PNG) fewer colours posterise skin and soft shading even
+/// where PSNR looks fine. Video uses `Gfx::video_colors` (--sixel-colors).
+pub const VIDEO_PALETTE: Palette = Palette::Adaptive { colors: 255, dither: 8 };
+pub const STILL_PALETTE: Palette = VIDEO_PALETTE;
+
+/// Encode RGB24 as a sixel image. `aspect`: pixel aspect ratio
+/// (height : width); 2 draws each row twice as tall, so a moving picture
+/// can send half the rows.
+pub fn sixel_encode_with(rgb: &[u8], w: usize, h: usize, aspect: usize, pal: Palette, out: &mut Vec<u8>) {
+    let (colors, idx) = quantize(rgb, w, h, pal);
+    sixel_emit(&colors, &idx, w, h, aspect, out);
+}
+
+/// Map an image to palette indices: (palette, index per pixel).
+pub fn quantize(rgb: &[u8], w: usize, h: usize, pal: Palette) -> (Vec<[u8; 3]>, Vec<u8>) {
+    match pal {
+        Palette::Fixed => quantize_fixed(rgb, w, h),
+        Palette::Adaptive { colors, dither } => quantize_adaptive(rgb, w, h, colors.clamp(2, 255), dither),
     }
+}
+
+fn quantize_fixed(rgb: &[u8], w: usize, h: usize) -> (Vec<[u8; 3]>, Vec<u8>) {
+    let (lr, lg, lb) = LEVELS;
+    let colors = (0..lr * lg * lb)
+        .map(|i| {
+            let (r, g, b) = (i / (lg * lb), (i / lb) % lg, i % lb);
+            [(r * 255 / (lr - 1)) as u8, (g * 255 / (lg - 1)) as u8, (b * 255 / (lb - 1)) as u8]
+        })
+        .collect();
     let q = |v: u8, levels: usize, t: f32| -> usize {
         let step = 255.0 / (levels - 1) as f32;
         (((v as f32) / step + t).floor() as isize).clamp(0, levels as isize - 1) as usize
@@ -203,10 +237,183 @@ pub fn sixel_encode(rgb: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
             idx[y * w + x] = (q(p[0], lr, t) * lg * lb + q(p[1], lg, t) * lb + q(p[2], lb, t)) as u8;
         }
     }
+    (colors, idx)
+}
+
+/// 15-bit colour bin of a pixel (5 bits per channel).
+#[inline]
+fn bin(r: u8, g: u8, b: u8) -> usize {
+    ((r as usize >> 3) << 10) | ((g as usize >> 3) << 5) | (b as usize >> 3)
+}
+
+fn quantize_adaptive(rgb: &[u8], w: usize, h: usize, max_colors: usize, dither: i32) -> (Vec<[u8; 3]>, Vec<u8>) {
+    // Histogram of 15-bit bins (count and channel sums for the mean).
+    let mut count = vec![0u32; 1 << 15];
+    let mut sum = vec![[0u32; 3]; 1 << 15];
+    for p in rgb.chunks_exact(3) {
+        let b = bin(p[0], p[1], p[2]);
+        count[b] += 1;
+        sum[b][0] += p[0] as u32;
+        sum[b][1] += p[1] as u32;
+        sum[b][2] += p[2] as u32;
+    }
+    let mut bins: Vec<u16> = (0..1u32 << 15).filter(|&b| count[b as usize] > 0).map(|b| b as u16).collect();
+    // Median cut: split the box with the most pixels x widest channel range
+    // along that channel at the pixel median, until there are 255 boxes.
+    let ch = |b: u16, c: usize| -> u32 { ((b as u32) >> (10 - 5 * c as u32)) & 31 };
+    struct Box {
+        lo: usize,
+        hi: usize,
+        n: u64,
+    }
+    let n_of = |bins: &[u16]| bins.iter().map(|&b| count[b as usize] as u64).sum::<u64>();
+    let mut boxes = vec![Box { lo: 0, hi: bins.len(), n: n_of(&bins) }];
+    while boxes.len() < max_colors {
+        // Split where the error is: count x variance of the widest channel
+        // (so smooth but populous areas like skin get colours too, not just
+        // the most common texture).
+        let score = |bx: &Box, bins: &[u16]| -> (u64, usize) {
+            let s = &bins[bx.lo..bx.hi];
+            if s.len() < 2 {
+                return (0, 0);
+            }
+            let mut best = (0u64, 0usize);
+            for c in 0..3 {
+                let (mut n, mut sv, mut sq) = (0u64, 0u64, 0u64);
+                for &b in s {
+                    let k = count[b as usize] as u64;
+                    let v = ch(b, c) as u64;
+                    n += k;
+                    sv += k * v;
+                    sq += k * v * v;
+                }
+                // n * variance = sum(v^2) - (sum v)^2 / n
+                let sse = sq.saturating_sub(sv * sv / n.max(1));
+                if sse > best.0 {
+                    best = (sse, c);
+                }
+            }
+            best
+        };
+        let Some((i, c)) = boxes
+            .iter()
+            .enumerate()
+            .map(|(i, bx)| (i, score(bx, &bins)))
+            .filter(|(_, (s, _))| *s > 0)
+            .max_by_key(|(_, (s, _))| *s)
+            .map(|(i, (_, c))| (i, c))
+        else {
+            break;
+        };
+        let (lo, hi) = (boxes[i].lo, boxes[i].hi);
+        bins[lo..hi].sort_unstable_by_key(|&b| ch(b, c));
+        let half = boxes[i].n / 2;
+        let mut acc = 0u64;
+        let mut mid = lo + 1;
+        for (k, &b) in bins[lo..hi].iter().enumerate() {
+            acc += count[b as usize] as u64;
+            if acc >= half {
+                mid = (lo + k + 1).clamp(lo + 1, hi - 1);
+                break;
+            }
+        }
+        let (a, b) = (n_of(&bins[lo..mid]), n_of(&bins[mid..hi]));
+        boxes[i] = Box { lo, hi: mid, n: a };
+        boxes.push(Box { lo: mid, hi, n: b });
+    }
+    // Palette = mean colour of each box; every bin maps to its box.
+    let mut lut = vec![0u8; 1 << 15];
+    let mut colors = Vec::with_capacity(boxes.len());
+    for (k, bx) in boxes.iter().enumerate() {
+        let mut s = [0u64; 3];
+        for &b in &bins[bx.lo..bx.hi] {
+            lut[b as usize] = k as u8;
+            for c in 0..3 {
+                s[c] += sum[b as usize][c] as u64;
+            }
+        }
+        let n = bx.n.max(1);
+        colors.push([(s[0] / n) as u8, (s[1] / n) as u8, (s[2] / n) as u8]);
+    }
+    // Bins no pixel used (reachable through dithering) take the nearest colour.
+    let near = |r: u32, g: u32, b: u32| -> u8 {
+        let mut best = (u32::MAX, 0);
+        for (k, c) in colors.iter().enumerate() {
+            let d = |a: u32, b: u8| (a as i32 - b as i32).pow(2) as u32;
+            let e = d(r, c[0]) + d(g, c[1]) + d(b, c[2]);
+            if e < best.0 {
+                best = (e, k);
+            }
+        }
+        best.1 as u8
+    };
+    let mut filled = vec![false; 1 << 15];
+    for &b in &bins {
+        filled[b as usize] = true;
+    }
+    // Light ordered dither: +-half a 5-bit step before binning.
+    let mut idx = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let p = &rgb[(y * w + x) * 3..];
+            // Bayer offset scaled to +-dither/2 levels.
+            let t = (BAYER[y & 3][x & 3] as i32 * 2 - 15) * dither / 32;
+            let d = |v: u8| (v as i32 + t).clamp(0, 255) as u8;
+            let (r, g, b) = (d(p[0]), d(p[1]), d(p[2]));
+            let k = bin(r, g, b);
+            if !filled[k] {
+                lut[k] = near((r as u32 & !7) + 4, (g as u32 & !7) + 4, (b as u32 & !7) + 4);
+                filled[k] = true;
+            }
+            idx[y * w + x] = lut[k];
+        }
+    }
+    (colors, idx)
+}
+
+/// Write palette + indices as a sixel DCS string.
+pub fn sixel_emit(colors: &[[u8; 3]], idx: &[u8], w: usize, h: usize, aspect: usize, out: &mut Vec<u8>) {
+    let _ = write!(out, "\x1bP0;1;0q\"{aspect};1;{w};{h}");
+    let mut used_any = [false; 256];
+    for &i in idx {
+        used_any[i as usize] = true;
+    }
+    for (i, c) in colors.iter().enumerate() {
+        if used_any[i] {
+            let p = |v: u8| (v as u32 * 100 + 127) / 255;
+            let _ = write!(out, "#{i};2;{};{};{}", p(c[0]), p(c[1]), p(c[2]));
+        }
+    }
+    // Bands of 6 rows are independent: encode runs of them in parallel and
+    // join them in order.
+    let bands = h.div_ceil(6);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(bands.max(1));
+    let per = bands.div_ceil(threads.max(1)).max(1);
+    let parts: Vec<Vec<u8>> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = (0..threads)
+            .map(|t| {
+                let (y0, y1) = ((t * per * 6).min(h), ((t + 1) * per * 6).min(h));
+                sc.spawn(move || {
+                    let mut o = Vec::new();
+                    sixel_bands(idx, w, h, y0, y1, &mut o);
+                    o
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or_default()).collect()
+    });
+    for p in parts {
+        out.extend_from_slice(&p);
+    }
+    out.extend_from_slice(b"\x1b\\");
+}
+
+/// Sixel data for pixel rows y_start..y_end (y_start a multiple of 6).
+fn sixel_bands(idx: &[u8], w: usize, h: usize, y_start: usize, y_end: usize, out: &mut Vec<u8>) {
     let mut slot = [usize::MAX; 256];
     let mut masks: Vec<Vec<u8>> = Vec::new();
     let mut used: Vec<u8> = Vec::new();
-    for y0 in (0..h).step_by(6) {
+    for y0 in (y_start..y_end).step_by(6) {
         for &c in &used {
             slot[c as usize] = usize::MAX;
         }
@@ -231,6 +438,8 @@ pub fn sixel_encode(rgb: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
         }
         for (si, &c) in used.iter().enumerate() {
             let m = &masks[si];
+            // Skip leading blank columns with a run of empty sixels, and
+            // stop at the last inked column.
             let last = m.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
             let _ = write!(out, "#{c}");
             let mut x = 0;
@@ -253,7 +462,6 @@ pub fn sixel_encode(rgb: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
         }
         out.push(b'-');
     }
-    out.extend_from_slice(b"\x1b\\");
 }
 
 // ------------------------------------------------------------------ state
@@ -290,6 +498,10 @@ pub struct Gfx {
     sixel_now: Vec<SixelPlace>,
     /// Re-emit every sixel next frame (after a clear / resize).
     pub force: bool,
+    /// Send moving pictures at half vertical resolution (2:1 pixels).
+    pub sixel_tall: bool,
+    /// Palette size for moving pictures (fewer = smaller, faster, blotchier).
+    pub video_colors: usize,
 }
 
 const SENTINEL: &str = "\u{2800}";
@@ -311,6 +523,8 @@ impl Gfx {
             cell: caps.cell.unwrap_or((10, 20)),
             tmux: caps.tmux,
             max_px: if remote { 640 } else { 1280 },
+            sixel_tall: std::env::var_os("YTUI_SIXEL_FULL").is_none(),
+            video_colors: 255,
             max_fps: if remote { 12.0 } else { 0.0 },
             sent: HashMap::new(),
             next_id: 1,
@@ -504,6 +718,10 @@ impl Gfx {
                 let fresh = self.force || !self.sixel_prev.contains(&(rect, sig));
                 let data = if fresh {
                     let (cw, ch) = (self.cell.0 as usize, self.cell.1 as usize);
+                    // Moving pictures: half the rows at 2:1 pixel aspect,
+                    // half the bytes for the terminal to parse.
+                    let aspect = if key.seq.is_some() && self.sixel_tall && ch % 2 == 0 { 2 } else { 1 };
+                    let ch = ch / aspect;
                     let (pw, ph) = (cols as usize * cw, rows as usize * ch);
                     let Some(px) = make(pw, ph) else {
                         for yy in rect.y..rect.y + rect.height {
@@ -520,7 +738,8 @@ impl Gfx {
                         crop.extend_from_slice(&px[(yy * pw) * 3..(yy * pw + vx.min(pw)) * 3]);
                     }
                     let mut enc = Vec::new();
-                    sixel_encode(&crop, vx.min(pw), vy1.min(ph) - vy0, &mut enc);
+                    let pal = if key.seq.is_some() { Palette::Adaptive { colors: self.video_colors, dither: 8 } } else { STILL_PALETTE };
+                    sixel_encode_with(&crop, vx.min(pw), vy1.min(ph) - vy0, aspect, pal, &mut enc);
                     Some(enc)
                 } else {
                     None
@@ -588,7 +807,7 @@ mod tests {
     fn sixel_header_and_terminator() {
         let rgb = vec![200u8; 8 * 7 * 3];
         let mut out = Vec::new();
-        sixel_encode(&rgb, 8, 7, &mut out);
+        sixel_encode_with(&rgb, 8, 7, 1, Palette::Fixed, &mut out);
         assert!(out.starts_with(b"\x1bP0;1;0q\"1;1;8;7"));
         assert!(out.ends_with(b"\x1b\\"));
     }
