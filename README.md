@@ -69,6 +69,19 @@ banners and the 3D scenes instead of characters. It asks the terminal at startup
 `YTUI_GFX`) overrides detection. Over SSH, pixel video is capped at 640 px and 12 fps to keep
 bandwidth around 4 MB/s; change with `--gfx-px N` and `--gfx-fps N` (0 = unlimited).
 
+## Colours under tmux
+
+ytui draws in 24-bit colour. If tmux doesn't know the outer terminal supports it, tmux rounds
+every colour to its 256-colour palette, which bands gradients and shifts hues. ytui detects this
+and maps the picture to the 256 palette itself with ordered dithering, and the status bar says
+how to get full colour: add
+
+```
+set -as terminal-features ',xterm*:RGB'
+```
+
+to `~/.tmux.conf` and reattach. `--colors auto|256|true` (or `YTUI_COLORS`) overrides.
+
 ## 3D ASCII engine
 
 ytui includes a small real-time 3D software renderer whose output goes through the same

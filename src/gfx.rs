@@ -42,15 +42,19 @@ pub struct Caps {
     pub tmux: bool,
     /// Inside tmux: kitty passthrough is enabled.
     pub passthrough: bool,
-    /// Inside tmux: the outer terminal lacks truecolor as far as tmux knows,
-    /// so tmux squeezes colours into its 256-colour palette.
-    pub tmux_256: bool,
 }
 
 /// Terminal cell sizes outside this range are bogus reports.
 fn plausible(c: (u16, u16)) -> bool {
     let (w, h) = (c.0 as f32, c.1 as f32);
     (5.0..=64.0).contains(&w) && (9.0..=128.0).contains(&h) && (1.3..=3.2).contains(&(h / w))
+}
+
+/// Inside tmux, whether the attached terminal lacks truecolor as far as tmux
+/// knows, so tmux squeezes colours into its 256-colour palette.
+pub fn tmux_lacks_rgb() -> bool {
+    std::env::var_os("TMUX").is_some()
+        && tmux_query("#{client_termfeatures}").is_some_and(|f| !f.is_empty() && !f.split(',').any(|x| x == "RGB"))
 }
 
 /// Ask tmux about the client terminal it is drawing to.
@@ -163,7 +167,6 @@ pub fn detect() -> Caps {
         if let Some(f) = tmux_query("#{client_termfeatures}") {
             let feats: Vec<&str> = f.split(',').collect();
             caps.sixel = feats.contains(&"sixel");
-            caps.tmux_256 = !feats.contains(&"RGB");
         }
         if let (Some(w), Some(h)) = (tmux_query("#{client_cell_width}"), tmux_query("#{client_cell_height}")) {
             if let (Ok(w), Ok(h)) = (w.parse::<u16>(), h.parse::<u16>()) {

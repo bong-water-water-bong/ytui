@@ -690,6 +690,47 @@ impl Exposure {
     }
 }
 
+/// Set when the terminal only shows the 256-colour xterm palette (e.g. tmux
+/// without RGB): picture cells are then mapped to it by `xterm256`.
+pub static PALETTE_256: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const CUBE: [i32; 6] = [0, 95, 135, 175, 215, 255];
+
+/// xterm-256 palette entry for `c`, ordered-dithered on screen position so
+/// gradients average out to the right colour instead of banding (tmux's own
+/// conversion only rounds). Each channel picks between the two palette
+/// levels around it, in proportion to where it sits between them.
+/// Near-greys use the finer 24-step grey ramp.
+pub fn xterm256(c: [u8; 3], x: usize, y: usize) -> u8 {
+    const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    // Thresholds span 0.2..0.8: colours close to a palette level snap to it
+    // (calm flat areas), the rest dither.
+    let thr = 0.2 + 0.6 * (BAYER[y & 3][x & 3] as f32 + 0.5) / 16.0;
+    // Index into `levels` after dithering `v` between its neighbours.
+    let pick = |levels: &[i32], v: i32| -> usize {
+        let k = levels.iter().rposition(|&l| l <= v).unwrap_or(0).min(levels.len() - 2);
+        let f = (v - levels[k]) as f32 / (levels[k + 1] - levels[k]) as f32;
+        if f > thr { k + 1 } else { k }
+    };
+    let v = [c[0] as i32, c[1] as i32, c[2] as i32];
+    let (lo, hi) = (*v.iter().min().unwrap(), *v.iter().max().unwrap());
+    if hi < 14 {
+        // Dithering near-black against the darkest greys reads as faint boxes.
+        return 16;
+    }
+    if hi - lo < 10 {
+        // Black, the 24 greys (8, 18 .. 238), white.
+        const GREY: [i32; 26] = [0, 8, 18, 28, 38, 48, 58, 68, 78, 88, 98, 108, 118, 128, 138, 148, 158, 168, 178, 188, 198, 208, 218, 228, 238, 255];
+        return match pick(&GREY, (v[0] + v[1] + v[2]) / 3) {
+            0 => 16,
+            25 => 231,
+            k => 231 + k as u8,
+        };
+    }
+    let (r, g, b) = (pick(&CUBE, v[0]), pick(&CUBE, v[1]), pick(&CUBE, v[2]));
+    16 + (36 * r + 6 * g + b) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,6 +764,45 @@ mod tests {
         r.render(&Img { w: cols * CW, h: rows * CH, px: &f1 }, cols, rows, &mut a);
         r.render(&Img { w: cols * CW, h: rows * CH, px: &f2 }, cols, rows, &mut b);
         a.iter().zip(&b).filter(|(x, y)| x.ch != y.ch).count()
+    }
+
+    /// Inverse of the palette, for checking `xterm256`.
+    fn palette(i: u8) -> [i32; 3] {
+        if i >= 232 {
+            let v = 8 + 10 * (i as i32 - 232);
+            [v, v, v]
+        } else {
+            let i = i as usize - 16;
+            [CUBE[i / 36], CUBE[i / 6 % 6], CUBE[i % 6]]
+        }
+    }
+
+    #[test]
+    fn palette_exact_colours_map_to_themselves() {
+        for i in (16u8..=255).step_by(7) {
+            let p = palette(i);
+            let c = [p[0] as u8, p[1] as u8, p[2] as u8];
+            for (x, y) in [(0, 0), (1, 2), (3, 3)] {
+                assert_eq!(palette(xterm256(c, x, y)), p, "colour {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn dithered_palette_averages_to_the_colour() {
+        for c in [[30u8, 90, 160], [200, 120, 60], [128, 128, 128], [250, 240, 200], [12, 40, 20], [100, 103, 98]] {
+            let mut sum = [0i32; 3];
+            for y in 0..4 {
+                for x in 0..4 {
+                    let p = palette(xterm256(c, x, y));
+                    (0..3).for_each(|k| sum[k] += p[k]);
+                }
+            }
+            for k in 0..3 {
+                let avg = sum[k] / 16;
+                assert!((avg - c[k] as i32).abs() <= 20, "{c:?} channel {k}: dithered average {avg}");
+            }
+        }
     }
 
     #[test]

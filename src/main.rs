@@ -45,6 +45,7 @@ OPTIONS:
   --height N     max stream height to fetch (default 480)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
   --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
+  --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
   --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
   --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
 
@@ -68,6 +69,7 @@ fn main() -> Result<()> {
     let mut gfx_mode = std::env::var("YTUI_GFX").unwrap_or_else(|_| "auto".into());
     let mut gfx_fps: Option<f32> = None;
     let mut gfx_px: Option<usize> = None;
+    let mut colors = std::env::var("YTUI_COLORS").unwrap_or_else(|_| "auto".into());
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
     while let Some(a) = args.next() {
@@ -104,6 +106,7 @@ fn main() -> Result<()> {
             }
             "--at" => at = val("--at")?.parse()?,
             "--gfx" => gfx_mode = val("--gfx")?,
+            "--colors" => colors = val("--colors")?,
             "--gfx-fps" => gfx_fps = Some(val("--gfx-fps")?.parse()?),
             "--gfx-px" => gfx_px = Some(val("--gfx-px")?.parse()?),
             "--exposure" => exposure = !matches!(val("--exposure")?.as_str(), "off" | "no" | "0" | "false"),
@@ -171,9 +174,6 @@ fn main() -> Result<()> {
         m => {
             let caps = gfx::detect();
             hints = caps.why_not().into_iter().collect();
-            if caps.tmux_256 {
-                hints.push("tmux is cutting colours to 256: add  set -as terminal-features ',xterm-256color:RGB'  to ~/.tmux.conf".into());
-            }
             let proto = match m {
                 "kitty" => Some(gfx::Proto::Kitty),
                 "sixel" => Some(gfx::Proto::Sixel),
@@ -191,6 +191,15 @@ fn main() -> Result<()> {
             })
         }
     };
+    let p256 = match colors.as_str() {
+        "256" => true,
+        "true" | "truecolor" | "24bit" => false,
+        _ => gfx::tmux_lacks_rgb(),
+    };
+    render::PALETTE_256.store(p256, std::sync::atomic::Ordering::Relaxed);
+    if p256 && colors == "auto" {
+        hints.insert(0, "tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
+    }
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
     app.set_gfx(gfx);
     if let Some(h) = hints.last() {

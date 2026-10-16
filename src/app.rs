@@ -2844,10 +2844,14 @@ fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize,
                 break;
             }
             let c = cells[yy * w + xx];
-            buf[(cx, clip.y + y as u16)]
-                .set_char(c.ch)
-                .set_fg(Color::Rgb(c.fg[0], c.fg[1], c.fg[2]))
-                .set_bg(Color::Rgb(c.bg[0], c.bg[1], c.bg[2]));
+            let (fg, bg) = if crate::render::PALETTE_256.load(std::sync::atomic::Ordering::Relaxed) {
+                // fg and bg are the top and bottom pixel rows of mosaic cells.
+                let (sx, sy) = (cx as usize, 2 * (clip.y as usize + y as usize));
+                (Color::Indexed(crate::render::xterm256(c.fg, sx, sy)), Color::Indexed(crate::render::xterm256(c.bg, sx, sy + 1)))
+            } else {
+                (Color::Rgb(c.fg[0], c.fg[1], c.fg[2]), Color::Rgb(c.bg[0], c.bg[1], c.bg[2]))
+            };
+            buf[(cx, clip.y + y as u16)].set_char(c.ch).set_fg(fg).set_bg(bg);
         }
     }
 }
