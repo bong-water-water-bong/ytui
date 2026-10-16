@@ -22,6 +22,9 @@ pub enum Mode {
     /// Clean ASCII art: directional strokes on edges, a short density ramp
     /// elsewhere, coloured ink on black, stable from frame to frame.
     Art,
+    /// Shape-matched ASCII in boosted colour over a dimmed copy of the
+    /// picture (the "VideoASCII" look); tuned with the look panel.
+    Glow,
     /// Two-tone shape ASCII: glyphs only where there is edge detail.
     Ascii,
     /// Harri-style absolute brightness ASCII, colour ink on a dark ground.
@@ -33,11 +36,12 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 7] = [Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille];
+    pub const ALL: [Mode; 8] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille];
 
     pub fn name(self) -> &'static str {
         match self {
             Mode::Art => "art",
+            Mode::Glow => "glow",
             Mode::Ascii => "ascii",
             Mode::Classic => "classic",
             Mode::Sextant => "sextant",
@@ -65,6 +69,11 @@ pub struct Img<'a> {
 
 pub struct Renderer {
     pub mode: Mode,
+    /// Look (glow mode): ink brightness, colour saturation, and how much of
+    /// the picture shows behind the characters (0 = black, 1 = full).
+    pub bright: f32,
+    pub sat: f32,
+    pub bg_level: f32,
     /// Tint the ASCII background with a dimmed cell colour.
     pub ascii_bg: bool,
     pub dir_exp: f32,
@@ -131,6 +140,12 @@ fn sextant(m: u32) -> char {
 /// Braille dot bit for sub-pixel (col, row) in a 2x4 grid.
 const BRAILLE_BIT: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 
+/// Saturation (around the colour's own luma) then brightness.
+fn grade(c: [f32; 3], sat: f32, gain: f32) -> [f32; 3] {
+    let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    [(l + (c[0] - l) * sat) * gain, (l + (c[1] - l) * sat) * gain, (l + (c[2] - l) * sat) * gain]
+}
+
 fn to_u8(c: [f32; 3]) -> [u8; 3] {
     [c[0].clamp(0.0, 255.0) as u8, c[1].clamp(0.0, 255.0) as u8, c[2].clamp(0.0, 255.0) as u8]
 }
@@ -146,6 +161,9 @@ impl Renderer {
         };
         Renderer {
             mode,
+            bright: 1.25,
+            sat: 1.25,
+            bg_level: 0.30,
             ascii_bg: true,
             dir_exp: 2.5,
             glob_exp: 1.8,
@@ -176,8 +194,9 @@ impl Renderer {
         }
         match self.mode {
             Mode::Art => self.art(img, cols, rows, out),
-            Mode::Ascii => self.ascii(img, cols, rows, out, true),
-            Mode::Classic => self.ascii(img, cols, rows, out, false),
+            Mode::Glow => self.ascii(img, cols, rows, out, false, true),
+            Mode::Ascii => self.ascii(img, cols, rows, out, true, false),
+            Mode::Classic => self.ascii(img, cols, rows, out, false, false),
             Mode::HalfBlock => {
                 for cy in 0..rows {
                     for cx in 0..cols {
@@ -400,7 +419,8 @@ impl Renderer {
         hi - lo
     }
 
-    fn ascii(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell], relative: bool) {
+    fn ascii(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell], relative: bool, glow: bool) {
+        let (bright, sat, bg_level) = (self.bright, self.sat, self.bg_level);
         let (w, h) = (img.w, img.h);
         self.lum.resize(w * h, 0.0);
         let (black, scale) = if relative { (0.0, 1.0) } else { (self.black, 1.0 / (1.0 - self.black).max(0.05)) };
@@ -507,8 +527,12 @@ impl Renderer {
                     // colour (hue-preserving) to keep perceived brightness.
                     let mx = avg[0].max(avg[1]).max(avg[2]).max(1.0);
                     let lift = 255.0 * (mx / 255.0).powf(0.55) / mx;
-                    let fg = to_u8([avg[0] * lift, avg[1] * lift, avg[2] * lift]);
-                    let bg = if self.ascii_bg { to_u8([avg[0] * 0.22, avg[1] * 0.22, avg[2] * 0.22]) } else { [0; 3] };
+                    let ink = [avg[0] * lift, avg[1] * lift, avg[2] * lift];
+                    let (fg, bg) = if glow {
+                        (to_u8(grade(ink, sat, bright)), to_u8(grade([avg[0] * bg_level, avg[1] * bg_level, avg[2] * bg_level], sat, 1.0)))
+                    } else {
+                        (to_u8(ink), if self.ascii_bg { to_u8([avg[0] * 0.22, avg[1] * 0.22, avg[2] * 0.22]) } else { [0; 3] })
+                    };
                     Cell { ch: self.glyphs.chars[gi], fg, bg }
                 };
                 out[cy * cols + cx] = cell;

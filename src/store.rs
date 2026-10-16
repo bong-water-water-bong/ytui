@@ -44,6 +44,16 @@ pub struct Store {
     /// Use the terminal's pixel graphics (kitty / sixel) when available.
     #[serde(default = "yes")]
     pub gfx: bool,
+    /// Look panel (glow mode): ink brightness, saturation, background
+    /// (how much picture shows behind the characters) and contrast.
+    #[serde(default = "look_bright")]
+    pub look_bright: f32,
+    #[serde(default = "look_sat")]
+    pub look_sat: f32,
+    #[serde(default = "look_bg")]
+    pub look_bg: f32,
+    #[serde(default = "look_contrast")]
+    pub look_contrast: f32,
     /// Native GPU video window over the terminal (where available).
     #[serde(default = "yes")]
     pub native: bool,
@@ -62,6 +72,22 @@ fn one() -> f32 {
     1.0
 }
 
+fn look_bright() -> f32 {
+    1.25
+}
+
+fn look_sat() -> f32 {
+    1.25
+}
+
+fn look_bg() -> f32 {
+    0.30
+}
+
+fn look_contrast() -> f32 {
+    1.8
+}
+
 fn path() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -74,7 +100,19 @@ impl Store {
         std::fs::read(path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, gfx: true, native: true, ..Default::default() })
+            .unwrap_or(Store {
+                autoplay: true,
+                volume: 1.0,
+                show_chat: true,
+                exposure: true,
+                gfx: true,
+                native: true,
+                look_bright: look_bright(),
+                look_sat: look_sat(),
+                look_bg: look_bg(),
+                look_contrast: look_contrast(),
+                ..Default::default()
+            })
     }
 
     pub fn touch(&mut self) {
