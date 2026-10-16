@@ -160,6 +160,19 @@ struct Decoder {
     fifo: Option<PathBuf>,
 }
 
+impl Decoder {
+    /// Freeze playback without losing the connection: SIGSTOP stops ffmpeg
+    /// decoding and writing, so nothing buffers and progress stays exact.
+    /// (Gating our own reads instead lets ~1 s of frames pile up in the pipe,
+    /// which then plays out on resume as a jump.)
+    fn set_paused(&self, paused: bool) {
+        let sig = if paused { libc::SIGSTOP } else { libc::SIGCONT };
+        unsafe {
+            libc::kill(self.child.id() as libc::pid_t, sig);
+        }
+    }
+}
+
 impl Drop for Decoder {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -394,12 +407,15 @@ impl Player {
         self.stream.duration.unwrap_or(0.0)
     }
 
+    /// A decoder exists but has produced no frame yet.
     pub fn loading(&self) -> bool {
         self.dec.is_some() && self.seen == 0
     }
 
+    /// Actively advancing, i.e. worth polling the terminal at full rate.
+    /// False while paused even though the decoder is still alive.
     pub fn playing(&self) -> bool {
-        self.dec.is_some()
+        self.dec.is_some() && !self.paused && !self.ended
     }
 
     fn restart(&mut self) {
@@ -426,6 +442,21 @@ impl Player {
             Err(e) => {
                 self.note = format!("ffmpeg: {e}");
                 self.paused = true;
+            }
+        }
+    }
+
+    /// Replace the decoder with one starting at `pos`, keeping pause state.
+    /// A seek always needs a fresh ffmpeg (an HTTP stream can't be scrubbed),
+    /// so the new one comes up already frozen when the old one was paused.
+    fn respawn(&mut self) {
+        let was_paused = self.paused;
+        self.paused = false;
+        self.restart();
+        if was_paused {
+            self.paused = true;
+            if let Some(d) = self.dec.as_ref() {
+                d.set_paused(true);
             }
         }
     }
@@ -464,9 +495,7 @@ impl Player {
     pub fn set_px_cell(&mut self, px: (f32, f32)) {
         if (self.px_cell.0 - px.0).abs() > 0.01 || (self.px_cell.1 - px.1).abs() > 0.01 {
             self.px_cell = px;
-            if !self.paused {
-                self.restart();
-            }
+            self.respawn();
         }
     }
 
@@ -494,21 +523,23 @@ impl Player {
     pub fn set_term(&mut self, cols: usize, rows: usize) {
         if self.term != (cols, rows) {
             self.term = (cols, rows);
-            if !self.paused {
-                self.restart();
-            }
+            self.respawn();
         }
     }
 
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
-        if self.paused {
-            self.dec = None;
-        } else {
-            if self.ended {
-                self.pos = 0.0;
+        match self.dec.as_ref() {
+            // Freeze in place; resuming is instant and the position is exact.
+            Some(d) => d.set_paused(self.paused),
+            // Paused with no decoder (opened paused, or it exited) -> start one.
+            None if !self.paused => {
+                if self.ended {
+                    self.pos = 0.0;
+                }
+                self.restart();
             }
-            self.restart();
+            None => {}
         }
     }
 
@@ -518,8 +549,7 @@ impl Player {
         }
         let d = self.duration();
         self.pos = if d > 0.0 { t.clamp(0.0, (d - 1.0).max(0.0)) } else { t.max(0.0) };
-        self.paused = false;
-        self.restart();
+        self.respawn();
     }
 
     pub fn seek_by(&mut self, by: f64) {
