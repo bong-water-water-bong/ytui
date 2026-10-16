@@ -68,6 +68,12 @@ impl Thumbs {
         }
     }
 
+    /// RGB pixels for `url` cropped to fill exactly pw x ph (None while loading).
+    pub fn pixels(&self, url: &str, pw: usize, ph: usize) -> Option<Vec<u8>> {
+        let img = self.image(url)?;
+        Some(cover(&img, pw as u32, ph as u32).into_raw())
+    }
+
     /// Cells for `url` cropped to fill w x h cells, or None while loading.
     pub fn cells(&mut self, url: &str, w: u16, h: u16, r: &mut Renderer) -> Option<&Vec<Cell>> {
         // Small images read best as mosaics; follow the user's mode only when

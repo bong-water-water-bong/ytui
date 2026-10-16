@@ -563,8 +563,6 @@ impl B<'_> {
             Some(("Loading…".to_string(), META))
         } else if !has_items {
             Some((empty.to_string(), META))
-        } else if page.more_loading {
-            Some(("Loading more…".to_string(), DIM))
         } else {
             None
         };
@@ -1089,6 +1087,7 @@ Keys — player (anywhere while something is playing)
   P                save the focused / current video to a playlist (signed in)
   V                3D audio visualiser instead of the video picture (ytui --demo3d for the engine)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
+  G                pixel graphics (kitty / sixel) on / off, when the terminal supports them
   m                cycle render mode
   [ ] { }          ascii contrast / edges
   click the progress bar to seek; click the miniplayer to return to the video

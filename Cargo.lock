@@ -1304,6 +1304,7 @@ dependencies = [
  "anyhow",
  "base64",
  "crossterm",
+ "flate2",
  "fontdue",
  "image",
  "libc",

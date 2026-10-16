@@ -41,6 +41,9 @@ pub struct Store {
     /// Auto-exposure for video.
     #[serde(default = "yes")]
     pub exposure: bool,
+    /// Use the terminal's pixel graphics (kitty / sixel) when available.
+    #[serde(default = "yes")]
+    pub gfx: bool,
     #[serde(skip)]
     dirty: bool,
 }
@@ -65,7 +68,7 @@ impl Store {
         std::fs::read(path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, ..Default::default() })
+            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, gfx: true, ..Default::default() })
     }
 
     pub fn touch(&mut self) {

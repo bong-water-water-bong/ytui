@@ -10,6 +10,7 @@ description = "YouTube in the terminal: search, browse, and watch videos rendere
 anyhow = "1"
 base64 = "0.22"
 crossterm = "0.28"
+flate2 = "1"
 fontdue = "0.9"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

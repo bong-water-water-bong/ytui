@@ -53,6 +53,22 @@ It works like a browser for YouTube:
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
 to resolve stream URLs. Press `?` in the app for every key.
 
+## Pixel graphics (kitty / sixel)
+
+On terminals with a graphics protocol, ytui shows real pixels for video, thumbnails, avatars,
+banners and the 3D scenes instead of characters. It asks the terminal at startup and picks:
+
+- **kitty graphics protocol**: kitty, Ghostty (and kitty / Ghostty behind tmux). Images are
+  sent zlib-compressed and drawn with Unicode placeholders, so they scroll and clip with the UI
+  and work inside tmux (needs `set -g allow-passthrough on` in tmux).
+- **sixel**: foot, WezTerm, xterm (`-ti vt340`), mlterm, Konsole, Windows Terminal and others.
+  Fixed 252-colour palette with ordered dithering.
+- otherwise the character renderers as before.
+
+`G` switches between pixels and characters (saved). `--gfx auto|kitty|sixel|off` (or
+`YTUI_GFX`) overrides detection. Over SSH, pixel video is capped at 640 px and 12 fps to keep
+bandwidth around 4 MB/s; change with `--gfx-px N` and `--gfx-fps N` (0 = unlimited).
+
 ## 3D ASCII engine
 
 ytui includes a small real-time 3D software renderer whose output goes through the same
@@ -139,6 +155,7 @@ and the nearest glyph wins.
 | `P` | save the focused / current video to a playlist |
 | `V` | 3D audio visualiser instead of the video |
 | `E` | auto-exposure on / off |
+| `G` | pixel graphics (kitty / sixel) on / off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |

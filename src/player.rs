@@ -349,6 +349,10 @@ pub struct Player {
     pub exposure: Exposure,
     /// Frame number the exposure was last measured on.
     exp_seen: u64,
+    /// Decoded pixels per terminal cell (6x12 for glyphs; more for pixel
+    /// graphics backends).
+    px_cell: (f32, f32),
+    pix: Vec<u8>,
     fps_win: (Instant, u32),
     pub fps: f64,
 }
@@ -377,6 +381,8 @@ impl Player {
             cells: Vec::new(),
             exposure: Exposure::new(exposure),
             exp_seen: u64::MAX,
+            px_cell: (CW as f32, CH as f32),
+            pix: Vec::new(),
             fps_win: (Instant::now(), 0),
             fps: 0.0,
         };
@@ -407,7 +413,7 @@ impl Player {
             return;
         }
         let (w, h, _, _) = fit(self.stream.aspect, self.term.0, self.term.1);
-        let (pw, ph) = (w * CW, h * CH);
+        let (pw, ph) = (((w as f32 * self.px_cell.0) as usize).max(2) & !1, ((h as f32 * self.px_cell.1) as usize).max(2) & !1);
         match spawn(&self.stream, self.pos, pw, ph, self.opts, &self.vol) {
             Ok(d) => {
                 self.dec = Some(d);
@@ -452,6 +458,32 @@ impl Player {
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
         self.apply_volume();
+    }
+
+    /// Decode at this many pixels per terminal cell (restarts if changed).
+    pub fn set_px_cell(&mut self, px: (f32, f32)) {
+        if (self.px_cell.0 - px.0).abs() > 0.01 || (self.px_cell.1 - px.1).abs() > 0.01 {
+            self.px_cell = px;
+            if !self.paused {
+                self.restart();
+            }
+        }
+    }
+
+    /// The current frame at decoded resolution with auto-exposure applied,
+    /// plus its frame number: (rgb, w, h, seq).
+    pub fn pixels(&mut self) -> Option<(&[u8], usize, usize, u64)> {
+        if self.fw == 0 || self.frame.len() != self.fw * self.fh * 3 {
+            return None;
+        }
+        if self.exposure.on && self.seen != self.exp_seen {
+            self.exposure.measure(&self.frame, 0.15);
+            self.exp_seen = self.seen;
+        }
+        self.pix.clear();
+        self.pix.extend_from_slice(&self.frame);
+        self.exposure.apply(&mut self.pix);
+        Some((&self.pix, self.fw, self.fh, self.seen))
     }
 
     /// Newest mono samples for the visualiser (empty when there's no audio).
@@ -563,7 +595,7 @@ impl Player {
 }
 
 /// Area-average resample (nearest source pixel when upscaling).
-fn downsample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut Vec<u8>) {
+pub fn downsample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut Vec<u8>) {
     out.clear();
     out.resize(dw * dh * 3, 0);
     let xs: Vec<(usize, usize)> = (0..dw)

@@ -3,7 +3,9 @@ mod app;
 mod auth;
 mod chat;
 mod demo;
+mod diacritics;
 mod engine3d;
+mod gfx;
 mod glyphs;
 mod page;
 mod player;
@@ -42,6 +44,9 @@ OPTIONS:
   --fps N        max render frame rate (default 30)
   --height N     max stream height to fetch (default 480)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
+  --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
+  --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
+  --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
@@ -60,6 +65,9 @@ fn main() -> Result<()> {
     let mut client: Option<String> = None;
     let mut at = 0.0;
     let mut exposure = true;
+    let mut gfx_mode = std::env::var("YTUI_GFX").unwrap_or_else(|_| "auto".into());
+    let mut gfx_fps: Option<f32> = None;
+    let mut gfx_px: Option<usize> = None;
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
     while let Some(a) = args.next() {
@@ -95,6 +103,9 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--at" => at = val("--at")?.parse()?,
+            "--gfx" => gfx_mode = val("--gfx")?,
+            "--gfx-fps" => gfx_fps = Some(val("--gfx-fps")?.parse()?),
+            "--gfx-px" => gfx_px = Some(val("--gfx-px")?.parse()?),
             "--exposure" => exposure = !matches!(val("--exposure")?.as_str(), "off" | "no" | "0" | "false"),
             "--cols" => scols = Some(val("--cols")?.parse()?),
             "--rows" => srows = Some(val("--rows")?.parse()?),
@@ -153,7 +164,30 @@ fn main() -> Result<()> {
     }
 
     player::clean_stale_fifos();
+    // Ask the terminal about pixel graphics before the UI takes it over.
+    let gfx = match gfx_mode.as_str() {
+        "off" | "none" | "no" => None,
+        m => {
+            let caps = gfx::detect();
+            let proto = match m {
+                "kitty" => Some(gfx::Proto::Kitty),
+                "sixel" => Some(gfx::Proto::Sixel),
+                _ => caps.choose(),
+            };
+            proto.map(|p| {
+                let mut g = gfx::Gfx::new(p, &caps);
+                if let Some(f) = gfx_fps {
+                    g.max_fps = f;
+                }
+                if let Some(px) = gfx_px {
+                    g.max_px = px.max(64);
+                }
+                g
+            })
+        }
+    };
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
+    app.set_gfx(gfx);
     let chip = app.default_chip();
     app.open_tab(Kind::Home { chip, feed: api::Feed::default() });
     let q = query.join(" ");
