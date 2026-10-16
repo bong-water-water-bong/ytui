@@ -84,7 +84,7 @@ pub struct RemoteSub {
     pub sub_id: String,
 }
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| crate::sys::home().join(".config"))

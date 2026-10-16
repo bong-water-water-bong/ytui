@@ -92,21 +92,90 @@ fn js_runtime_args() -> Vec<String> {
     }
 }
 
+/// Cookies for yt-dlp, for when YouTube asks to "confirm you're not a bot":
+/// --cookies FILE, --cookies-from-browser NAME, or else cookies.txt in the
+/// config directory if it exists.
+static COOKIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Default location of an exported cookies.txt.
+pub fn cookies_path() -> std::path::PathBuf {
+    crate::auth::config_dir().join("cookies.txt")
+}
+
+/// Set the cookie source from the command line (call before any lookup).
+pub fn set_cookies(file: Option<String>, browser: Option<String>) {
+    let args = match (file, browser) {
+        (Some(f), _) => vec!["--cookies".into(), f],
+        (None, Some(b)) => vec!["--cookies-from-browser".into(), b],
+        (None, None) => default_cookies(),
+    };
+    let _ = COOKIES.set(args);
+}
+
+fn default_cookies() -> Vec<String> {
+    let p = cookies_path();
+    if p.is_file() {
+        vec!["--cookies".into(), p.display().to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn cookie_args() -> &'static [String] {
+    COOKIES.get_or_init(default_cookies)
+}
+
+/// Turn yt-dlp's error output into one readable line, with advice for the
+/// errors people can do something about.
+fn ytdlp_error(stderr: &str) -> String {
+    let line = stderr.lines().rev().find(|l| l.contains("ERROR")).unwrap_or(stderr.trim()).trim();
+    if line.contains("not a bot") || line.contains("Sign in to confirm") {
+        let how = if cookie_args().is_empty() {
+            format!("export YouTube cookies from a signed-in browser to {} (or use --cookies FILE)", cookies_path().display())
+        } else {
+            "your cookies were rejected: export fresh ones from a signed-in browser".to_string()
+        };
+        return format!("YouTube wants to confirm you're not a bot (too many requests from this connection). Wait a while, or {how}. See ytui --help-cookies");
+    }
+    if line.contains("Could not copy Chrome cookie database") || line.contains("Failed to decrypt") {
+        return "can't read the browser's cookies (Chrome/Edge lock and encrypt them): export cookies.txt with a browser extension instead; see ytui --help-cookies".into();
+    }
+    line.to_string()
+}
+
 fn run_json(args: &[&str]) -> Result<Value> {
     static JS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let out = Command::new(ytdlp())
         .args(JS.get_or_init(js_runtime_args))
+        .args(cookie_args())
         .args(["--no-warnings", "-J"])
         .args(args)
         .output()
         .context("running yt-dlp (is it installed? set YTUI_YTDLP)")?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let line = err.lines().rev().find(|l| l.contains("ERROR")).unwrap_or(err.trim());
-        bail!("{}", line.trim());
+        bail!("{}", ytdlp_error(&String::from_utf8_lossy(&out.stderr)));
     }
     Ok(serde_json::from_slice(&out.stdout)?)
 }
+
+pub const COOKIES_HELP: &str = "\
+YouTube sometimes stops serving videos to a connection it thinks is a bot
+(\"Sign in to confirm you're not a bot\"). It usually clears on its own after a
+few hours. To keep playing, give yt-dlp the cookies of a browser that's signed
+in to YouTube:
+
+  Chrome / Edge: they lock and encrypt their cookies, so export them instead.
+    1. Install a cookies.txt exporter extension (e.g. \"Get cookies.txt LOCALLY\").
+    2. Open youtube.com while signed in and export cookies for that site.
+    3. Save the file as the path below; ytui picks it up automatically:
+         COOKIES_PATH
+       (or point at it with  ytui --cookies FILE)
+
+  Firefox:  ytui --cookies-from-browser firefox
+
+The cookies stay on this machine and are only passed to yt-dlp. Treat the
+file like a password: it signs in to your Google account.
+";
 
 /// Resolve direct media URLs for playback: the highest resolution up to
 /// `max_h` lines, then the highest frame rate (YouTube only has 60 fps at

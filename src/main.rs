@@ -42,6 +42,7 @@ USAGE:
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
   ytui --help-login             how to create the Google OAuth client
+  ytui --help-cookies           what to do when YouTube says \"confirm you're not a bot\"
   ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
 
 OPTIONS:
@@ -59,6 +60,10 @@ OPTIONS:
   --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
   --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
   --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
+  --cookies FILE cookies.txt for yt-dlp (default: cookies.txt in the config
+                 directory, if present; see --help-cookies)
+  --cookies-from-browser B  read cookies from browser B (firefox works; Chrome
+                 and Edge usually can't be read while running)
   --sixel-colors N  colours per sixel video frame, 2-255 (default 255; 64 is
                  ~40% faster to send but posterises soft shading)
 
@@ -100,6 +105,8 @@ fn main() -> Result<()> {
     let mut colors = std::env::var("YTUI_COLORS").unwrap_or_else(|_| "auto".into());
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
+    let mut cookies: Option<String> = std::env::var("YTUI_COOKIES").ok();
+    let mut cookies_browser: Option<String> = None;
     while let Some(a) = args.next() {
         let mut val = |name: &str| args.next().ok_or_else(|| anyhow::anyhow!("{name} needs a value"));
         match a.as_str() {
@@ -139,6 +146,12 @@ fn main() -> Result<()> {
             "--demo3d" => demo = Some(args.next().unwrap_or_default()),
             "--client" => client = Some(val("--client")?),
             "--logout" => return auth::logout(),
+            "--help-cookies" => {
+                print!("{}", yt::COOKIES_HELP.replace("COOKIES_PATH", &yt::cookies_path().display().to_string()));
+                return Ok(());
+            }
+            "--cookies" => cookies = Some(val("--cookies")?),
+            "--cookies-from-browser" => cookies_browser = Some(val("--cookies-from-browser")?),
             "--help-login" => {
                 print!("{}", auth::SETUP_HELP);
                 return Ok(());
@@ -155,6 +168,8 @@ fn main() -> Result<()> {
             _ => query.push(a),
         }
     }
+
+    yt::set_cookies(cookies, cookies_browser);
 
     if login {
         return auth::login(client.as_deref());
