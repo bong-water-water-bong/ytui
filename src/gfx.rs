@@ -261,128 +261,161 @@ fn bin(r: u8, g: u8, b: u8) -> usize {
 }
 
 fn quantize_adaptive(rgb: &[u8], w: usize, h: usize, max_colors: usize, dither: i32) -> (Vec<[u8; 3]>, Vec<u8>) {
-    // Histogram of 15-bit bins (count and channel sums for the mean).
-    let mut count = vec![0u32; 1 << 15];
-    let mut sum = vec![[0u32; 3]; 1 << 15];
-    for p in rgb.chunks_exact(3) {
-        let b = bin(p[0], p[1], p[2]);
-        count[b] += 1;
-        sum[b][0] += p[0] as u32;
-        sum[b][1] += p[1] as u32;
-        sum[b][2] += p[2] as u32;
-    }
-    let mut bins: Vec<u16> = (0..1u32 << 15).filter(|&b| count[b as usize] > 0).map(|b| b as u16).collect();
-    // Median cut: split the box with the most pixels x widest channel range
-    // along that channel at the pixel median, until there are 255 boxes.
-    let ch = |b: u16, c: usize| -> u32 { ((b as u32) >> (10 - 5 * c as u32)) & 31 };
-    struct Box {
-        lo: usize,
-        hi: usize,
-        n: u64,
-    }
-    let n_of = |bins: &[u16]| bins.iter().map(|&b| count[b as usize] as u64).sum::<u64>();
-    let mut boxes = vec![Box { lo: 0, hi: bins.len(), n: n_of(&bins) }];
-    while boxes.len() < max_colors {
-        // Split where the error is: count x variance of the widest channel
-        // (so smooth but populous areas like skin get colours too, not just
-        // the most common texture).
-        let score = |bx: &Box, bins: &[u16]| -> (u64, usize) {
-            let s = &bins[bx.lo..bx.hi];
-            if s.len() < 2 {
-                return (0, 0);
-            }
-            let mut best = (0u64, 0usize);
-            for c in 0..3 {
-                let (mut n, mut sv, mut sq) = (0u64, 0u64, 0u64);
-                for &b in s {
-                    let k = count[b as usize] as u64;
-                    let v = ch(b, c) as u64;
-                    n += k;
-                    sv += k * v;
-                    sq += k * v * v;
+    let mut m = PalMap::fit(rgb, max_colors, dither);
+    let (idx, _) = m.map(rgb, w, h, 0);
+    (m.colors, idx)
+}
+
+/// A palette and the 15-bit-bin lookup that maps pixels onto it. Kept with
+/// a moving picture so later bands can be drawn in the colours already on
+/// screen.
+pub struct PalMap {
+    pub colors: Vec<[u8; 3]>,
+    lut: Vec<u8>,
+    /// Bins `lut` has an answer for; any other bin is a colour this palette
+    /// was not built from.
+    filled: Vec<bool>,
+    dither: i32,
+}
+
+impl PalMap {
+    /// Median cut over `rgb` to at most `max_colors` colours.
+    fn fit(rgb: &[u8], max_colors: usize, dither: i32) -> PalMap {
+        // Histogram of 15-bit bins (count and channel sums for the mean).
+        let mut count = vec![0u32; 1 << 15];
+        let mut sum = vec![[0u32; 3]; 1 << 15];
+        for p in rgb.chunks_exact(3) {
+            let b = bin(p[0], p[1], p[2]);
+            count[b] += 1;
+            sum[b][0] += p[0] as u32;
+            sum[b][1] += p[1] as u32;
+            sum[b][2] += p[2] as u32;
+        }
+        let mut bins: Vec<u16> = (0..1u32 << 15).filter(|&b| count[b as usize] > 0).map(|b| b as u16).collect();
+        // Median cut: split the box with the most pixels x widest channel range
+        // along that channel at the pixel median, until there are 255 boxes.
+        let ch = |b: u16, c: usize| -> u32 { ((b as u32) >> (10 - 5 * c as u32)) & 31 };
+        struct Box {
+            lo: usize,
+            hi: usize,
+            n: u64,
+        }
+        let n_of = |bins: &[u16]| bins.iter().map(|&b| count[b as usize] as u64).sum::<u64>();
+        let mut boxes = vec![Box { lo: 0, hi: bins.len(), n: n_of(&bins) }];
+        while boxes.len() < max_colors {
+            // Split where the error is: count x variance of the widest channel
+            // (so smooth but populous areas like skin get colours too, not just
+            // the most common texture).
+            let score = |bx: &Box, bins: &[u16]| -> (u64, usize) {
+                let s = &bins[bx.lo..bx.hi];
+                if s.len() < 2 {
+                    return (0, 0);
                 }
-                // n * variance = sum(v^2) - (sum v)^2 / n
-                let sse = sq.saturating_sub(sv * sv / n.max(1));
-                if sse > best.0 {
-                    best = (sse, c);
+                let mut best = (0u64, 0usize);
+                for c in 0..3 {
+                    let (mut n, mut sv, mut sq) = (0u64, 0u64, 0u64);
+                    for &b in s {
+                        let k = count[b as usize] as u64;
+                        let v = ch(b, c) as u64;
+                        n += k;
+                        sv += k * v;
+                        sq += k * v * v;
+                    }
+                    // n * variance = sum(v^2) - (sum v)^2 / n
+                    let sse = sq.saturating_sub(sv * sv / n.max(1));
+                    if sse > best.0 {
+                        best = (sse, c);
+                    }
                 }
-            }
-            best
-        };
-        let Some((i, c)) = boxes
-            .iter()
-            .enumerate()
-            .map(|(i, bx)| (i, score(bx, &bins)))
-            .filter(|(_, (s, _))| *s > 0)
-            .max_by_key(|(_, (s, _))| *s)
-            .map(|(i, (_, c))| (i, c))
-        else {
-            break;
-        };
-        let (lo, hi) = (boxes[i].lo, boxes[i].hi);
-        bins[lo..hi].sort_unstable_by_key(|&b| ch(b, c));
-        let half = boxes[i].n / 2;
-        let mut acc = 0u64;
-        let mut mid = lo + 1;
-        for (k, &b) in bins[lo..hi].iter().enumerate() {
-            acc += count[b as usize] as u64;
-            if acc >= half {
-                mid = (lo + k + 1).clamp(lo + 1, hi - 1);
+                best
+            };
+            let Some((i, c)) = boxes
+                .iter()
+                .enumerate()
+                .map(|(i, bx)| (i, score(bx, &bins)))
+                .filter(|(_, (s, _))| *s > 0)
+                .max_by_key(|(_, (s, _))| *s)
+                .map(|(i, (_, c))| (i, c))
+            else {
                 break;
+            };
+            let (lo, hi) = (boxes[i].lo, boxes[i].hi);
+            bins[lo..hi].sort_unstable_by_key(|&b| ch(b, c));
+            let half = boxes[i].n / 2;
+            let mut acc = 0u64;
+            let mut mid = lo + 1;
+            for (k, &b) in bins[lo..hi].iter().enumerate() {
+                acc += count[b as usize] as u64;
+                if acc >= half {
+                    mid = (lo + k + 1).clamp(lo + 1, hi - 1);
+                    break;
+                }
+            }
+            let (a, b) = (n_of(&bins[lo..mid]), n_of(&bins[mid..hi]));
+            boxes[i] = Box { lo, hi: mid, n: a };
+            boxes.push(Box { lo: mid, hi, n: b });
+        }
+        // Palette = mean colour of each box; every bin maps to its box.
+        let mut lut = vec![0u8; 1 << 15];
+        let mut colors = Vec::with_capacity(boxes.len());
+        for (k, bx) in boxes.iter().enumerate() {
+            let mut s = [0u64; 3];
+            for &b in &bins[bx.lo..bx.hi] {
+                lut[b as usize] = k as u8;
+                for c in 0..3 {
+                    s[c] += sum[b as usize][c] as u64;
+                }
+            }
+            let n = bx.n.max(1);
+            colors.push([(s[0] / n) as u8, (s[1] / n) as u8, (s[2] / n) as u8]);
+        }
+        let mut filled = vec![false; 1 << 15];
+        for &b in &bins {
+            filled[b as usize] = true;
+        }
+        PalMap { colors, lut, filled, dither }
+    }
+
+    /// Palette index per pixel for `rgb` (w x h), whose first row is row
+    /// `y0` of the picture (keeps the dither pattern aligned). Also returns
+    /// how many pixels fell in bins the palette had no answer for before
+    /// this call (colours it was not built from).
+    fn map(&mut self, rgb: &[u8], w: usize, h: usize, y0: usize) -> (Vec<u8>, usize) {
+        let colors = &self.colors;
+        // Bins no pixel used (reachable through dithering) take the nearest colour.
+        let near = |r: u32, g: u32, b: u32| -> u8 {
+            let mut best = (u32::MAX, 0);
+            for (k, c) in colors.iter().enumerate() {
+                let d = |a: u32, b: u8| (a as i32 - b as i32).pow(2) as u32;
+                let e = d(r, c[0]) + d(g, c[1]) + d(b, c[2]);
+                if e < best.0 {
+                    best = (e, k);
+                }
+            }
+            best.1 as u8
+        };
+        // Light ordered dither: +-half a 5-bit step before binning.
+        let mut idx = vec![0u8; w * h];
+        let (mut misses, mut new_bin) = (0, vec![false; 1 << 15]);
+        for y in 0..h {
+            for x in 0..w {
+                let p = &rgb[(y * w + x) * 3..];
+                // Bayer offset scaled to +-dither/2 levels.
+                let t = (BAYER[(y0 + y) & 3][x & 3] as i32 * 2 - 15) * self.dither / 32;
+                let d = |v: u8| (v as i32 + t).clamp(0, 255) as u8;
+                let (r, g, b) = (d(p[0]), d(p[1]), d(p[2]));
+                let k = bin(r, g, b);
+                if !self.filled[k] {
+                    self.lut[k] = near((r as u32 & !7) + 4, (g as u32 & !7) + 4, (b as u32 & !7) + 4);
+                    self.filled[k] = true;
+                    new_bin[k] = true;
+                }
+                misses += new_bin[k] as usize;
+                idx[y * w + x] = self.lut[k];
             }
         }
-        let (a, b) = (n_of(&bins[lo..mid]), n_of(&bins[mid..hi]));
-        boxes[i] = Box { lo, hi: mid, n: a };
-        boxes.push(Box { lo: mid, hi, n: b });
+        (idx, misses)
     }
-    // Palette = mean colour of each box; every bin maps to its box.
-    let mut lut = vec![0u8; 1 << 15];
-    let mut colors = Vec::with_capacity(boxes.len());
-    for (k, bx) in boxes.iter().enumerate() {
-        let mut s = [0u64; 3];
-        for &b in &bins[bx.lo..bx.hi] {
-            lut[b as usize] = k as u8;
-            for c in 0..3 {
-                s[c] += sum[b as usize][c] as u64;
-            }
-        }
-        let n = bx.n.max(1);
-        colors.push([(s[0] / n) as u8, (s[1] / n) as u8, (s[2] / n) as u8]);
-    }
-    // Bins no pixel used (reachable through dithering) take the nearest colour.
-    let near = |r: u32, g: u32, b: u32| -> u8 {
-        let mut best = (u32::MAX, 0);
-        for (k, c) in colors.iter().enumerate() {
-            let d = |a: u32, b: u8| (a as i32 - b as i32).pow(2) as u32;
-            let e = d(r, c[0]) + d(g, c[1]) + d(b, c[2]);
-            if e < best.0 {
-                best = (e, k);
-            }
-        }
-        best.1 as u8
-    };
-    let mut filled = vec![false; 1 << 15];
-    for &b in &bins {
-        filled[b as usize] = true;
-    }
-    // Light ordered dither: +-half a 5-bit step before binning.
-    let mut idx = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let p = &rgb[(y * w + x) * 3..];
-            // Bayer offset scaled to +-dither/2 levels.
-            let t = (BAYER[y & 3][x & 3] as i32 * 2 - 15) * dither / 32;
-            let d = |v: u8| (v as i32 + t).clamp(0, 255) as u8;
-            let (r, g, b) = (d(p[0]), d(p[1]), d(p[2]));
-            let k = bin(r, g, b);
-            if !filled[k] {
-                lut[k] = near((r as u32 & !7) + 4, (g as u32 & !7) + 4, (b as u32 & !7) + 4);
-                filled[k] = true;
-            }
-            idx[y * w + x] = lut[k];
-        }
-    }
-    (colors, idx)
 }
 
 /// Write palette + indices as a sixel DCS string.
@@ -511,8 +544,9 @@ struct SixelPlace {
     gkey: u64,
     /// Sixel images to draw, each at a cell-row offset within `rect`.
     data: Option<Vec<(u16, Vec<u8>)>>,
-    /// The pixels just sent for a moving picture, for the next frame's diff.
-    px: Option<Vec<u8>>,
+    /// The pixels just sent for a moving picture, for the next frame's diff,
+    /// and the palette they are drawn in.
+    px: Option<(Vec<u8>, Option<PalMap>)>,
 }
 
 pub struct Gfx {
@@ -534,8 +568,9 @@ pub struct Gfx {
     out: Vec<u8>,
     sixel_prev: Vec<(Rect, u64)>,
     sixel_now: Vec<SixelPlace>,
-    /// Moving pictures on screen now: gkey -> (where, the pixels shown).
-    sixel_shown: HashMap<u64, (Rect, Vec<u8>)>,
+    /// Moving pictures on screen now: gkey -> (where, the pixels shown, the
+    /// palette of their last whole frame).
+    sixel_shown: HashMap<u64, (Rect, Vec<u8>, Option<PalMap>)>,
     /// Re-emit every sixel next frame (after a clear / resize).
     pub force: bool,
     /// Send moving pictures at half vertical resolution (2:1 pixels).
@@ -864,34 +899,77 @@ impl Gfx {
                     let pal = if key.seq.is_some() { Palette::Adaptive { colors: self.video_colors, dither: 8 } } else { STILL_PALETTE };
                     // The same moving picture is already on screen in this
                     // spot: resend only the cell rows whose pixels changed.
-                    let prev = match key.seq {
-                        Some(_) if !self.force => self.sixel_shown.get(&gkey).filter(|(r, p)| *r == rect && p.len() == crop.len()),
+                    let mut kept = None;
+                    let runs = match key.seq {
+                        Some(_) if !self.force => match self.sixel_shown.get_mut(&gkey) {
+                            Some((r, p, m)) if *r == rect && p.len() == crop.len() => {
+                                kept = m.take();
+                                Some(changed_cell_rows(p, &crop, w * 3, ch, h))
+                            }
+                            _ => None,
+                        },
                         _ => None,
                     };
-                    let runs = prev.map(|(_, p)| changed_cell_rows(p, &crop, w * 3, ch, h));
                     let nrows = h.div_ceil(ch);
-                    // One palette (and one dither pattern) for the whole
-                    // frame: bands are cut from it, so no two bands sent for
-                    // the same frame disagree on colour.
-                    let (colors, idx) = quantize(&crop, w, h, pal);
+                    // Mostly changed: send it whole.
+                    let runs = runs.filter(|runs| runs.iter().map(|(a, b)| b - a).sum::<usize>() * 5 < nrows * 4);
                     let mut parts = Vec::new();
-                    match runs {
-                        // Mostly changed: send it whole.
-                        Some(runs) if runs.iter().map(|(a, b)| b - a).sum::<usize>() * 5 < nrows * 4 => {
-                            for (a, b) in runs {
-                                let (y0, y1) = (a * ch, (b * ch).min(h));
-                                let mut enc = Vec::new();
-                                sixel_emit(&colors, &idx[y0 * w..y1 * w], w, y1 - y0, aspect, &mut enc);
-                                parts.push((a as u16, enc));
+                    let mut keep = None;
+                    let mut whole = true;
+                    if let Some(runs) = runs {
+                        let band = |a: usize, b: usize| (a * ch, (b * ch).min(h));
+                        match (pal, kept) {
+                            // Draw the bands in the palette of the last whole
+                            // frame, so they match the rows left on screen.
+                            (Palette::Adaptive { .. }, Some(mut m)) => {
+                                let (mut maps, mut miss, mut n) = (Vec::new(), 0, 0);
+                                for &(a, b) in &runs {
+                                    let (y0, y1) = band(a, b);
+                                    let (idx, k) = m.map(&crop[y0 * w * 3..y1 * w * 3], w, y1 - y0, y0);
+                                    miss += k;
+                                    n += idx.len();
+                                    maps.push((a, y1 - y0, idx));
+                                }
+                                // Over 5% of the pixels in colours that palette
+                                // was not built from: refit on a whole frame.
+                                if miss * 20 <= n {
+                                    for (a, bh, idx) in maps {
+                                        let mut enc = Vec::new();
+                                        sixel_emit(&m.colors, &idx, w, bh, aspect, &mut enc);
+                                        parts.push((a as u16, enc));
+                                    }
+                                    keep = Some(m);
+                                    whole = false;
+                                }
+                            }
+                            // A fixed palette never changes: cut the bands
+                            // from this frame.
+                            _ => {
+                                let (colors, idx) = quantize(&crop, w, h, pal);
+                                for (a, b) in runs {
+                                    let (y0, y1) = band(a, b);
+                                    let mut enc = Vec::new();
+                                    sixel_emit(&colors, &idx[y0 * w..y1 * w], w, y1 - y0, aspect, &mut enc);
+                                    parts.push((a as u16, enc));
+                                }
+                                whole = false;
                             }
                         }
-                        _ => {
-                            let mut enc = Vec::new();
-                            sixel_emit(&colors, &idx, w, h, aspect, &mut enc);
-                            parts.push((0, enc));
-                        }
                     }
-                    (Some(parts), key.seq.map(|_| crop))
+                    if whole {
+                        let mut enc = Vec::new();
+                        match pal {
+                            Palette::Adaptive { colors, dither } if key.seq.is_some() => {
+                                let mut m = PalMap::fit(&crop, colors.clamp(2, 255), dither);
+                                let (idx, _) = m.map(&crop, w, h, 0);
+                                sixel_emit(&m.colors, &idx, w, h, aspect, &mut enc);
+                                keep = Some(m);
+                            }
+                            _ => sixel_encode_with(&crop, w, h, aspect, pal, &mut enc),
+                        }
+                        parts.push((0, enc));
+                    }
+                    (Some(parts), key.seq.map(|_| (crop, keep)))
                 } else {
                     (None, None)
                 };
@@ -938,8 +1016,8 @@ impl Gfx {
                 // Pictures dropped above (covered) leave `shown`, so their
                 // next frame is sent whole.
                 match p.px {
-                    Some(px) => {
-                        shown.insert(p.gkey, (r, px));
+                    Some((px, pal)) => {
+                        shown.insert(p.gkey, (r, px, pal));
                     }
                     None => {
                         if let Some(s) = self.sixel_shown.remove(&p.gkey) {
@@ -1177,16 +1255,19 @@ mod tests {
     fn sixel_sends_only_the_changed_cell_row() {
         let mut g = sixel_gfx();
         let (cols, rows) = (6u16, 4u16);
-        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
-        // Change pixels inside the third cell row only.
-        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| {
+        // Both colours are in the first frame, so its palette covers them.
+        let mut frame = |seq: u64, w: usize, h: usize| {
             let mut p = vec![90u8; w * h * 3];
             let ch = h / rows as usize;
-            for i in (2 * ch + 1) * w * 3..(2 * ch + 2) * w * 3 {
-                p[i] = 200;
+            p[..ch * w * 3].fill(200);
+            if seq == 2 {
+                // Change pixels inside the third cell row only.
+                p[(2 * ch + 1) * w * 3..(2 * ch + 2) * w * 3].fill(200);
             }
             p
-        });
+        };
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| frame(1, w, h));
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| frame(2, w, h));
         assert_eq!(s.matches("\x1bP").count(), 1, "one band: {s:?}");
         // The picture's top is screen row 2 (1-based), so its third cell row is 4.
         assert!(s.contains("\x1b[4;1H\x1bP"), "band placed at its cell row: {s:?}");
@@ -1226,34 +1307,69 @@ mod tests {
         assert!(s.contains("\x1b[2;1H\x1bP"), "the overlay erased part of it, so send it all: {s:?}");
     }
 
-    /// Bands sent for one frame share its palette: a colour register means
-    /// the same colour in every band.
-    #[test]
-    fn sixel_bands_of_a_frame_share_one_palette() {
-        let mut g = sixel_gfx();
-        let (cols, rows) = (6u16, 6u16);
-        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
-        // Cell row 1 turns red and cell row 4 blue: two bands, different colours.
-        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| {
-            let mut p = vec![90u8; w * h * 3];
-            let ch = h / rows as usize;
-            for (row, rgb) in [(1, [220u8, 20, 20]), (4, [20, 20, 220])] {
-                for px in p[row * ch * w * 3..(row + 1) * ch * w * 3].chunks_exact_mut(3) {
-                    px.copy_from_slice(&rgb);
-                }
-            }
-            p
-        });
-        assert_eq!(s.matches("\x1bP").count(), 2, "two bands: {s:?}");
-        let mut defs: HashMap<String, String> = HashMap::new();
+    /// Colour registers defined in a sixel stream: register -> "r,g,b".
+    fn sixel_registers(s: &str) -> Vec<(String, String)> {
+        let mut defs = Vec::new();
         for d in s.split('#').skip(1) {
             let mut f = d.split(';');
             let (Some(n), Some("2")) = (f.next(), f.next()) else { continue };
-            let rgb: String = f.take(3).map(|v| v.chars().take_while(|c| c.is_ascii_digit()).collect::<String>()).collect::<Vec<_>>().join(",");
-            if let Some(old) = defs.insert(n.to_string(), rgb.clone()) {
-                assert_eq!(old, rgb, "register {n} redefined between bands");
-            }
+            let rgb: Vec<String> = f.take(3).map(|v| v.chars().take_while(|c| c.is_ascii_digit()).collect()).collect();
+            defs.push((n.to_string(), rgb.join(",")));
         }
-        assert!(defs.len() >= 2);
+        defs
+    }
+
+    /// Bands are drawn in the palette of the last whole frame: every colour
+    /// register they define means what it meant in that frame.
+    #[test]
+    fn sixel_bands_reuse_the_whole_frames_palette() {
+        let mut g = sixel_gfx();
+        let (cols, rows) = (6u16, 6u16);
+        let paint = |p: &mut [u8], w: usize, ch: usize, row: usize, rgb: [u8; 3]| {
+            for px in p[row * ch * w * 3..(row + 1) * ch * w * 3].chunks_exact_mut(3) {
+                px.copy_from_slice(&rgb);
+            }
+        };
+        let (red, blue) = ([220u8, 20, 20], [20u8, 20, 220]);
+        // Frame 1: red top row, blue bottom row. Frame 2: rows 1 and 4 too.
+        let mut frame = |seq: u64, w: usize, h: usize| {
+            let mut p = vec![90u8; w * h * 3];
+            let ch = h / rows as usize;
+            paint(&mut p, w, ch, 0, red);
+            paint(&mut p, w, ch, 5, blue);
+            if seq == 2 {
+                paint(&mut p, w, ch, 1, red);
+                paint(&mut p, w, ch, 4, blue);
+            }
+            p
+        };
+        let first = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| frame(1, w, h));
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| frame(2, w, h));
+        assert_eq!(s.matches("\x1bP").count(), 2, "two bands: {s:?}");
+        let defs: HashMap<String, String> = sixel_registers(&first).into_iter().collect();
+        let used = sixel_registers(&s);
+        assert!(used.len() >= 2);
+        for (n, rgb) in used {
+            assert_eq!(defs.get(&n), Some(&rgb), "register {n} differs from the whole frame's");
+        }
+    }
+
+    /// Changed rows in colours the kept palette never saw: refit and send a
+    /// whole frame instead of drawing them in the wrong colours.
+    #[test]
+    fn sixel_new_colours_send_a_whole_frame() {
+        let mut g = sixel_gfx();
+        let (cols, rows) = (6u16, 6u16);
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| {
+            let mut p = vec![90u8; w * h * 3];
+            let ch = h / rows as usize;
+            for px in p[2 * ch * w * 3..3 * ch * w * 3].chunks_exact_mut(3) {
+                px.copy_from_slice(&[230, 40, 200]);
+            }
+            p
+        });
+        assert_eq!(s.matches("\x1bP").count(), 1);
+        assert!(s.contains("\x1b[2;1H\x1bP"), "whole frame from the top: {s:?}");
     }
 }
