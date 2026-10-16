@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod auth;
 mod chat;
 mod glyphs;
 mod page;
@@ -27,6 +28,9 @@ USAGE:
   ytui --snapshot SRC [--at SECONDS] [--cols N --rows N]
                                 print one rendered frame (SRC = URL or file)
   ytui --import-subs FILE       import a Google Takeout subscriptions.csv
+  ytui --login [--client FILE]  sign in with Google to like and comment
+  ytui --logout                 sign out and revoke access
+  ytui --help-login             how to create the Google OAuth client
 
 OPTIONS:
   --mode M       ascii | classic | sextant | quadrant | halfblock | braille
@@ -46,6 +50,8 @@ fn main() -> Result<()> {
     let mut max_h = 480;
     let mut snapshot: Option<String> = None;
     let mut import: Option<String> = None;
+    let mut login = false;
+    let mut client: Option<String> = None;
     let mut at = 0.0;
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
@@ -73,11 +79,22 @@ fn main() -> Result<()> {
             "--height" => max_h = val("--height")?.parse()?,
             "--snapshot" => snapshot = Some(val("--snapshot")?),
             "--import-subs" => import = Some(val("--import-subs")?),
+            "--login" => login = true,
+            "--client" => client = Some(val("--client")?),
+            "--logout" => return auth::logout(),
+            "--help-login" => {
+                print!("{}", auth::SETUP_HELP);
+                return Ok(());
+            }
             "--at" => at = val("--at")?.parse()?,
             "--cols" => scols = Some(val("--cols")?.parse()?),
             "--rows" => srows = Some(val("--rows")?.parse()?),
             _ => query.push(a),
         }
+    }
+
+    if login {
+        return auth::login(client.as_deref());
     }
 
     if let Some(f) = import {
@@ -114,12 +131,12 @@ fn main() -> Result<()> {
     let start = (!q.trim().is_empty()).then_some(q);
 
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste);
     if let Some(q) = start {
         app.open_query(&q);
     }
     let res = app.run(&mut terminal, rx);
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     res
 }

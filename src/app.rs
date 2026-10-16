@@ -3,9 +3,10 @@
 //! spatial keyboard navigation, and one video player that plays inline on
 //! its watch page, in a miniplayer elsewhere, or fullscreen.
 
-use crate::api::{self, Api, ChannelPage, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
+use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
+use crate::auth::Auth;
 use crate::chat::{self, Chat};
-use crate::page::{self, chip_query, layout, Act, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
+use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Mode, Renderer};
 use crate::store::Store;
@@ -33,6 +34,23 @@ pub enum Msg {
     Related(String, Vec<VideoItem>, Option<(String, bool)>),
     Open(R<Target>, bool),
     Chat(String, chat::Update),
+    /// Your current rating of the watch page's video.
+    Rating(u64, String),
+    /// Result of rating: (page, rating before the change, outcome).
+    Rated(u64, String, R<()>),
+    /// A comment or reply was posted; Some(idx) = reply under comment idx.
+    Posted(u64, Option<usize>, R<Comment>),
+}
+
+/// Comment / reply composer.
+struct Compose {
+    uid: u64,
+    video: String,
+    /// (parent comment id, its index on the page)
+    parent: Option<(String, usize)>,
+    label: String,
+    text: String,
+    sending: bool,
 }
 
 pub enum Load {
@@ -74,6 +92,7 @@ enum Side {
     History,
     Later,
     Help,
+    Account,
     Channel(String),
 }
 
@@ -109,6 +128,8 @@ pub struct App {
     /// Video id we already re-resolved after a stream failure.
     retried: Option<String>,
     chat: Option<Chat>,
+    auth: Option<Arc<Auth>>,
+    compose: Option<Compose>,
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
@@ -160,6 +181,8 @@ impl App {
             ended_handled: false,
             retried: None,
             chat: None,
+            auth: Auth::load().map(Arc::new),
+            compose: None,
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
@@ -353,6 +376,7 @@ impl App {
 
     fn on_load(&mut self, uid: u64, l: Load) {
         let mut want_comments = None;
+        let mut want_rating: Option<String> = None;
         let mut related = None;
         let player_id = self.player.as_ref().map(|p| p.video.id.clone()).or(self.pending.as_ref().map(|p| p.0.id.clone()));
         let mut err_flash = None;
@@ -378,6 +402,7 @@ impl App {
                     w.comments_loading = true;
                     want_comments = Some(t.clone());
                 }
+                want_rating = Some(w.video.id.clone());
                 if w.video.title.is_empty() {
                     w.video.title = info.title.clone();
                     w.video.channel = info.channel.clone();
@@ -424,6 +449,14 @@ impl App {
         }
         if let Some(e) = err_flash {
             self.flash(format!("⚠ {e}"));
+        }
+        if let (Some(id), Some(auth)) = (want_rating, self.auth.clone()) {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if let Ok(r) = auth.rating(&id) {
+                    let _ = tx.send(Msg::Rating(uid, r));
+                }
+            });
         }
         if let Some(tok) = want_comments {
             let (api, tx) = (self.api.clone(), self.tx.clone());
@@ -490,6 +523,55 @@ impl App {
                     self.up_next = (id, rel);
                 }
             }
+            Msg::Rating(uid, r) => {
+                if let Some(p) = self.find(uid) {
+                    if let Kind::Watch(w) = &mut p.kind {
+                        w.rating = Some(r);
+                    }
+                    p.changed();
+                }
+            }
+            Msg::Rated(uid, prev, r) => match r {
+                Ok(()) => {}
+                Err(e) => {
+                    if let Some(p) = self.find(uid) {
+                        if let Kind::Watch(w) = &mut p.kind {
+                            w.rating = Some(prev);
+                        }
+                        p.changed();
+                    }
+                    self.flash(format!("⚠ couldn't rate: {e}"));
+                }
+            },
+            Msg::Posted(uid, parent, r) => match r {
+                Ok(c) => {
+                    self.compose = None;
+                    if let Some(p) = self.find(uid) {
+                        if let Kind::Watch(w) = &mut p.kind {
+                            let at = match parent {
+                                // After the parent thread's existing replies.
+                                Some(i) => {
+                                    let mut j = i + 1;
+                                    while w.comments.get(j).is_some_and(|c| c.level > 0) {
+                                        j += 1;
+                                    }
+                                    j.min(w.comments.len())
+                                }
+                                None => 0,
+                            };
+                            w.comments.insert(at, c);
+                        }
+                        p.changed();
+                    }
+                    self.flash(if parent.is_some() { "reply posted" } else { "comment posted" });
+                }
+                Err(e) => {
+                    if let Some(c) = &mut self.compose {
+                        c.sending = false;
+                    }
+                    self.flash(format!("⚠ couldn't post: {e}"));
+                }
+            },
             Msg::Chat(id, u) => {
                 if let Some(c) = self.chat.as_mut().filter(|c| c.video == id) {
                     c.apply(u);
@@ -534,6 +616,7 @@ impl App {
             comments_loading: false,
             queue: queue.clone(),
             qpos,
+            rating: None,
         };
         self.navigate(Kind::Watch(Box::new(w)));
         self.play(v, queue, qpos, None);
@@ -782,12 +865,82 @@ impl App {
                     }
                 }
             }
+            Act::Rate(want) => {
+                let Some(auth) = self.auth.clone() else { return self.need_sign_in() };
+                let p = self.page_mut();
+                let uid = p.uid;
+                let Kind::Watch(w) = &mut p.kind else { return };
+                let prev = w.rating.clone().unwrap_or_else(|| "none".into());
+                let new = if prev == want { "none".to_string() } else { want };
+                w.rating = Some(new.clone());
+                let id = w.video.id.clone();
+                p.changed();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Rated(uid, prev, s(auth.rate(&id, &new))));
+                });
+            }
+            Act::Compose | Act::ReplyTo(_) => {
+                if self.auth.is_none() {
+                    return self.need_sign_in();
+                }
+                let p = self.page();
+                let Kind::Watch(w) = &p.kind else { return };
+                let title = w.info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| w.video.title.clone());
+                let (parent, label) = match act {
+                    Act::ReplyTo(i) => {
+                        // Replies to a reply go to the top-level thread.
+                        let top = (0..=i).rev().find(|&j| w.comments[j].level == 0).unwrap_or(i);
+                        let c = &w.comments[top];
+                        let mention = if w.comments[i].level > 0 { format!("{} ", w.comments[i].author) } else { String::new() };
+                        (Some((c.id.clone(), top, mention)), format!("Reply to {}", w.comments[i].author))
+                    }
+                    _ => (None, format!("Comment on “{}”", page::trunc(&title, 60))),
+                };
+                self.compose = Some(Compose {
+                    uid: p.uid,
+                    video: w.video.id.clone(),
+                    text: parent.as_ref().map(|p| p.2.clone()).unwrap_or_default(),
+                    parent: parent.map(|(id, i, _)| (id, i)),
+                    label,
+                    sending: false,
+                });
+            }
+            Act::SignOut => {
+                if let Some(a) = self.auth.take() {
+                    std::thread::spawn(move || a.sign_out());
+                }
+                self.store_rev += 1;
+                self.flash("signed out");
+            }
             Act::ClearHistory => {
                 self.store.history.clear();
                 self.store_changed();
                 self.flash("history cleared");
             }
         }
+    }
+
+    fn need_sign_in(&mut self) {
+        self.flash("sign in to do that: see the Account page");
+        self.navigate(Kind::Account);
+    }
+
+    fn post_compose(&mut self) {
+        let (Some(c), Some(auth)) = (&mut self.compose, self.auth.clone()) else { return };
+        let text = c.text.trim().to_string();
+        if text.is_empty() || c.sending {
+            return;
+        }
+        c.sending = true;
+        let (uid, video, parent, tx) = (c.uid, c.video.clone(), c.parent.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let (r, idx) = match parent {
+                Some((pid, idx)) => (auth.reply(&pid, &text), Some(idx)),
+                None => (auth.comment(&video, &text), None),
+            };
+            let _ = tx.send(Msg::Posted(uid, idx, s(r)));
+        });
     }
 
     pub fn open_query(&mut self, q: &str) {
@@ -840,6 +993,7 @@ impl App {
             ("↺  History".to_string(), Side::History),
             ("◷  Watch later".to_string(), Side::Later),
             ("?  Help".to_string(), Side::Help),
+            (if self.auth.is_some() { "@  Account ✓".to_string() } else { "@  Sign in".to_string() }, Side::Account),
         ];
         for c in &self.store.subs {
             v.push((c.name.clone(), Side::Channel(c.id.clone())));
@@ -855,6 +1009,7 @@ impl App {
             Side::History => Kind::History,
             Side::Later => Kind::Later,
             Side::Help => Kind::Help,
+            Side::Account => Kind::Account,
             Side::Channel(id) => Kind::Channel { id, params: None, page: None },
         };
         self.navigate(kind);
@@ -885,6 +1040,15 @@ impl App {
     fn on_event(&mut self, ev: Event) {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            Event::Paste(t) => {
+                let t = t.replace("\r\n", "\n").replace('\r', "\n");
+                if let Some(c) = &mut self.compose {
+                    c.text.push_str(&t);
+                } else if let Some(e) = &mut self.edit {
+                    e.text.push_str(t.lines().next().unwrap_or(""));
+                    self.suggest();
+                }
+            }
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
                 MouseEventKind::ScrollDown => self.scroll_by(3),
@@ -1072,6 +1236,24 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         if ctrl && k.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        // Comment composer
+        if let Some(c) = &mut self.compose {
+            if c.sending {
+                return;
+            }
+            match k.code {
+                KeyCode::Esc => self.compose = None,
+                KeyCode::Enter if alt || k.modifiers.contains(KeyModifiers::SHIFT) => c.text.push('\n'),
+                KeyCode::Enter => self.post_compose(),
+                KeyCode::Backspace => {
+                    c.text.pop();
+                }
+                KeyCode::Char('u') if ctrl => c.text.clear(),
+                KeyCode::Char(ch) if !ctrl => c.text.push(ch),
+                _ => {}
+            }
             return;
         }
         // Address bar editing
@@ -1297,7 +1479,7 @@ impl App {
                 };
                 if let Some(v) = kind {
                     self.open_tab(Kind::Home { chip: self.default_chip(), feed: Feed::default() });
-                    let w = Watch { video: v, info: None, desc_open: false, comments: Vec::new(), comments_cont: None, comment_count: None, comments_loading: false, queue: Vec::new(), qpos: 0 };
+                    let w = Watch { video: v, info: None, desc_open: false, comments: Vec::new(), comments_cont: None, comment_count: None, comments_loading: false, queue: Vec::new(), qpos: 0, rating: None };
                     self.navigate(Kind::Watch(Box::new(w)));
                 }
             }
@@ -1352,6 +1534,32 @@ impl App {
         if self.edit.is_some() {
             self.draw_suggestions(buf);
         }
+        if self.compose.is_some() {
+            self.draw_compose(buf, area);
+        }
+    }
+
+    fn draw_compose(&self, buf: &mut Buffer, area: Rect) {
+        let Some(c) = &self.compose else { return };
+        let w = area.width.saturating_sub(8).min(90);
+        let tw = (w - 4) as usize;
+        let lines = page::wrap(&format!("{}▏", c.text), tw, 200);
+        let shown = lines.len().clamp(3, 10);
+        let h = shown as u16 + 5;
+        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + area.height.saturating_sub(h) / 2, width: w, height: h };
+        fill(buf, area, r.x, (r.y - area.y) as i64, w, h, Color::Rgb(30, 30, 38));
+        let border = Style::default().fg(ACCENT);
+        for x in r.x..r.x + w {
+            buf[(x, r.y)].set_char('─').set_style(border);
+            buf[(x, r.y + h - 1)].set_char('─').set_style(border);
+        }
+        buf.set_string(r.x + 2, r.y, format!(" {} ", page::trunc(&c.label, tw - 2)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        let start = lines.len().saturating_sub(shown);
+        for (i, l) in lines[start..].iter().enumerate() {
+            buf.set_string(r.x + 2, r.y + 2 + i as u16, l, Style::default().fg(Color::White));
+        }
+        let hint = if c.sending { "posting…".to_string() } else { format!("Enter post · Alt-Enter new line · Esc cancel · {} chars", c.text.chars().count()) };
+        buf.set_string(r.x + 2, r.y + h - 2, page::trunc(&hint, tw), Style::default().fg(DIM));
     }
 
     fn draw_tabs(&mut self, buf: &mut Buffer, r: Rect) {
@@ -1442,6 +1650,7 @@ impl App {
             Kind::History => 2,
             Kind::Later => 3,
             Kind::Help => 4,
+            Kind::Account => 5,
             _ => usize::MAX,
         };
         let cur_channel = match &self.page().kind {
@@ -1450,7 +1659,7 @@ impl App {
         };
         let mut y = r.y + 1;
         for (i, (label, item)) in items.iter().enumerate() {
-            if i == 5 {
+            if i == 6 {
                 y += 1;
                 if y < r.y + r.height {
                     buf.set_string(r.x + 2, y, "SUBSCRIPTIONS", Style::default().fg(DIM).add_modifier(Modifier::BOLD));
@@ -1487,7 +1696,8 @@ impl App {
         let page = &mut t.pages[t.idx];
         let key = (w, vh, page.rev, key_store);
         if page.layout.as_ref().map(|l| l.0) != Some(key) {
-            let doc = layout(page, &self.store, w, vh, autoplay, show_chat);
+            let ctx = Ctx { autoplay, chat: show_chat, account: self.auth.as_ref().map(|a| a.channel()) };
+            let doc = layout(page, &self.store, w, vh, &ctx);
             page.layout = Some((key, doc));
         }
         let doc = &page.layout.as_ref().unwrap().1;

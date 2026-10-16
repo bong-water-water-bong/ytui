@@ -42,8 +42,30 @@ It works like a browser for YouTube:
   `~/.local/share/ytui/`
 - **Mouse**: click anything, wheel to scroll, click the progress bar to seek
 
+- **Sign in** (optional) to like / dislike videos, comment and reply, using Google's
+  official OAuth and the YouTube Data API (see below)
+
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
 to resolve stream URLs. Press `?` in the app for every key.
+
+## Signing in (likes and comments)
+
+Browsing needs no account. To like, dislike, comment and reply, sign in with Google's official
+OAuth flow using your own free Google Cloud OAuth client. ytui never sees your password; tokens
+are stored in `~/.local/share/ytui/oauth.json` (mode 0600).
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project and enable
+   **YouTube Data API v3** (APIs & Services → Library).
+2. Google Auth Platform → Branding: set an app name and your email. Audience: **External**, and
+   add your Google account under **Test users**.
+3. Google Auth Platform → Clients → Create client → **Desktop app** → download the JSON.
+4. Run `ytui --login --client ~/Downloads/client_secret_XXXX.json` and open the link it prints.
+   On a remote/SSH session the final page won't load (it points at `127.0.0.1`); copy that page's
+   address from the browser and paste it into the terminal.
+
+While the OAuth app is in *Testing*, Google expires the sign-in after 7 days (run `ytui --login`
+again, or publish the app). The free quota is 10,000 units/day; a like or comment costs 50.
+`ytui --logout` revokes access. `ytui --help-login` prints these steps.
 
 ## Render modes (`m` cycles)
 
@@ -76,6 +98,7 @@ and the nearest glyph wins.
 | `C` | show / hide live chat |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
+| composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
 | `m` | cycle render mode |
 | `?` `q` | help, quit |
 

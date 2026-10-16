@@ -168,6 +168,7 @@ pub struct ChatBatch {
 
 #[derive(Clone, Debug, Default)]
 pub struct Comment {
+    pub id: String,
     pub author: String,
     pub text: String,
     pub time: String,
@@ -872,6 +873,7 @@ fn comment(p: &Value, level: u8) -> Comment {
     let pr = &p["properties"];
     let tb = &p["toolbar"];
     Comment {
+        id: pr["commentId"].as_str().unwrap_or("").into(),
         author: p["author"]["displayName"].as_str().unwrap_or("").into(),
         text: pr["content"]["content"].as_str().unwrap_or("").into(),
         time: pr["publishedTime"].as_str().unwrap_or("").into(),

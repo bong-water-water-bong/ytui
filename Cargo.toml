@@ -8,12 +8,14 @@ description = "YouTube in the terminal: search, browse, and watch videos rendere
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 crossterm = "0.28"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 ureq = "2"
 unicode-width = "0.2"
 

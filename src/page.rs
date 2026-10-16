@@ -53,6 +53,8 @@ pub struct Watch {
     /// Playlist being played through, and our index in it.
     pub queue: Vec<VideoItem>,
     pub qpos: usize,
+    /// Your rating when signed in: "like" / "dislike" / "none".
+    pub rating: Option<String>,
 }
 
 pub enum Kind {
@@ -65,6 +67,15 @@ pub enum Kind {
     History,
     Later,
     Help,
+    Account,
+}
+
+/// Per-draw context that isn't part of the page itself.
+pub struct Ctx {
+    pub autoplay: bool,
+    pub chat: bool,
+    /// Signed-in channel name, if signed in.
+    pub account: Option<String>,
 }
 
 pub struct Page {
@@ -99,6 +110,7 @@ impl Page {
             Kind::History => "History".into(),
             Kind::Later => "Watch later".into(),
             Kind::Help => "Help".into(),
+            Kind::Account => "Account".into(),
         }
     }
 
@@ -113,6 +125,7 @@ impl Page {
             Kind::History => "ytui://history".into(),
             Kind::Later => "ytui://watch-later".into(),
             Kind::Help => "ytui://help".into(),
+            Kind::Account => "ytui://account".into(),
         }
     }
 
@@ -147,6 +160,13 @@ pub enum Act {
     PlayerBar,
     PlayAll,
     ClearHistory,
+    /// Like / dislike (toggles back to none).
+    Rate(String),
+    /// Open the composer for a new comment.
+    Compose,
+    /// Open the composer to reply to comment `idx`.
+    ReplyTo(usize),
+    SignOut,
 }
 
 #[derive(Clone)]
@@ -532,7 +552,7 @@ impl B<'_> {
 }
 
 /// Lay out `page` for a content area `w` wide and `vh` tall.
-pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool, chat: bool) -> Doc {
+pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
     let mut b = B { prims: Vec::new(), tg: Vec::new(), store };
     let w = w.max(20);
     let iw = w - 1; // inner width after the 1-col focus gutter
@@ -618,7 +638,7 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool, chat:
                 y = b.status(y, page, "", false);
             }
         }
-        Kind::Watch(wt) => y = watch_layout(&mut b, page, wt, w, vh, autoplay, chat),
+        Kind::Watch(wt) => y = watch_layout(&mut b, page, wt, w, vh, ctx),
         Kind::Subs { feed } => {
             b.line(1, y, vec![Span::styled("Subscriptions", bold)]);
             y += 2;
@@ -676,6 +696,39 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool, chat:
             let entries: Vec<Entry> = store.later.iter().map(|v| Entry::Item(Item::Video(v.clone()))).collect();
             y = b.list(y, iw, &entries, true);
         }
+        Kind::Account => {
+            match &ctx.account {
+                Some(name) => {
+                    b.line(1, y, vec![Span::styled("Account", bold)]);
+                    y += 2;
+                    let who = if name.is_empty() { "a Google account without a YouTube channel".to_string() } else { name.clone() };
+                    b.line(1, y, vec![Span::styled("Signed in as ", st(META)), Span::styled(who, bold)]);
+                    y += 2;
+                    for l in [
+                        "You can like and dislike videos, comment, and reply to comments.",
+                        "Each like or comment uses 50 of your 10,000 daily API units (about 200 a day).",
+                        "Subscriptions, history and Watch later stay local to ytui.",
+                    ] {
+                        b.line(1, y, vec![Span::styled(l.to_string(), st(META))]);
+                        y += 1;
+                    }
+                    y += 1;
+                    b.button(1, y, "Sign out", Act::SignOut, false);
+                    y += 2;
+                }
+                None => {
+                    b.line(1, y, vec![Span::styled("Sign in to like and comment", bold)]);
+                    y += 2;
+                    for l in crate::auth::SETUP_HELP.lines() {
+                        b.line(1, y, vec![Span::styled(l.to_string(), st(if l.starts_with(' ') || l.is_empty() { META } else { Color::White }))]);
+                        y += 1;
+                    }
+                    y += 1;
+                    b.line(1, y, vec![Span::styled("Then restart ytui.", st(Color::White))]);
+                    y += 2;
+                }
+            }
+        }
         Kind::Help => {
             for (i, l) in HELP_TEXT.lines().enumerate() {
                 let style = if !l.starts_with(' ') && !l.is_empty() { bold } else { st(META) };
@@ -687,7 +740,8 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, autoplay: bool, chat:
     Doc { h: y + 1, prims: b.prims, targets: b.tg }
 }
 
-fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: bool, chat: bool) -> usize {
+fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, ctx: &Ctx) -> usize {
+    let (autoplay, chat) = (ctx.autoplay, ctx.chat);
     let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
     let two = w >= 120;
     let lw = if two { w * 64 / 100 } else { w } - 1;
@@ -732,7 +786,11 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: b
             v.title = i.title.clone();
             v.channel = i.channel.clone();
         }
-        b.button(bx, y, if saved { "✓ Saved" } else { "+ Watch later" }, Act::ToggleLater(v), false);
+        bx += b.button(bx, y, if saved { "✓ Saved" } else { "+ Watch later" }, Act::ToggleLater(v), false) + 1;
+        let rating = wt.rating.as_deref().unwrap_or("none");
+        let likes = if i.likes.is_empty() { "Like".to_string() } else { i.likes.clone() };
+        bx += b.button(bx, y, &format!("▲ {likes}"), Act::Rate("like".into()), rating == "like");
+        b.button(bx, y, "▼", Act::Rate("dislike".into()), rating == "dislike");
         y += 3;
         // Description panel
         let mut stats = Vec::new();
@@ -831,6 +889,17 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: b
         let count = wt.comment_count.clone().unwrap_or_default();
         b.line(1, y, vec![Span::styled(if count.is_empty() { "Comments".to_string() } else { count }, bold)]);
         y += 2;
+        if info.is_some_and(|i| i.comments_token.is_some()) {
+            let prompt = match &ctx.account {
+                Some(_) => "Add a comment…",
+                None => "Add a comment…  (sign in to comment)",
+            };
+            let pw = lw.saturating_sub(1);
+            b.prims.push(Prim::Fill { x: 1, y, w: pw, h: 1, color: PANEL });
+            b.line(2, y, vec![Span::styled(prompt.to_string(), st(DIM))]);
+            b.tgt(1, y, pw, 1, Act::Compose);
+            y += 2;
+        }
         if wt.comments.is_empty() {
             let msg = if wt.comments_loading { "Loading comments…" } else if info.is_some_and(|i| i.comments_token.is_none()) { "Comments are turned off." } else { "No comments yet." };
             b.line(1, y, vec![Span::styled(msg.to_string(), st(META))]);
@@ -851,17 +920,21 @@ fn watch_layout(b: &mut B, page: &Page, wt: &Watch, w: u16, vh: u16, autoplay: b
                 tail.push(Span::styled(format!("♥ {}   ", c.likes), st(DIM)));
             }
             let replies = (c.replies > 0 && c.replies_token.is_some()).then(|| format!("▾ {} repl{}", c.replies, if c.replies == 1 { "y" } else { "ies" }));
-            let tx = ind + tail.iter().map(|s| s.content.width() as u16).sum::<u16>();
+            let reply_x = ind + tail.iter().map(|s| s.content.width() as u16).sum::<u16>();
+            tail.push(Span::styled("Reply".to_string(), st(META)));
+            tail.push(Span::raw("   "));
+            let tx = reply_x + 8;
             if let Some(r) = &replies {
                 tail.push(Span::styled(r.clone(), st(Color::Rgb(120, 170, 255))));
             }
-            if !tail.is_empty() {
-                b.line(ind, y, tail);
-                if let Some(r) = replies {
-                    b.tgt(tx, y, r.width() as u16, 1, Act::Replies(idx));
-                }
-                y += 1;
+            b.line(ind, y, tail);
+            if !c.id.is_empty() {
+                b.tgt(reply_x, y, 5, 1, Act::ReplyTo(idx));
             }
+            if let Some(r) = replies {
+                b.tgt(tx, y, r.width() as u16, 1, Act::Replies(idx));
+            }
+            y += 1;
             y += 1;
         }
         if page.more_loading {
@@ -892,6 +965,9 @@ Keys — player (anywhere while something is playing)
   , .              back / forward 10 s              < >              back / forward 60 s
   0-9              jump to 0%..90%                  n                next video
   x                stop and close the player        a                autoplay on / off
+  Like/dislike buttons and 'Add a comment…' / Reply on the watch page need
+  sign-in: run `ytui --login` (setup steps on the Account page / --help-login)
+  composer: Enter posts, Alt-Enter new line, Esc cancels, paste works
   + -              volume up / down (0-150%)        M                mute
   C                show / hide live chat            m                cycle render mode
   [ ] { }          ascii contrast / edges
