@@ -50,6 +50,19 @@ fn plausible(c: (u16, u16)) -> bool {
     (5.0..=64.0).contains(&w) && (9.0..=128.0).contains(&h) && (1.3..=3.2).contains(&(h / w))
 }
 
+/// Height is far more reliable than width: some terminals (and tmux's
+/// `client_cell_width`) report the advance gap between glyphs, which can be a
+/// few pixels wide. If the reported size is not believable but the height is,
+/// rebuild the width from the usual cell aspect (~2.2:1).
+fn sane_cell(c: Option<(u16, u16)>) -> Option<(u16, u16)> {
+    let (w, h) = c?;
+    if plausible((w, h)) {
+        return Some((w, h));
+    }
+    let est = ((h as f32 / 2.2).round() as u16).max(1);
+    ((9.0..=128.0).contains(&(h as f32)) && plausible((est, h))).then_some((est, h))
+}
+
 /// Inside tmux, whether the attached terminal lacks truecolor as far as tmux
 /// knows, so tmux squeezes colours into its 256-colour palette.
 pub fn tmux_lacks_rgb() -> bool {
@@ -71,8 +84,9 @@ impl Caps {
         let n = self.name.to_lowercase();
         let kitty = self.kitty && (!self.tmux || self.passthrough);
         let placeholders = n.contains("kitty") || n.contains("ghostty") || self.tmux;
-        // Sixel can't scale, so it needs a believable cell size.
-        let sixel = self.sixel && self.cell.is_some_and(plausible);
+        // Sixel can't scale, so it needs a believable cell size (estimated
+        // from the height when the terminal reports a bogus width).
+        let sixel = self.sixel && sane_cell(self.cell).is_some();
         if kitty && placeholders {
             Some(Proto::Kitty)
         } else if sixel {
@@ -89,7 +103,7 @@ impl Caps {
         if self.choose().is_some() {
             return None;
         }
-        if self.sixel && !self.cell.is_some_and(plausible) {
+        if self.sixel && sane_cell(self.cell).is_none() {
             let c = self.cell.map(|c| format!("{}x{}", c.0, c.1)).unwrap_or_else(|| "no".into());
             return Some(format!("sixel off: the terminal reported a {c} pixel cell size"));
         }
@@ -489,6 +503,8 @@ pub struct Gfx {
     pub max_fps: f32,
     /// Moving pictures: name -> (frame number last sent, when).
     sent: HashMap<String, (u64, std::time::Instant)>,
+    /// Previous frame's pixels per moving picture, for band diffing.
+    prev_px: HashMap<String, Vec<u8>>,
     next_id: u32,
     statics: HashMap<String, (u32, u16, u16)>,
     static_order: VecDeque<String>,
@@ -520,13 +536,14 @@ impl Gfx {
         let remote = std::env::var("SSH_CONNECTION").is_ok();
         Gfx {
             proto,
-            cell: caps.cell.unwrap_or((10, 20)),
+            cell: sane_cell(caps.cell).unwrap_or((10, 20)),
             tmux: caps.tmux,
-            max_px: if remote { 640 } else { 1280 },
+            max_px: if remote { 960 } else { 1920 },
             sixel_tall: std::env::var_os("YTUI_SIXEL_FULL").is_none(),
             video_colors: 255,
             max_fps: if remote { 12.0 } else { 0.0 },
             sent: HashMap::new(),
+            prev_px: HashMap::new(),
             next_id: 1,
             statics: HashMap::new(),
             static_order: VecDeque::new(),
@@ -556,8 +573,23 @@ impl Gfx {
     /// Transmit `rgb` (w x h) as kitty image `id` with a virtual placement of
     /// cols x rows cells (zlib-compressed, chunked).
     fn kitty_send(&mut self, id: u32, rgb: &[u8], w: usize, h: usize, cols: u16, rows: u16) {
+        self.kitty_send_at(id, rgb, w, h, cols, rows, 0, h)
+    }
+
+    /// Transmit `rgb` rows `y0..y1` into image `id`'s frame buffer at the
+    /// matching offset. Kitty composes `a=f` updates onto the last transmitted
+    /// frame, so a moving picture only pays for the rows that changed.
+    #[allow(clippy::too_many_arguments)]
+    fn kitty_send_at(&mut self, id: u32, rgb: &[u8], w: usize, h: usize, cols: u16, rows: u16, y0: usize, y1: usize) {
+        let (y0, y1) = (y0.min(h), y1.min(h));
+        if y1 <= y0 {
+            return;
+        }
+        // A partial update addresses rows the image already knows about.
+        let partial = y0 != 0 || y1 != h;
+        let (bw, bh) = (w, y1 - y0);
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        let _ = z.write_all(rgb);
+        let _ = z.write_all(&rgb[y0 * w * 3..y1 * w * 3]);
         let data = B64.encode(z.finish().unwrap_or_default());
         let bytes = data.as_bytes();
         let mut first = true;
@@ -567,7 +599,11 @@ impl Gfx {
             let more = (end < bytes.len()) as u8;
             let mut seq = Vec::with_capacity(end - i + 96);
             if first {
-                let _ = write!(seq, "\x1b_Ga=T,U=1,q=2,f=24,o=z,i={id},s={w},v={h},c={cols},r={rows},m={more};");
+                if partial {
+                    let _ = write!(seq, "\x1b_Ga=f,U=1,q=2,f=24,o=z,i={id},s={bw},v={bh},x=0,y={y0},m={more};");
+                } else {
+                    let _ = write!(seq, "\x1b_Ga=T,U=1,q=2,f=24,o=z,i={id},s={bw},v={bh},c={cols},r={rows},m={more};");
+                }
             } else {
                 let _ = write!(seq, "\x1b_Gm={more},q=2;");
             }
@@ -592,6 +628,8 @@ impl Gfx {
         self.statics.clear();
         self.static_order.clear();
         self.dynamic.clear();
+        self.sent.clear();
+        self.prev_px.clear();
         self.sixel_prev.clear();
         self.force = true;
         std::mem::take(&mut self.out)
@@ -686,7 +724,66 @@ impl Gfx {
                                 let (pw, ph) = self.px_for(cols, rows);
                                 let Some(px) = make(pw, ph) else { return false };
                                 let id = cur.map(|c| c.0).unwrap_or_else(|| self.alloc_id());
-                                self.kitty_send(id, &px, pw, ph, cols, rows);
+                                // Same pixel size as the last frame? Then rows
+                                // that did not change need not be resent.
+                                let reusable = cur.is_some_and(|(_, _, c, r)| (c, r) == (cols, rows))
+                                    && self.prev_px.get(key.name).is_some_and(|p| p.len() == px.len());
+                                if reusable {
+                                    let prev = self.prev_px.remove(key.name).unwrap_or_default();
+                                    let stride = pw * 3;
+                                    // Collect the changed row runs.
+                                    let mut runs: Vec<(usize, usize)> = Vec::new();
+                                    let (mut y, mut band, mut y0) = (0, false, 0);
+                                    while y < ph {
+                                        let a = y * stride;
+                                        // Always test the row: `band || ..` would
+                                        // keep the band open forever and turn
+                                        // every frame into a full transmit.
+                                        let diff = prev[a..a + stride] != px[a..a + stride];
+                                        if diff && !band {
+                                            band = true;
+                                            y0 = y;
+                                        } else if !diff && band {
+                                            runs.push((y0, y));
+                                            band = false;
+                                        }
+                                        y += 1;
+                                    }
+                                    if band {
+                                        runs.push((y0, ph));
+                                    }
+                                    // Splitting a frame into bands loses the
+                                    // cross-row redundancy zlib would have
+                                    // exploited, so measure both and send
+                                    // whichever is actually smaller.
+                                    let banded: usize = runs
+                                        .iter()
+                                        .map(|&(a, b)| {
+                                            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                                            let _ = z.write_all(&px[a * stride..b * stride]);
+                                            B64.encode(z.finish().unwrap_or_default()).len()
+                                        })
+                                        .sum();
+                                    let whole = {
+                                        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                                        let _ = z.write_all(&px);
+                                        B64.encode(z.finish().unwrap_or_default()).len()
+                                    };
+                                    // Only a genuine partial frame can beat a
+                                    // full one; an identical frame sends nothing.
+                                    if runs.is_empty() {
+                                        // nothing changed
+                                    } else if banded < whole {
+                                        for &(a, b) in &runs {
+                                            self.kitty_send_at(id, &px, pw, ph, cols, rows, a, b);
+                                        }
+                                    } else {
+                                        self.kitty_send(id, &px, pw, ph, cols, rows);
+                                    }
+                                } else {
+                                    self.kitty_send(id, &px, pw, ph, cols, rows);
+                                }
+                                self.prev_px.insert(key.name.to_string(), px);
                                 self.dynamic.insert(key.name.to_string(), (id, seq, cols, rows));
                                 id
                             }
@@ -810,5 +907,176 @@ mod tests {
         sixel_encode_with(&rgb, 8, 7, 1, Palette::Fixed, &mut out);
         assert!(out.starts_with(b"\x1bP0;1;0q\"1;1;8;7"));
         assert!(out.ends_with(b"\x1b\\"));
+    }
+
+    #[test]
+    fn bogus_cell_width_is_rebuilt_from_height() {
+        // tmux reports 3x12 on some boxes: the glyph gap, not a cell width.
+        assert_eq!(sane_cell(Some((3, 12))), Some((5, 12)));
+        assert_eq!(sane_cell(Some((9, 20))), Some((9, 20)));
+        assert_eq!(sane_cell(Some((3, 2))), None);
+        assert_eq!(sane_cell(None), None);
+    }
+
+    #[test]
+    fn kitty_band_transmit_encodes_offsets() {
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        let (w, h) = (4usize, 6usize);
+        let rgb = vec![7u8; w * h * 3];
+        g.out.clear();
+        g.kitty_send_at(9, &rgb, w, h, 2, 3, 2, 5);
+        let s = String::from_utf8_lossy(&g.out).to_string();
+        assert!(s.contains("a=f"), "band update must use a=f: {s:?}");
+        assert!(s.contains("y=2"), "band update must carry its row offset: {s:?}");
+        assert!(s.contains("v=3"), "band height must be 3 rows: {s:?}");
+        assert!(!s.contains("c=2"), "a=f must not resend placement fields: {s:?}");
+        g.out.clear();
+        g.kitty_send(9, &rgb, w, h, 2, 3);
+        let s = String::from_utf8_lossy(&g.out).to_string();
+        assert!(s.contains("a=T") && s.contains("c=2") && s.contains("r=3"), "full transmit keeps geometry: {s:?}");
+    }
+
+    #[test]
+    fn empty_band_is_not_sent() {
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        g.out.clear();
+        g.kitty_send_at(1, &[0u8; 12], 2, 2, 1, 1, 2, 2);
+        assert!(g.out.is_empty(), "a zero-height band must transmit nothing");
+    }
+
+    /// Consecutive frames the way video drives them: the first is a full
+    /// transmit, later ones reuse the image and send only what moved.
+    #[test]
+    fn consecutive_frames_send_bands_not_whole_frames() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        // Unlimited: the default is 12 fps over SSH, which would hold one frame
+        // across these back-to-back calls.
+        g.max_fps = 0.0;
+        let (cols, rows) = (4u16, 3u16);
+        let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: cols, height: rows });
+        let clip = Rect { x: 0, y: 0, width: cols, height: rows };
+        let (mut full, mut band) = (0, 0);
+        for seq in 1..=4u64 {
+            g.out.clear();
+            assert!(g.place(&mut buf, clip, 0, 0, cols, rows, Key { name: "v", seq: Some(seq) }, &mut |w, h| {
+                let mut p = vec![9u8; w * h * 3];
+                for b in p.iter_mut().take(w * 3) {
+                    *b = (seq * 20) as u8;
+                }
+                Some(p)
+            }), "place must succeed for frame {seq}");
+            let s = String::from_utf8_lossy(&g.out).to_string();
+            if seq == 1 {
+                assert!(s.contains("a=T"), "the first frame is a full transmit");
+            }
+            if seq > 1 {
+                assert!(!s.is_empty(), "frame {seq} changed rows and must transmit");
+            }
+            full += s.contains("a=T") as i32;
+            band += s.contains("a=f") as i32;
+        }
+        assert_eq!(full, 1, "only the first frame is a full transmit");
+        assert_eq!(band, 3, "later frames reuse the image via band updates");
+    }
+
+    /// An identical frame must transmit nothing at all.
+    #[test]
+    fn unchanged_frame_sends_nothing() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        g.max_fps = 0.0;
+        let (cols, rows) = (4u16, 3u16);
+        let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: cols, height: rows });
+        let clip = Rect { x: 0, y: 0, width: cols, height: rows };
+        for seq in 1..=3u64 {
+            g.out.clear();
+            assert!(g.place(&mut buf, clip, 0, 0, cols, rows, Key { name: "v", seq: Some(seq) }, &mut |w, h| {
+                Some(vec![5u8; w * h * 3])
+            }));
+            if seq > 1 {
+                assert!(g.out.is_empty(), "frame {seq} is identical and must not be resent");
+            }
+        }
+    }
+
+    /// Banding wins big on a mostly-static scene (the video common case).
+    #[test]
+    fn banding_beats_full_frame_on_static_scene() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        g.max_fps = 0.0;
+        let (cols, rows) = (24u16, 16u16);
+        let (pw, ph) = g.px_for(cols, rows);
+        let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: cols, height: rows });
+        let clip = Rect { x: 0, y: 0, width: cols, height: rows };
+        // Frame 1: full transmit. Frame 2: only the middle band moves.
+        for seq in 1..=2u64 {
+            g.out.clear();
+            assert!(g.place(&mut buf, clip, 0, 0, cols, rows, Key { name: "v", seq: Some(seq) }, &mut |w, h| {
+                let mut p: Vec<u8> = (0..w * h * 3).map(|i| (i % 251) as u8).collect();
+                if seq == 2 {
+                    let (a, b) = (h / 3, 2 * h / 3);
+                    for i in a * w * 3..b * w * 3 {
+                        p[i] = p[i].wrapping_add(60);
+                    }
+                }
+                Some(p)
+            }));
+            if seq == 2 {
+                let s = String::from_utf8_lossy(&g.out).to_string();
+                assert!(s.contains("a=f"), "a partial change should use a band update");
+            }
+        }
+        let _ = (pw, ph);
+    }
+
+    /// A changed box size must fall back to a full transmit, not a band update.
+    #[test]
+    fn resize_forces_full_transmit() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        g.max_fps = 0.0;
+        let mut seq = 0u64;
+        let run = |cols: u16, rows: u16, g: &mut Gfx, seq: &mut u64| {
+            *seq += 1;
+            let s = *seq;
+            let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: cols, height: rows });
+            let clip = Rect { x: 0, y: 0, width: cols, height: rows };
+            g.out.clear();
+            assert!(g.place(&mut buf, clip, 0, 0, cols, rows, Key { name: "v", seq: Some(s) }, &mut |w, h| {
+                Some(vec![(s * 7) as u8; w * h * 3])
+            }));
+            String::from_utf8_lossy(&g.out).to_string()
+        };
+        let _ = run(4, 3, &mut g, &mut seq);
+        let s = run(6, 4, &mut g, &mut seq);
+        assert!(s.contains("a=T"), "a size change must send a full frame: {s:?}");
+    }
+
+    /// The fps throttle holds a moving picture's frame instead of sending
+    /// back-to-back updates, which is what keeps SSH bandwidth in check.
+    #[test]
+    fn throttle_holds_frames_that_are_not_due() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = Gfx::new(Proto::Kitty, &Caps::default());
+        g.max_fps = 12.0;
+        let (cols, rows) = (4u16, 3u16);
+        let mut buf = Buffer::empty(Rect { x: 0, y: 0, width: cols, height: rows });
+        let clip = Rect { x: 0, y: 0, width: cols, height: rows };
+        let mut drawn = 0;
+        for seq in 1..=5u64 {
+            g.out.clear();
+            assert!(g.place(&mut buf, clip, 0, 0, cols, rows, Key { name: "v", seq: Some(seq) }, &mut |w, h| {
+                drawn += 1;
+                Some(vec![(seq * 20) as u8; w * h * 3])
+            }));
+        }
+        assert_eq!(drawn, 1, "only the frame that was due should render pixels");
     }
 }

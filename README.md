@@ -100,14 +100,20 @@ banners and the 3D scenes instead of characters. It asks the terminal at startup
 
 - **kitty graphics protocol**: kitty, Ghostty (and kitty / Ghostty behind tmux). Images are
   sent zlib-compressed and drawn with Unicode placeholders, so they scroll and clip with the UI
-  and work inside tmux (needs `set -g allow-passthrough on` in tmux).
+  and work inside tmux (needs `set -g allow-passthrough on` in tmux). Consecutive video frames
+  reuse the image and transmit only the changed row bands, which measured ~65% fewer bytes on a
+  mostly-static scene and 0% on a hard cut (it falls back to a full frame whenever banding would
+  cost more, so it is never worse).
 - **sixel**: foot, WezTerm, xterm (`-ti vt340`), mlterm, Konsole, Windows Terminal and others.
-  Fixed 252-colour palette with ordered dithering.
+  Adaptive palette per frame (median cut) with a light ordered dither. Some terminals report a bogus cell width
+  (tmux's `client_cell_width` can be the glyph gap); the width is then rebuilt from the height's
+  cell aspect rather than discarding sixel.
 - otherwise the character renderers as before.
 
 `G` switches between pixels and characters (saved). `--gfx auto|kitty|sixel|off` (or
-`YTUI_GFX`) overrides detection. Over SSH, pixel video is capped at 640 px and 12 fps to keep
-bandwidth around 4 MB/s; change with `--gfx-px N` and `--gfx-fps N` (0 = unlimited).
+`YTUI_GFX`) overrides detection. Pixel video is capped at 1920 px locally and at 960 px / 12 fps
+over SSH to keep bandwidth around 4 MB/s; change with `--gfx-px N` and `--gfx-fps N`
+(0 = unlimited).
 
 ## Colours under tmux
 
