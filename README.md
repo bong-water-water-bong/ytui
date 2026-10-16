@@ -8,11 +8,41 @@ YouTube in the terminal: search, browse, and watch videos rendered as truecolour
 - `ffmpeg`
 - a truecolour terminal; a font with Unicode sextants for `sextant` mode
 
+- optional, recommended: **libmpv** (playback engine: captions, instant seek/pause, A/V sync,
+  hardware decoding, and the native video window on Windows). Without it ytui plays through an
+  ffmpeg pipe as before.
+
 ## Build
 
 ```
 cargo build --release
 ```
+
+### Windows
+
+Runs natively in Windows Terminal (sixel graphics, WASAPI audio through libmpv).
+Install `yt-dlp`, `ffmpeg` and `deno` (e.g. with winget), and put `libmpv-2.dll` from a
+[shinchiro mpv-dev build](https://github.com/shinchiro/mpv-winbuild-cmake/releases) next to
+`ytui.exe` or in `%LOCALAPPDATA%\libmpv\` (or point `YTUI_LIBMPV` at it). State lives in
+`%USERPROFILE%\.local\share\ytui\`.
+
+## Playback engine
+
+With libmpv, mpv does demuxing, decoding (hardware where possible), A/V sync, audio output and
+subtitles; frames come back through its software render API and go through ytui's renderers.
+Seeks take ~0.1 s instead of restarting ffmpeg. `--engine mpv|ffmpeg` picks one explicitly.
+
+**Native video window (Windows Terminal):** mpv renders straight to the GPU in a borderless
+window that ytui keeps glued over the player area (inline, miniplayer and fullscreen), using the
+terminal's exact grid geometry from UI Automation. It never takes focus, clicks go through to
+ytui, and it hides when you switch tabs or open a dialog. `N` toggles it; `--no-native` disables it.
+
+**Captions:** `S` cycles off / each caption track (uploaded first, then auto-generated); the
+language you pick is remembered for later videos. In character modes they're drawn as text over
+the video; with pixel graphics or the native window mpv renders them into the picture.
+
+YouTube stalls open-ended HTTP range requests after ~800 KB, so ffmpeg and mpv read googlevideo
+streams through a small local relay that fetches them in bounded chunks.
 
 ## Usage
 
@@ -169,6 +199,8 @@ and the nearest glyph wins.
 | `P` | save the focused / current video to a playlist |
 | `V` | 3D audio visualiser instead of the video |
 | `E` | auto-exposure on / off |
+| `S` | captions: off / each track |
+| `N` | native GPU video window on / off (Windows) |
 | `G` | pixel graphics (kitty / sixel) on / off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
@@ -176,7 +208,8 @@ and the nearest glyph wins.
 | `m` | cycle render mode |
 | `?` `q` | help, quit |
 
-Audio goes through PipeWire/PulseAudio (`pw-cat` or `pacat`) or ALSA (`aplay`), with ytui
+With libmpv, audio goes through mpv's own output (WASAPI, PipeWire/PulseAudio, ALSA…).
+Otherwise audio goes through PipeWire/PulseAudio (`pw-cat` or `pacat`) or ALSA (`aplay`), with ytui
 applying the volume itself; without those tools ffmpeg plays audio directly. Pick the output
 with `--audio`; it is off by default over SSH.
 

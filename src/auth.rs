@@ -13,7 +13,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -87,14 +87,14 @@ pub struct RemoteSub {
 fn config_dir() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+        .unwrap_or_else(|_| crate::sys::home().join(".config"))
         .join("ytui")
 }
 
 fn data_dir() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
+        .unwrap_or_else(|_| crate::sys::home().join(".local/share"))
         .join("ytui")
 }
 
@@ -107,16 +107,7 @@ fn token_path() -> PathBuf {
 }
 
 fn write_private(path: &PathBuf, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    f.write_all(data)?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::sys::write_private(path, data)
 }
 
 fn now() -> u64 {
@@ -125,8 +116,8 @@ fn now() -> u64 {
 
 fn random_token(n: usize) -> String {
     let mut b = vec![0u8; n];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
-        // Not expected on Linux; still unpredictable enough for a state value.
+    if getrandom::getrandom(&mut b).is_err() {
+        // Not expected; still unpredictable enough for a state value.
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         b = Sha256::digest(format!("{t}{}", std::process::id())).to_vec();
     }
@@ -546,9 +537,7 @@ pub fn login(client_file: Option<&str>) -> Result<()> {
     println!("   If the browser is on a different machine (e.g. you're on SSH), the last page");
     println!("   won't load (it points at 127.0.0.1:{port}). That's expected: copy that page's");
     println!("   full address from the browser's address bar and paste it here.\n");
-    if std::env::var("SSH_CONNECTION").is_err() && std::env::var("DISPLAY").is_ok() {
-        let _ = std::process::Command::new("xdg-open").arg(&url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
-    }
+    crate::sys::open_url(&url);
     print!("Waiting… paste the address here (or press Ctrl-C to cancel): ");
     let _ = std::io::stdout().flush();
 

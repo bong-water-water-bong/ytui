@@ -1,17 +1,22 @@
 mod api;
 mod app;
 mod auth;
+mod bench;
 mod chat;
 mod demo;
 mod diacritics;
 mod engine3d;
 mod gfx;
 mod glyphs;
+mod mpv;
+mod overlay;
 mod page;
 mod player;
+mod proxy;
 mod render;
 mod scenes;
 mod store;
+mod sys;
 mod term;
 mod thumbs;
 mod yt;
@@ -40,7 +45,10 @@ USAGE:
 
 OPTIONS:
   --mode M       art | ascii | classic | sextant | quadrant | halfblock | braille
-  --audio A      auto | pulse | alsa | none   (auto: pulse if available, muted over ssh)
+  --audio A      auto | pulse | alsa | ffplay | none
+                 (auto: pulse if available, ffplay on Windows, muted over ssh)
+  --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
+  --no-native    never use the native GPU video window (Windows; N toggles it)
   --fps N        max render frame rate (default 30)
   --height N     max stream height to fetch (default 480)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
@@ -50,16 +58,22 @@ OPTIONS:
   --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
-ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
+ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
+     YTUI_LIBMPV (path to libmpv), YTUI_ENGINE (as --engine)
 ";
 
 fn main() -> Result<()> {
+    sys::init();
     let mut args = std::env::args().skip(1);
     let mut mode = None;
     let mut audio = Audio::auto();
     let mut fps = 30;
+    let mut engine = std::env::var("YTUI_ENGINE").unwrap_or_else(|_| "auto".into());
+    let mut native = true;
     let mut max_h = 480;
     let mut snapshot: Option<String> = None;
+    let mut bench: Option<String> = None;
+    let mut secs = 8.0;
     let mut import: Option<String> = None;
     let mut login = false;
     let mut demo: Option<String> = None;
@@ -88,13 +102,19 @@ fn main() -> Result<()> {
                     "auto" => Audio::auto(),
                     "pulse" => Audio::Pulse,
                     "alsa" => Audio::Alsa,
+                    "ffplay" => Audio::Ffplay,
                     "none" | "off" => Audio::None,
                     v => bail!("unknown audio output {v}"),
                 }
             }
             "--fps" => fps = val("--fps")?.parse()?,
+            "--engine" => engine = val("--engine")?,
+            "--no-native" => native = false,
             "--height" => max_h = val("--height")?.parse()?,
             "--snapshot" => snapshot = Some(val("--snapshot")?),
+            "--bench" => bench = Some(val("--bench")?),
+            "--probe-term" => return overlay::probe(&val("--probe-term")?),
+            "--seconds" => secs = val("--seconds")?.parse()?,
             "--import-subs" => import = Some(val("--import-subs")?),
             "--login" => login = true,
             "--demo3d" => demo = Some(args.next().unwrap_or_default()),
@@ -141,6 +161,11 @@ fn main() -> Result<()> {
             renderer.mode = Mode::Classic;
         }
         return demo::run(kind, renderer);
+    }
+
+    if let Some(src) = bench {
+        let use_mpv = engine != "ffmpeg" && mpv::available();
+        return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, renderer, scols.unwrap_or(120), srows.unwrap_or(40));
     }
 
     if let Some(src) = snapshot {
@@ -200,7 +225,21 @@ fn main() -> Result<()> {
     if p256 && colors == "auto" {
         hints.insert(0, "tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
     }
-    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
+    let use_mpv = match engine.as_str() {
+        "ffmpeg" => false,
+        "mpv" if !mpv::available() => bail!("--engine mpv: libmpv not found (install it or set YTUI_LIBMPV)"),
+        _ => mpv::available(),
+    };
+    if !use_mpv && engine == "auto" {
+        hints.insert(0, "libmpv not found: playing through ffmpeg (no captions); see README".into());
+    }
+    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, mode.is_some());
+    #[cfg(windows)]
+    if use_mpv && native && std::env::var("SSH_CONNECTION").is_err() {
+        if let Some(o) = overlay::Overlay::new() {
+            app.set_overlay(o);
+        }
+    }
     app.set_gfx(gfx);
     if let Some(h) = hints.last() {
         app.hint(h.clone());
@@ -211,12 +250,12 @@ fn main() -> Result<()> {
     let start = (!q.trim().is_empty()).then_some(q);
 
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste, crossterm::event::EnableFocusChange);
     if let Some(q) = start {
         app.open_query(&q);
     }
     let res = app.run(&mut terminal, rx);
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste, crossterm::event::DisableFocusChange);
     ratatui::restore();
     res
 }

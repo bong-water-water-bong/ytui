@@ -202,7 +202,7 @@ pub struct Api {
 fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
+        .unwrap_or_else(|_| crate::sys::home().join(".cache"));
     base.join("ytui")
 }
 

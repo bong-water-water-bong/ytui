@@ -210,6 +210,22 @@ pub struct App {
     t0: Instant,
     /// Pixel graphics backend (kitty / sixel), if the terminal has one.
     gfx: Option<Gfx>,
+    /// Native GPU video window over the terminal, and where the terminal's
+    /// grid is on screen (kept fresh by a background thread).
+    #[cfg(windows)]
+    overlay: Option<crate::overlay::Overlay>,
+    #[cfg(windows)]
+    grid: Arc<std::sync::Mutex<Option<crate::overlay::Grid>>>,
+    /// This frame's video box for the native window: (full, visible part),
+    /// in terminal cells.
+    native_rect: Option<(Rect, Rect)>,
+    /// Our terminal tab is the one showing (from focus reports): the native
+    /// window must not float over other tabs.
+    tab_active: bool,
+    /// Focus went to another application while our tab was showing; when
+    /// the terminal comes back without focusing us, another tab was picked.
+    #[cfg(windows)]
+    away_since: Option<Instant>,
     /// Bytes for the backend to write after the current frame.
     gfx_out: Vec<u8>,
     /// Frame counter for animated pixel images (3D scenes).
@@ -237,6 +253,51 @@ fn s<T>(r: anyhow::Result<T>) -> R<T> {
 }
 
 impl App {
+    /// Use a native GPU window for video (Windows Terminal + libmpv).
+    #[cfg(windows)]
+    pub fn set_overlay(&mut self, o: crate::overlay::Overlay) {
+        let grid = self.grid.clone();
+        let term = o.owner as isize;
+        std::thread::Builder::new()
+            .name("ytui-grid".into())
+            .spawn(move || loop {
+                let g = crate::overlay::current_grid(term as _);
+                *grid.lock().unwrap() = g;
+                std::thread::sleep(Duration::from_millis(250));
+            })
+            .ok();
+        if self.store.native {
+            self.opts.wid = Some(o.wid());
+        }
+        self.overlay = Some(o);
+    }
+
+    /// Place or hide the native video window after a frame is drawn.
+    fn place_overlay(&mut self) {
+        #[cfg(windows)]
+        {
+            if let (Some(t), Some(o)) = (self.away_since, self.overlay.as_ref()) {
+                // Back in the terminal but no focus report for us: the user
+                // came back to a different tab.
+                if crate::overlay::is_foreground(o.owner) && t.elapsed() > Duration::from_millis(400) {
+                    self.tab_active = false;
+                    self.away_since = None;
+                }
+            }
+            let busy = self.edit.is_some() || self.compose.is_some() || self.dialog.is_some() || self.viz || !self.tab_active;
+            let grid = *self.grid.lock().unwrap();
+            let native = self.player.as_ref().is_some_and(|p| p.native());
+            let Some(o) = self.overlay.as_mut() else { return };
+            match (self.native_rect, grid) {
+                (Some((full, vis)), Some(g)) if native && !busy && vis.width > 0 && vis.height > 0 => {
+                    use crate::overlay::Overlay;
+                    o.place(Some((Overlay::cells_to_screen(g, full.x, full.y, full.width, full.height), Overlay::cells_to_screen(g, vis.x, vis.y, vis.width, vis.height))));
+                }
+                _ => o.place(None),
+            }
+        }
+    }
+
     pub fn set_gfx(&mut self, g: Option<Gfx>) {
         if let Some(g) = &g {
             self.flash(format!("pixel graphics: {} (G switches to characters)", g.proto.name()));
@@ -297,6 +358,14 @@ impl App {
             gfx: None,
             gfx_out: Vec::new(),
             gfx_seq: 0,
+            #[cfg(windows)]
+            overlay: None,
+            #[cfg(windows)]
+            grid: Arc::new(std::sync::Mutex::new(None)),
+            native_rect: None,
+            tab_active: true,
+            #[cfg(windows)]
+            away_since: None,
             gfx_reset: false,
             chat_src: None,
             up_next: (String::new(), Vec::new()),
@@ -635,7 +704,9 @@ impl App {
                         self.store.record(&v, start, dur);
                         self.store_changed();
                         let (c, r) = self.term;
-                        self.player = Some(Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure));
+                        let mut p = Player::new(v, st, start, self.opts, (c as usize, r.saturating_sub(1) as usize), self.store.volume, self.store.exposure);
+                        p.set_caption_pref(self.store.captions.clone());
+                        self.player = Some(p);
                         self.ended_handled = false;
                         self.last_record = Instant::now();
                         if start > 0.0 {
@@ -1555,6 +1626,24 @@ impl App {
             }
         }
         match ev {
+            Event::FocusGained => {
+                self.tab_active = true;
+                #[cfg(windows)]
+                {
+                    self.away_since = None;
+                }
+            }
+            Event::FocusLost => {
+                // Still the foreground window: a tab or pane switch inside
+                // the terminal. Otherwise another app took focus, and the
+                // video can stay put (the app covers it anyway).
+                #[cfg(windows)]
+                match self.overlay.as_ref().map(|o| crate::overlay::is_foreground(o.owner)) {
+                    Some(true) => self.tab_active = false,
+                    Some(false) => self.away_since = Some(Instant::now()),
+                    None => {}
+                }
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(t) => {
                 let t = t.replace("\r\n", "\n").replace('\r', "\n");
@@ -1993,6 +2082,35 @@ impl App {
                     self.open_save_dialog(v);
                 }
             }
+            KeyCode::Char('N') => {
+                #[cfg(windows)]
+                {
+                    if let Some(o) = &self.overlay {
+                        self.store.native = !self.store.native;
+                        self.store.touch();
+                        self.opts.wid = self.store.native.then(|| o.wid());
+                        let wid = self.opts.wid;
+                        if let Some(p) = &mut self.player {
+                            p.set_native(wid);
+                        }
+                        self.flash(if self.store.native { "native video window" } else { "video in the terminal" });
+                    } else {
+                        self.flash("native video needs libmpv in Windows Terminal");
+                    }
+                }
+                #[cfg(not(windows))]
+                self.flash("native video window is Windows-only for now");
+            }
+            KeyCode::Char('S') => {
+                if let Some(p) = &mut self.player {
+                    let (msg, pref) = p.cycle_captions();
+                    if pref != self.store.captions {
+                        self.store.captions = pref;
+                        self.store_changed();
+                    }
+                    self.flash(msg);
+                }
+            }
             KeyCode::Char('C') => {
                 self.store.show_chat = !self.store.show_chat;
                 self.store_changed();
@@ -2093,7 +2211,9 @@ impl App {
 
     pub fn draw(&mut self, f: &mut Frame) {
         self.gfx_seq += 1;
+        self.native_rect = None;
         self.draw_ui(f);
+        self.place_overlay();
         if self.gfx_active() {
             if let Some(g) = &mut self.gfx {
                 let bytes = g.finish(f.buffer_mut());
@@ -2115,9 +2235,11 @@ impl App {
             }
             _ => (GW as f32, GH as f32),
         };
+        let burn = self.gfx.is_some() && self.store.gfx;
         if let Some(p) = &mut self.player {
             p.set_term(area.width as usize, area.height.saturating_sub(1) as usize);
             p.set_px_cell(px_cell);
+            p.set_caption_burn(burn);
         }
         if area.height < 8 || area.width < 30 {
             f.buffer_mut().set_string(0, 0, "window too small", Style::default());
@@ -2436,7 +2558,23 @@ impl App {
                         Some(p) => {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
                             let t = self.t0.elapsed().as_secs_f32();
-                            if self.viz && gfx_on {
+                            if p.native() && !self.viz {
+                                let full = Rect { x: r.x + x, y: (r.y as i64 + sy).max(0) as u16, width: pw, height: *h };
+                                let top = (r.y as i64 + sy).max(r.y as i64);
+                                let bot = (r.y as i64 + sy + *h as i64).min((r.y + vh) as i64);
+                                let vis = Rect { x: r.x + x, y: top as u16, width: pw, height: (bot - top).max(0) as u16 };
+                                let full = Rect { y: (r.y as i64 + sy) as u16, ..full };
+                                if r.y as i64 + sy >= 0 {
+                                    self.native_rect = Some((full, vis));
+                                } else {
+                                    // Scrolled partly above the screen: keep the window
+                                    // aligned to the visible part.
+                                    self.native_rect = Some((vis, vis));
+                                }
+                                if p.loading() {
+                                    center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
+                                }
+                            } else if self.viz && gfx_on {
                                 let samples = p.samples();
                                 let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
                                 if let Some(g) = self.gfx.as_mut() {
@@ -2467,6 +2605,9 @@ impl App {
                                         }
                                     }
                                 }
+                            }
+                            if !self.viz {
+                                draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
                             }
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
@@ -2577,6 +2718,9 @@ impl App {
             let samples = p.samples();
             render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, mw as usize, vh as usize, &mut self.viz_cells);
             blit(buf, r, r.x, 0, &self.viz_cells, mw as usize, vh as usize);
+        } else if p.native() {
+            let b = Rect { x: r.x, y: r.y, width: mw, height: vh };
+            self.native_rect = Some((b, b));
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, mw as usize, vh as usize);
@@ -2587,6 +2731,9 @@ impl App {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
+        }
+        if !self.viz {
+            draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
         }
         // Overlay controls on the video, like YouTube's miniplayer.
         let ctl = Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
@@ -2631,6 +2778,9 @@ impl App {
             let samples = p.samples();
             render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, vw as usize, vh as usize, &mut self.viz_cells);
             blit(buf, varea, area.x, 0, &self.viz_cells, vw as usize, vh as usize);
+        } else if p.native() {
+            let b = Rect { x: area.x, y: area.y, width: vw, height: vh };
+            self.native_rect = Some((b, b));
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, vw as usize, vh as usize);
@@ -2642,6 +2792,9 @@ impl App {
                 Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
                 None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
             }
+        }
+        if !self.viz {
+            draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
         }
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
@@ -2881,13 +3034,54 @@ fn center_text(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, te
     buf.set_string(tx, clip.y + y as u16, text, Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD));
 }
 
+/// Captions over the bottom of a w x h video box (top-left at column x,
+/// row sy of `clip`): centred lines, wrapped, white on black like YouTube's.
+fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, text: &str) {
+    if text.trim().is_empty() || w < 8 || h < 4 {
+        return;
+    }
+    let max = (w as usize * 9 / 10).max(8);
+    let mut lines: Vec<String> = Vec::new();
+    for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut cur = String::new();
+        for word in para.split_whitespace() {
+            if !cur.is_empty() && cur.width() + 1 + word.width() > max {
+                lines.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        if !cur.is_empty() {
+            lines.push(page::trunc(&cur, max));
+        }
+    }
+    // Newest lines win when there are more than fit.
+    let keep = (h as usize / 3).clamp(1, 3);
+    let lines = &lines[lines.len().saturating_sub(keep)..];
+    let style = Style::default().fg(Color::White).bg(Color::Rgb(8, 8, 8)).add_modifier(Modifier::BOLD);
+    let bottom = sy + h as i64 - 1 - (h > 10) as i64;
+    for (i, l) in lines.iter().enumerate() {
+        let y = bottom - (lines.len() - 1 - i) as i64;
+        if y < 0 || y >= clip.height as i64 {
+            continue;
+        }
+        let s = format!(" {l} ");
+        let tx = x + w.saturating_sub(s.width() as u16) / 2;
+        buf.set_string(tx, clip.y + y as u16, &s, style);
+    }
+}
+
 fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) {
     let d = p.duration();
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
     let vol = if p.muted() { "muted".to_string() } else { format!("vol {:.0}%", p.level() * 100.0) };
     let ae = if p.exposure.on { " AE" } else { "" };
-    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {}{ae} {:.0}fps ", mode.name(), p.fps) };
+    let cc = if p.caption_track().is_some() { " CC" } else { "" };
+    let rate = if p.native() { "gpu".to_string() } else { format!("{:.0}fps", p.fps) };
+    let tail = if compact { format!(" {time} ") } else { format!(" {time}  {vol}  {}{ae}{cc} {rate} ", mode.name()) };
     let tw = tail.width() as u16;
     let bw = w.saturating_sub(tw.max(16) + 1);
     let filled = if d > 0.0 { ((p.pos / d).clamp(0.0, 1.0) * bw as f64) as u16 } else { 0 };

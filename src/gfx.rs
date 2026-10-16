@@ -115,52 +115,17 @@ fn tmux_wrap(seq: &[u8]) -> Vec<u8> {
 /// Ask the terminal what it supports. Must run before the UI takes over the
 /// terminal; puts it in raw mode briefly.
 pub fn detect() -> Caps {
-    use std::os::fd::AsRawFd;
     let mut caps = Caps { tmux: std::env::var("TMUX").is_ok(), ..Default::default() };
-    // Cell pixel size from the kernel, when the terminal reports it.
-    unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(std::io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
-            caps.cell = Some((ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row));
-        }
-    }
-    if crossterm::terminal::enable_raw_mode().is_err() {
-        return caps;
-    }
+    caps.cell = crate::sys::cell_px();
     let mut q = Vec::new();
-    let kitty_q = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+    let kitty_q = b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\";
     if caps.tmux {
         q.extend(tmux_wrap(kitty_q));
     } else {
         q.extend_from_slice(kitty_q);
     }
-    q.extend_from_slice(b"\x1b[>0q\x1b[16t\x1b[c");
-    let mut out = std::io::stdout();
-    let _ = out.write_all(&q);
-    let _ = out.flush();
-    let mut got = Vec::new();
-    let fd = std::io::stdin().as_raw_fd();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(700);
-    loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
-        if left <= 0 {
-            break;
-        }
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut pfd, 1, left) } <= 0 {
-            break;
-        }
-        let mut b = [0u8; 1024];
-        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, b.len()) };
-        if n <= 0 {
-            break;
-        }
-        got.extend_from_slice(&b[..n as usize]);
-        if da1_end(&got).is_some() {
-            break;
-        }
-    }
-    let _ = crossterm::terminal::disable_raw_mode();
+    q.extend_from_slice(b"[>0q[16t[c");
+    let got = crate::sys::query_tty(&q, |b| da1_end(b).is_some(), 700);
     let s = String::from_utf8_lossy(&got).to_string();
     if caps.tmux {
         // tmux answers DA1 itself; ask it what the real (outer) terminal can do.

@@ -15,17 +15,52 @@ pub struct Stream {
     pub live: bool,
     /// Source frame rate, if known.
     pub fps: Option<f64>,
+    /// Caption tracks: uploaded ones first, then auto-generated.
+    pub subs: Vec<SubTrack>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubTrack {
+    pub lang: String,
+    pub name: String,
+    pub url: String,
+    pub auto: bool,
+}
+
+/// Caption tracks from yt-dlp's JSON, as WebVTT. Auto-generated captions
+/// come in every translation YouTube offers; keep only the original
+/// ("xx-orig") and English.
+fn sub_tracks(v: &Value) -> Vec<SubTrack> {
+    let mut out = Vec::new();
+    for (key, auto) in [("subtitles", false), ("automatic_captions", true)] {
+        let Some(m) = v[key].as_object() else { continue };
+        for (lang, fmts) in m {
+            if lang == "live_chat" || (auto && !(lang.ends_with("-orig") || lang == "en")) {
+                continue;
+            }
+            let Some(f) = fmts.as_array().and_then(|a| a.iter().find(|f| f["ext"] == "vtt")) else { continue };
+            let Some(url) = f["url"].as_str() else { continue };
+            let lang = lang.trim_end_matches("-orig").to_string();
+            if auto && out.iter().any(|t: &SubTrack| t.auto && t.lang == lang) {
+                continue;
+            }
+            let name = f["name"].as_str().unwrap_or(&lang).to_string();
+            let name = if auto && !name.contains("auto") { format!("{name} (auto-generated)") } else { name };
+            out.push(SubTrack { lang, name, url: url.to_string(), auto });
+        }
+    }
+    out
 }
 
 pub fn ytdlp() -> String {
     if let Ok(p) = std::env::var("YTUI_YTDLP") {
         return p;
     }
-    let local = std::env::var("HOME").map(|h| format!("{h}/.local/bin/yt-dlp")).unwrap_or_default();
+    let local = crate::sys::home().join(".local/bin/yt-dlp");
     if Command::new("yt-dlp").arg("--version").output().is_ok() {
         "yt-dlp".into()
-    } else if std::path::Path::new(&local).exists() {
-        local
+    } else if local.exists() {
+        local.display().to_string()
     } else {
         "yt-dlp".into()
     }
@@ -43,8 +78,7 @@ fn js_runtime_args() -> Vec<String> {
     if works("node") {
         return vec!["--js-runtimes".into(), "node".into()];
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut nvm: Vec<_> = std::fs::read_dir(format!("{home}/.nvm/versions/node"))
+    let mut nvm: Vec<_> = std::fs::read_dir(crate::sys::home().join(".nvm/versions/node"))
         .into_iter()
         .flatten()
         .flatten()
@@ -104,6 +138,7 @@ pub fn resolve(url: &str, max_h: u32) -> Result<Stream> {
         duration: v["duration"].as_f64(),
         live: v["is_live"].as_bool() == Some(true),
         fps: v["fps"].as_f64().filter(|f| *f > 0.0),
+        subs: sub_tracks(&v),
     })
 }
 

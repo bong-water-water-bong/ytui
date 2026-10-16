@@ -44,6 +44,12 @@ pub struct Store {
     /// Use the terminal's pixel graphics (kitty / sixel) when available.
     #[serde(default = "yes")]
     pub gfx: bool,
+    /// Native GPU video window over the terminal (where available).
+    #[serde(default = "yes")]
+    pub native: bool,
+    /// Caption language to switch on for every video (None: captions off).
+    #[serde(default)]
+    pub captions: Option<String>,
     #[serde(skip)]
     dirty: bool,
 }
@@ -59,7 +65,7 @@ fn one() -> f32 {
 fn path() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
+        .unwrap_or_else(|_| crate::sys::home().join(".local/share"));
     base.join("ytui/state.json")
 }
 
@@ -68,7 +74,7 @@ impl Store {
         std::fs::read(path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, gfx: true, ..Default::default() })
+            .unwrap_or(Store { autoplay: true, volume: 1.0, show_chat: true, exposure: true, gfx: true, native: true, ..Default::default() })
     }
 
     pub fn touch(&mut self) {
