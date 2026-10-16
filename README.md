@@ -108,6 +108,10 @@ banners and the 3D scenes instead of characters. It asks the terminal at startup
   Adaptive palette per frame (median cut) with a light ordered dither. Some terminals report a bogus cell width
   (tmux's `client_cell_width` can be the glyph gap); the width is then rebuilt from the height's
   cell aspect rather than discarding sixel.
+  Like kitty, consecutive video frames resend only the cell rows whose pixels changed (the whole
+  frame when 80% or more did). Measured at 960x270 px: 82% fewer bytes on lecture slides, ~40% on
+  a screen recording, 3-11% on animation and nothing on a talking head, where compression noise
+  touches every row.
 - otherwise the character renderers as before.
 
 `G` switches between pixels and characters (saved). `--gfx auto|kitty|sixel|off` (or

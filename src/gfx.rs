@@ -478,6 +478,22 @@ fn sixel_bands(idx: &[u8], w: usize, h: usize, y_start: usize, y_end: usize, out
     }
 }
 
+/// Runs of cell rows (each `ch` pixel rows of `stride` bytes) whose pixels
+/// differ between `a` and `b`, as [start, end) cell-row ranges.
+fn changed_cell_rows(a: &[u8], b: &[u8], stride: usize, ch: usize, h: usize) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for r in 0..h.div_ceil(ch) {
+        let (y0, y1) = (r * ch, ((r + 1) * ch).min(h));
+        if a[y0 * stride..y1 * stride] != b[y0 * stride..y1 * stride] {
+            match runs.last_mut() {
+                Some(last) if last.1 == r => last.1 = r + 1,
+                _ => runs.push((r, r + 1)),
+            }
+        }
+    }
+    runs
+}
+
 // ------------------------------------------------------------------ state
 
 /// Identifies an image for caching / change detection.
@@ -490,7 +506,13 @@ pub struct Key<'a> {
 struct SixelPlace {
     rect: Rect,
     sig: u64,
-    data: Option<Vec<u8>>,
+    /// Identifies a moving picture's box (name, size, crop, aspect), so a
+    /// frame can be diffed against the one already on screen there.
+    gkey: u64,
+    /// Sixel images to draw, each at a cell-row offset within `rect`.
+    data: Option<Vec<(u16, Vec<u8>)>>,
+    /// The pixels just sent for a moving picture, for the next frame's diff.
+    px: Option<Vec<u8>>,
 }
 
 pub struct Gfx {
@@ -512,6 +534,8 @@ pub struct Gfx {
     out: Vec<u8>,
     sixel_prev: Vec<(Rect, u64)>,
     sixel_now: Vec<SixelPlace>,
+    /// Moving pictures on screen now: gkey -> (where, the pixels shown).
+    sixel_shown: HashMap<u64, (Rect, Vec<u8>)>,
     /// Re-emit every sixel next frame (after a clear / resize).
     pub force: bool,
     /// Send moving pictures at half vertical resolution (2:1 pixels).
@@ -551,6 +575,7 @@ impl Gfx {
             out: Vec::new(),
             sixel_prev: Vec::new(),
             sixel_now: Vec::new(),
+            sixel_shown: HashMap::new(),
             force: true,
         }
     }
@@ -812,13 +837,14 @@ impl Gfx {
                         buf[(xx, yy)].set_symbol(SENTINEL).set_skip(true);
                     }
                 }
+                let (cw, ch) = (self.cell.0 as usize, self.cell.1 as usize);
+                // Moving pictures: half the rows at 2:1 pixel aspect,
+                // half the bytes for the terminal to parse.
+                let aspect = if key.seq.is_some() && self.sixel_tall && ch % 2 == 0 { 2 } else { 1 };
+                let ch = ch / aspect;
+                let gkey = hash(&[r0 as u64, r1 as u64, c1 as u64, cols as u64, rows as u64, aspect as u64, cw as u64, ch as u64], key.name);
                 let fresh = self.force || !self.sixel_prev.contains(&(rect, sig));
-                let data = if fresh {
-                    let (cw, ch) = (self.cell.0 as usize, self.cell.1 as usize);
-                    // Moving pictures: half the rows at 2:1 pixel aspect,
-                    // half the bytes for the terminal to parse.
-                    let aspect = if key.seq.is_some() && self.sixel_tall && ch % 2 == 0 { 2 } else { 1 };
-                    let ch = ch / aspect;
+                let (data, shown) = if fresh {
                     let (pw, ph) = (cols as usize * cw, rows as usize * ch);
                     let Some(px) = make(pw, ph) else {
                         for yy in rect.y..rect.y + rect.height {
@@ -834,14 +860,38 @@ impl Gfx {
                     for yy in vy0..vy1.min(ph) {
                         crop.extend_from_slice(&px[(yy * pw) * 3..(yy * pw + vx.min(pw)) * 3]);
                     }
-                    let mut enc = Vec::new();
+                    let (w, h) = (vx.min(pw), vy1.min(ph) - vy0);
                     let pal = if key.seq.is_some() { Palette::Adaptive { colors: self.video_colors, dither: 8 } } else { STILL_PALETTE };
-                    sixel_encode_with(&crop, vx.min(pw), vy1.min(ph) - vy0, aspect, pal, &mut enc);
-                    Some(enc)
+                    // The same moving picture is already on screen in this
+                    // spot: resend only the cell rows whose pixels changed.
+                    let prev = match key.seq {
+                        Some(_) if !self.force => self.sixel_shown.get(&gkey).filter(|(r, p)| *r == rect && p.len() == crop.len()),
+                        _ => None,
+                    };
+                    let runs = prev.map(|(_, p)| changed_cell_rows(p, &crop, w * 3, ch, h));
+                    let nrows = h.div_ceil(ch);
+                    let mut parts = Vec::new();
+                    match runs {
+                        // Mostly changed: one whole frame keeps one palette.
+                        Some(runs) if runs.iter().map(|(a, b)| b - a).sum::<usize>() * 5 < nrows * 4 => {
+                            for (a, b) in runs {
+                                let (y0, y1) = (a * ch, (b * ch).min(h));
+                                let mut enc = Vec::new();
+                                sixel_encode_with(&crop[y0 * w * 3..y1 * w * 3], w, y1 - y0, aspect, pal, &mut enc);
+                                parts.push((a as u16, enc));
+                            }
+                        }
+                        _ => {
+                            let mut enc = Vec::new();
+                            sixel_encode_with(&crop, w, h, aspect, pal, &mut enc);
+                            parts.push((0, enc));
+                        }
+                    }
+                    (Some(parts), key.seq.map(|_| crop))
                 } else {
-                    None
+                    (None, None)
                 };
-                self.sixel_now.push(SixelPlace { rect, sig, data });
+                self.sixel_now.push(SixelPlace { rect, sig, gkey, data, px: shown });
                 true
             }
         }
@@ -853,6 +903,7 @@ impl Gfx {
     pub fn finish(&mut self, buf: &mut Buffer) -> Vec<u8> {
         if self.proto == Proto::Sixel {
             let mut prev = Vec::new();
+            let mut shown = HashMap::new();
             for p in std::mem::take(&mut self.sixel_now) {
                 let r = p.rect;
                 let mut covered = false;
@@ -876,13 +927,26 @@ impl Gfx {
                     }
                     continue;
                 }
-                if let Some(d) = p.data {
-                    let _ = write!(self.out, "\x1b[{};{}H", r.y + 1, r.x + 1);
-                    self.out.extend_from_slice(&d);
+                for (dy, d) in p.data.iter().flatten() {
+                    let _ = write!(self.out, "\x1b[{};{}H", r.y + dy + 1, r.x + 1);
+                    self.out.extend_from_slice(d);
+                }
+                // Pictures dropped above (covered) leave `shown`, so their
+                // next frame is sent whole.
+                match p.px {
+                    Some(px) => {
+                        shown.insert(p.gkey, (r, px));
+                    }
+                    None => {
+                        if let Some(s) = self.sixel_shown.remove(&p.gkey) {
+                            shown.insert(p.gkey, s);
+                        }
+                    }
                 }
                 prev.push((r, p.sig));
             }
             self.sixel_prev = prev;
+            self.sixel_shown = shown;
             self.force = false;
         }
         std::mem::take(&mut self.out)
@@ -1078,5 +1142,83 @@ mod tests {
             }));
         }
         assert_eq!(drawn, 1, "only the frame that was due should render pixels");
+    }
+
+    /// One sixel video frame through place() + finish(); returns the bytes.
+    fn sixel_frame(g: &mut Gfx, seq: u64, cols: u16, rows: u16, px: &mut dyn FnMut(usize, usize) -> Vec<u8>) -> String {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let area = Rect { x: 0, y: 0, width: cols, height: rows + 2 };
+        let mut buf = Buffer::empty(area);
+        assert!(g.place(&mut buf, area, 0, 1, cols, rows, Key { name: "v", seq: Some(seq) }, &mut |w, h| Some(px(w, h))));
+        String::from_utf8_lossy(&g.finish(&mut buf)).to_string()
+    }
+
+    fn sixel_gfx() -> Gfx {
+        let mut g = Gfx::new(Proto::Sixel, &Caps::default());
+        g.max_fps = 0.0;
+        g
+    }
+
+    #[test]
+    fn sixel_unchanged_frame_sends_nothing() {
+        let mut g = sixel_gfx();
+        let first = sixel_frame(&mut g, 1, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        assert!(first.contains("\x1bP"), "the first frame is sent whole");
+        let second = sixel_frame(&mut g, 2, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        assert!(!second.contains("\x1bP"), "an identical frame must not be resent: {second:?}");
+    }
+
+    #[test]
+    fn sixel_sends_only_the_changed_cell_row() {
+        let mut g = sixel_gfx();
+        let (cols, rows) = (6u16, 4u16);
+        let _ = sixel_frame(&mut g, 1, cols, rows, &mut |w, h| vec![90u8; w * h * 3]);
+        // Change pixels inside the third cell row only.
+        let s = sixel_frame(&mut g, 2, cols, rows, &mut |w, h| {
+            let mut p = vec![90u8; w * h * 3];
+            let ch = h / rows as usize;
+            for i in (2 * ch + 1) * w * 3..(2 * ch + 2) * w * 3 {
+                p[i] = 200;
+            }
+            p
+        });
+        assert_eq!(s.matches("\x1bP").count(), 1, "one band: {s:?}");
+        // The picture's top is screen row 2 (1-based), so its third cell row is 4.
+        assert!(s.contains("\x1b[4;1H\x1bP"), "band placed at its cell row: {s:?}");
+    }
+
+    #[test]
+    fn sixel_mostly_changed_frame_is_sent_whole() {
+        let mut g = sixel_gfx();
+        let _ = sixel_frame(&mut g, 1, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        let s = sixel_frame(&mut g, 2, 6, 4, &mut |w, h| vec![120u8; w * h * 3]);
+        assert_eq!(s.matches("\x1bP").count(), 1);
+        assert!(s.contains("\x1b[2;1H\x1bP"), "whole frame from the top: {s:?}");
+    }
+
+    #[test]
+    fn sixel_after_force_sends_whole_frame() {
+        let mut g = sixel_gfx();
+        let _ = sixel_frame(&mut g, 1, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        g.force = true;
+        let s = sixel_frame(&mut g, 2, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        assert!(s.contains("\x1b[2;1H\x1bP"), "a cleared screen needs the whole picture: {s:?}");
+    }
+
+    #[test]
+    fn sixel_covered_picture_is_sent_whole_next_time() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut g = sixel_gfx();
+        let _ = sixel_frame(&mut g, 1, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        // Frame 2 is drawn over (a dialog), so it is dropped.
+        let area = Rect { x: 0, y: 0, width: 6, height: 6 };
+        let mut buf = Buffer::empty(area);
+        assert!(g.place(&mut buf, area, 0, 1, 6, 4, Key { name: "v", seq: Some(2) }, &mut |w, h| Some(vec![90u8; w * h * 3])));
+        buf[(2, 2)].set_symbol("x");
+        let _ = g.finish(&mut buf);
+        let s = sixel_frame(&mut g, 3, 6, 4, &mut |w, h| vec![90u8; w * h * 3]);
+        assert!(s.contains("\x1b[2;1H\x1bP"), "the overlay erased part of it, so send it all: {s:?}");
     }
 }
