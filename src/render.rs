@@ -21,8 +21,7 @@
 //! step and is then compared with an ordered-dither threshold, so a cell
 //! lights more dots the brighter it is and the dots follow edges.
 
-use crate::glyphs::{self, Glyphs, CH, CIRCLES, CW};
-use std::collections::HashMap;
+use crate::glyphs::{self, CH, CIRCLES, CW, RADIUS, SHAPES};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
@@ -39,15 +38,15 @@ impl Default for Cell {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Mode {
-    /// 2x4 braille dots in boosted colour over a dimmed copy of the picture.
-    Braille,
     /// Shape-matched ASCII in boosted colour over a dimmed copy of the
     /// picture: the react-video-ascii look.
     Glow,
+    /// 2x4 braille dots in boosted colour over a dimmed copy of the picture.
+    Braille,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Braille, Mode::Glow];
+    pub const ALL: [Mode; 2] = [Mode::Glow, Mode::Braille];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -83,10 +82,10 @@ pub struct Renderer {
     pub sat: f32,
     pub bg_level: f32,
     pub contrast: f32,
-    glyphs: Glyphs,
-    circles: Vec<Vec<(i32, i32)>>,
-    /// Quantised shape vector -> glyph index.
-    cache: HashMap<u32, u8>,
+    /// Sample points of each circle, relative to the cell origin in pixels.
+    taps: Vec<Vec<(f32, f32)>>,
+    /// The frame's luma, reused between frames.
+    lum: Vec<f32>,
 }
 
 /// Braille dot bit for dot (col, row) in a 2x4 grid.
@@ -165,10 +164,27 @@ fn box_avg(img: &Img, x: usize, y: usize, w: usize, h: usize) -> [f32; 3] {
 
 impl Renderer {
     pub fn new(mode: Mode) -> Renderer {
-        let glyphs = Glyphs::load();
-        let circles = CIRCLES.iter().map(|&(u, v)| glyphs::circle_offsets(u, v, CW, CH)).collect();
-        // The reference's defaults.
-        Renderer { mode, bright: 1.0, sat: 1.0, bg_level: 0.3, contrast: 2.0, glyphs, circles, cache: HashMap::new() }
+        // The shader's taps: a disc of points on an n x n grid (n = 2 at the
+        // demo's 10-pixel cells), spread over the circle's radius.
+        const N: i32 = 2;
+        let r = RADIUS * CW as f32;
+        let taps = CIRCLES
+            .iter()
+            .map(|&(u, v)| {
+                let mut t = Vec::new();
+                for dx in -N..=N {
+                    for dy in -N..=N {
+                        if dx * dx + dy * dy <= N * N {
+                            t.push((u * CW as f32 + dx as f32 * r / N as f32, v * CH as f32 + dy as f32 * r / N as f32));
+                        }
+                    }
+                }
+                t
+            })
+            .collect();
+        // The demo's look: brightness and saturation 1.25, background 0.3,
+        // shape exponent 2.
+        Renderer { mode, bright: 1.25, sat: 1.25, bg_level: 0.3, contrast: 2.0, taps, lum: Vec::new() }
     }
 
     pub fn render(&mut self, img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
@@ -192,28 +208,32 @@ impl Renderer {
     }
 
     fn glow(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell]) {
-        if self.cache.len() > 1 << 20 {
-            self.cache.clear();
-        }
-        let (w, h) = (img.w as i32, img.h as i32);
+        let (w, h) = (img.w, img.h);
+        self.lum.clear();
+        self.lum.extend(img.px[..w * h * 3].chunks_exact(3).map(luma));
+        // Bilinear sample at pixel coordinates (pixel centres at +0.5), edges
+        // clamped, as the shader's linear texture filter does.
+        let lum = &self.lum;
+        let at = |x: f32, y: f32| -> f32 {
+            let x = (x - 0.5).clamp(0.0, (w - 1) as f32);
+            let y = (y - 0.5).clamp(0.0, (h - 1) as f32);
+            let (x0, y0) = (x as usize, y as usize);
+            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+            let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+            let top = lum[y0 * w + x0] * (1.0 - fx) + lum[y0 * w + x1] * fx;
+            let bot = lum[y1 * w + x0] * (1.0 - fx) + lum[y1 * w + x1] * fx;
+            top * (1.0 - fy) + bot * fy
+        };
         for cy in 0..rows {
             for cx in 0..cols {
-                let (ox, oy) = ((cx * CW) as i32, (cy * CH) as i32);
+                let (ox, oy) = ((cx * CW) as f32, (cy * CH) as f32);
                 let mut v = [0f32; 6];
-                for (i, pts) in self.circles.iter().enumerate() {
-                    let mut s = 0.0;
-                    for &(dx, dy) in pts {
-                        let x = (ox + dx).clamp(0, w - 1) as usize;
-                        let y = (oy + dy).clamp(0, h - 1) as usize;
-                        s += luma(&img.px[(y * img.w + x) * 3..]);
-                    }
-                    v[i] = s / pts.len() as f32;
+                for (i, taps) in self.taps.iter().enumerate() {
+                    v[i] = taps.iter().map(|&(dx, dy)| at(ox + dx, oy + dy)).sum::<f32>() / taps.len() as f32;
                 }
                 sharpen(&mut v, self.contrast);
-                let key = v.iter().fold(0u32, |k, &x| k << 5 | (x.clamp(0.0, 1.0) * 31.0 + 0.5) as u32);
-                let gi = *self.cache.entry(key).or_insert_with(|| self.glyphs.nearest(&v) as u8) as usize;
                 let (fg, bg) = self.colours(img, cx, cy);
-                out[cy * cols + cx] = Cell { ch: self.glyphs.chars[gi], fg, bg };
+                out[cy * cols + cx] = Cell { ch: SHAPES[glyphs::nearest(&v)].1, fg, bg };
             }
         }
     }
@@ -382,8 +402,8 @@ mod tests {
         assert_eq!(Mode::parse("GLOW"), Some(Mode::Glow));
         assert_eq!(Mode::parse(""), None);
         assert_eq!(Mode::parse("sextant"), None);
-        assert_eq!(Mode::Braille.next(), Mode::Glow);
         assert_eq!(Mode::Glow.next(), Mode::Braille);
+        assert_eq!(Mode::Braille.next(), Mode::Glow);
     }
 
     #[test]

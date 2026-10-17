@@ -10,13 +10,13 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 ![ytui's Home page, signed out, showing the Trending feed as a grid of half-block thumbnails](docs/screenshots/home.jpg)
 *Home, signed out: the Trending feed, with thumbnails drawn as half blocks.*
 
-![Big Buck Bunny's face drawn in braille mode, fullscreen, with the player bar at the bottom](docs/screenshots/braille.jpg)
-*Braille mode (the default), fullscreen: 2×4 dots in boosted colour over a dimmed copy of the picture.*
+![Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen](docs/screenshots/glow.jpg)
+*Glow mode (the default), fullscreen: shape-matched ASCII in boosted colour over a dimmed copy of the picture, as in the react-video-ascii demo.*
 
-![A green forest scene from Big Buck Bunny drawn as coloured ASCII characters in glow mode, fullscreen](docs/screenshots/glow.jpg)
-*Glow mode, fullscreen: shape-matched ASCII in boosted colour over a dimmed copy of the picture.*
+![Big Buck Bunny leaping at a butterfly, drawn in braille mode, fullscreen, with the player bar at the bottom](docs/screenshots/braille.jpg)
+*Braille mode, fullscreen: 2×4 dots in boosted colour over a dimmed copy of the picture.*
 
-![The look panel open over braille-mode video, with Mode, Brightness, Saturation, Background, Contrast and Auto-exposure](docs/screenshots/look-panel.jpg)
+![The look panel open over glow-mode video, with Mode, Brightness, Saturation, Background, Contrast and Auto-exposure](docs/screenshots/look-panel.jpg)
 *The look panel (`o`): mode, brightness, saturation, background, contrast and auto-exposure, kept between runs.*
 
 <sub>Video screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
@@ -167,18 +167,18 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 
 | Mode | Description |
 |---|---|
-| `braille` | The default. 2×4 braille dots in boosted colour over a dimmed copy of the picture |
-| `glow` | Shape-matched ASCII in boosted colour over a dimmed copy of the picture |
+| `glow` | The default. Shape-matched ASCII in boosted colour over a dimmed copy of the picture |
+| `braille` | 2×4 braille dots in boosted colour over a dimmed copy of the picture |
 
 Thumbnails, avatars and banners are drawn as half blocks.
 
 **Glow** is translated from [react-video-ascii](https://github.com/LucasHJin/react-video-ascii)
-by Lucas Jin ([demo](https://video-ascii-demo.vercel.app/)). For each cell, ytui samples the
-luma in six circles, applies a shape exponent (Contrast, default 2.0) and picks the character from
-its character set whose shape vector is nearest. The colour is graded in HSL (Brightness and
-Saturation, default 1.0) and drawn over the same colour times Background (default 0.30). These are
-the reference's own defaults. Set `YTUI_FONT` to a monospace `.ttf` to take the character shapes
-from that font.
+by Lucas Jin ([demo](https://video-ascii-demo.vercel.app/)) and picks the same characters as the
+demo. For each cell, ytui samples the luma in six circles, applies a shape exponent (Contrast,
+default 2.0) and picks the character from the demo's character set whose shape vector is nearest,
+using the shape table the demo itself computes. The colour is graded in HSL (Brightness and
+Saturation, default 1.25) and drawn over the same colour times Background (default 0.30): the
+demo's settings.
 
 **Braille** is ytui's own extension of the same look, on 2×4 braille dots. Each dot's luma goes
 through the same shape step and an ordered-dither threshold, so brighter cells light more dots and

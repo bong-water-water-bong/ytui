@@ -1161,13 +1161,13 @@ Keys — player (anywhere while something is playing)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
   o                look panel: mode, brightness, saturation, background, contrast
   S                captions: cycle off / each track (remembered across videos)
-  m                switch render mode (braille / glow)
+  m                switch render mode (glow / braille)
   [ ]              contrast down / up
   click the progress bar to seek; click the miniplayer to return to the video
 
 Render modes (24-bit colour, after react-video-ascii by Lucas Jin)
-  braille    2x4 dots in boosted colour over a dimmed copy of the picture
   glow       shape-matched ASCII in boosted colour over a dimmed copy of the picture
+  braille    2x4 dots in boosted colour over a dimmed copy of the picture
 
 Pages
   Home         For you (from your history and subscriptions) and topic chips

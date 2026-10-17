@@ -54,10 +54,10 @@ Download `ytui-<version>-macos-arm64.tar.gz` from the
 
 ## Choose how it looks
 
-Press `m` to switch between the two [render modes](../render-modes/): braille (the default) and
-glow. Press `o` to tune brightness, saturation, background and contrast.
+Press `m` to switch between the two [render modes](../render-modes/): glow (the default) and
+braille. Press `o` to tune brightness, saturation, background and contrast.
 
-![A green forest scene from Big Buck Bunny in glow mode, fullscreen]({{ '/screenshots/glow.jpg' | relative_url }})
+![Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen]({{ '/screenshots/glow.jpg' | relative_url }})
 
 ## Watch YouTube over SSH
 

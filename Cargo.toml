@@ -15,7 +15,6 @@ anyhow = "1"
 base64 = "0.22"
 crossterm = "0.28"
 flate2 = "1"
-fontdue = "0.9"
 getrandom = "0.2"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
