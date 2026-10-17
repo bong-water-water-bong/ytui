@@ -1,5 +1,5 @@
 title: ytui
-description: A terminal YouTube client. Watch YouTube in the terminal as ASCII art, sixel or kitty graphics at 60 fps, on Windows, Linux and macOS.
+description: A terminal YouTube client. Watch YouTube in the terminal as 24-bit colour braille or glow ASCII at 60 fps, on Windows, Linux and macOS.
 url: https://bong-water-water-bong.github.io
 baseurl: /ytui
 lang: en

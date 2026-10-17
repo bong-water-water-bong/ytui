@@ -161,7 +161,11 @@ mod tests {
         let g = Glyphs::load();
         assert_eq!(g.chars[0], ' ');
         assert_eq!(g.nearest(&[0.0; 6]), 0, "no ink matches the space");
-        let full = g.chars[g.nearest(&[1.0; 6])];
-        assert!("@#%&$0QNWM8".contains(full), "all ink matches a dense glyph, got {full:?}");
+        // Whatever the font: the match for all ink is among the densest
+        // quarter of the set.
+        let ink = |i: usize| g.vecs[i].iter().sum::<f32>();
+        let full = g.nearest(&[1.0; 6]);
+        let denser = (0..g.chars.len()).filter(|&i| ink(i) > ink(full)).count();
+        assert!(denser < g.chars.len() / 4, "all ink matched {:?}, {denser} glyphs are denser", g.chars[full]);
     }
 }
