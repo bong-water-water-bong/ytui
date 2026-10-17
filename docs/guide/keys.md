@@ -4,7 +4,8 @@ description: Every ytui keyboard shortcut for browsing, playback, volume, captio
 ---
 
 Press `?` in ytui to see these at any time. The mouse works too: click anything, scroll with the wheel, and click
-the progress bar to seek.
+the progress bar to seek. Move the mouse over the video for its controls: previous, play/pause, next, mute,
+captions and fullscreen.
 
 ## Browsing
 

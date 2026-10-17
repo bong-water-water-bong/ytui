@@ -73,6 +73,17 @@ enum MiniBtn {
     Pause,
 }
 
+/// A button in the controls drawn over the video.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ctl {
+    Prev,
+    Pause,
+    Next,
+    Mute,
+    Captions,
+    Full,
+}
+
 /// Comment / reply composer.
 struct Compose {
     uid: u64,
@@ -188,6 +199,9 @@ struct Geo {
     mini_bar: Option<Rect>,
     mini_btns: Vec<(Rect, MiniBtn)>,
     fs_bar: Option<Rect>,
+    /// Video boxes with the player in them, and their control buttons.
+    players: Vec<Rect>,
+    ctl: Vec<(Rect, Ctl)>,
     /// Player-bar volume sliders and seek bars drawn this frame.
     vol: Vec<Rect>,
     seek: Vec<Rect>,
@@ -226,6 +240,8 @@ pub struct App {
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
+    /// The controls over the video show until then (and while paused).
+    controls_until: Instant,
     /// Google sign-in window, and when it was last checked.
     login: Option<crate::browser_login::Login>,
     /// Signed-in YouTube account name, for the sidebar and Account page.
@@ -306,6 +322,7 @@ impl App {
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
+            controls_until: Instant::now(),
             login: None,
             account_name: None,
             drag: None,
@@ -1110,6 +1127,71 @@ impl App {
             self.open_video(v, queue, qpos);
         } else {
             self.play(v, queue, qpos, None);
+        }
+    }
+
+    /// Previous: back to the start, or (near the start) the previous video
+    /// in the queue.
+    fn previous(&mut self) {
+        let Some(p) = &mut self.player else { return };
+        let cur = p.video.id.clone();
+        let in_queue = self.queue.get(self.qpos).is_some_and(|v| v.id == cur);
+        if p.pos > 5.0 || !in_queue || self.qpos == 0 {
+            p.seek_to(0.0);
+            return;
+        }
+        let (queue, qpos) = (self.queue.clone(), self.qpos - 1);
+        let v = queue[qpos].clone();
+        if matches!(&self.page().kind, Kind::Watch(w) if w.video.id == cur) {
+            self.open_video(v, queue, qpos);
+        } else {
+            self.play(v, queue, qpos, None);
+        }
+    }
+
+    fn toggle_mute(&mut self) {
+        if let Some(p) = &mut self.player {
+            p.toggle_mute();
+            let msg = if p.muted() { "muted".to_string() } else { format!("volume {:.0}%", p.level() * 100.0) };
+            self.flash(msg);
+        }
+    }
+
+    fn cycle_captions(&mut self) {
+        if let Some(p) = &mut self.player {
+            let (msg, pref) = p.cycle_captions();
+            if pref != self.store.captions {
+                self.store.captions = pref;
+                self.store_changed();
+            }
+            self.flash(msg);
+        }
+    }
+
+    /// Keep the controls over the video up for a few more seconds.
+    fn show_controls(&mut self) {
+        self.controls_until = Instant::now() + Duration::from_secs(3);
+    }
+
+    /// Controls show while paused, ended or loading, and for a while after
+    /// the mouse moves over the video or a player key is pressed.
+    fn controls_on(&self) -> bool {
+        self.player.as_ref().is_some_and(|p| p.paused || p.ended || p.loading()) || Instant::now() < self.controls_until
+    }
+
+    fn control(&mut self, c: Ctl) {
+        self.show_controls();
+        match c {
+            Ctl::Prev => self.previous(),
+            Ctl::Pause => {
+                if let Some(p) = &mut self.player {
+                    p.toggle_pause();
+                }
+            }
+            Ctl::Next => self.advance(),
+            Ctl::Mute => self.toggle_mute(),
+            Ctl::Captions => self.cycle_captions(),
+            Ctl::Full => self.fullscreen = !self.fullscreen && self.player.is_some(),
         }
     }
 
@@ -2082,6 +2164,11 @@ impl App {
                 }
             }
             Event::Mouse(m) => match m.kind {
+                MouseEventKind::Moved => {
+                    if self.geo.players.iter().any(|r| m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height) {
+                        self.show_controls();
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
                 MouseEventKind::Drag(MouseButton::Left) => match self.drag {
                     Some(Drag::Volume(r)) => self.volume_at(r, m.column),
@@ -2135,6 +2222,14 @@ impl App {
 
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        // Dialogs and address-bar suggestions draw over the video's controls.
+        let covered = self.dialog.is_some() || self.geo.sugg.iter().any(|(r, _)| hit(r));
+        if let Some(&(_, c)) = self.geo.ctl.iter().find(|(r, _)| hit(r)).filter(|_| !covered) {
+            return self.control(c);
+        }
+        if self.geo.players.iter().any(hit) {
+            self.show_controls();
+        }
         match self.bar_hit(x, y) {
             Some((true, r)) => {
                 self.drag = Some(Drag::Volume(r));
@@ -2424,6 +2519,7 @@ impl App {
         }
         // Fullscreen player
         if self.fullscreen {
+            self.show_controls();
             if let Some(p) = &mut self.player {
                 match k.code {
                     KeyCode::Esc | KeyCode::Char('f') | KeyCode::Char('q') => self.fullscreen = false,
@@ -2483,6 +2579,9 @@ impl App {
     fn global_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if matches!(k.code, KeyCode::Char(' ' | ',' | '.' | '<' | '>' | '+' | '=' | '-' | '_' | 'M' | 'S' | 'n' | 'f' | '0'..='9')) && !ctrl {
+            self.show_controls();
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('/') => self.start_edit(false),
@@ -2505,13 +2604,7 @@ impl App {
             KeyCode::Char('?') => self.navigate(Kind::Help),
             KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
             KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
-            KeyCode::Char('M') => {
-                if let Some(p) = &mut self.player {
-                    p.toggle_mute();
-                    let msg = if p.muted() { "muted".to_string() } else { format!("volume {:.0}%", p.level() * 100.0) };
-                    self.flash(msg);
-                }
-            }
+            KeyCode::Char('M') => self.toggle_mute(),
             KeyCode::Char('I') => self.open_chat_compose(),
             KeyCode::Char('E') => {
                 self.store.exposure = !self.store.exposure;
@@ -2532,16 +2625,7 @@ impl App {
                     self.open_save_dialog(v);
                 }
             }
-            KeyCode::Char('S') => {
-                if let Some(p) = &mut self.player {
-                    let (msg, pref) = p.cycle_captions();
-                    if pref != self.store.captions {
-                        self.store.captions = pref;
-                        self.store_changed();
-                    }
-                    self.flash(msg);
-                }
-            }
+            KeyCode::Char('S') => self.cycle_captions(),
             KeyCode::Char('C') => {
                 self.store.show_chat = !self.store.show_chat;
                 self.store_changed();
@@ -2884,6 +2968,8 @@ impl App {
         let key_store = self.store_rev;
         let autoplay = self.store.autoplay;
         let show_chat = self.store.show_chat;
+        let controls = self.controls_on();
+        let has_next = self.next_video().is_some();
         let t = &mut self.tabs[self.cur];
         let page = &mut t.pages[t.idx];
         let key = (w, vh, page.rev, key_store);
@@ -2963,7 +3049,15 @@ impl App {
                                 Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
                                 None => center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… "),
                             }
-                            draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
+                            let ch = if controls { h.saturating_sub(1) } else { *h };
+                            draw_captions(buf, r, r.x + x, sy, pw, ch, p.caption_text());
+                            let top = (sy.max(0) as u16).min(r.height);
+                            let bottom = ((sy + *h as i64).max(0) as u16).min(r.height);
+                            self.geo.players.push(Rect { x: r.x + x, y: r.y + top, width: pw, height: bottom - top });
+                            if controls {
+                                let c = draw_controls(buf, r, r.x + x, sy, pw, *h, p, has_next, false);
+                                self.geo.ctl.extend(c);
+                            }
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
                             } else if p.ended {
@@ -3072,6 +3166,8 @@ impl App {
     }
 
     fn draw_fullscreen(&mut self, buf: &mut Buffer, area: Rect) {
+        let controls = self.controls_on();
+        let has_next = self.next_video().is_some();
         let Some(p) = &mut self.player else { return };
         buf.set_style(area, Style::default().bg(Color::Rgb(0, 0, 0)));
         let vh = area.height - 1;
@@ -3082,7 +3178,11 @@ impl App {
             Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
             None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
         }
-        draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
+        draw_captions(buf, varea, area.x, 0, vw, if controls { vh - 1 } else { vh }, p.caption_text());
+        self.geo.players.push(Rect { height: vh, ..varea });
+        if controls {
+            self.geo.ctl = draw_controls(buf, varea, area.x, 0, vw, vh, p, has_next, true);
+        }
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
             draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref(), inp);
@@ -3370,6 +3470,53 @@ fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, 
 enum Drag {
     Volume(Rect),
     Seek(Rect),
+}
+
+/// Controls over the bottom row of a w x h video box (top-left at column x,
+/// row sy of `clip`), like YouTube's: previous, play/pause, next and volume
+/// on the left; captions and fullscreen on the right. (The time is on the
+/// player bar.) Returns the
+/// buttons drawn.
+fn draw_controls(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, p: &Player, has_next: bool, full: bool) -> Vec<(Rect, Ctl)> {
+    let y = sy + h as i64 - 1;
+    if w < 24 || h < 3 || y < 0 || y >= clip.height as i64 {
+        return Vec::new();
+    }
+    let y = clip.y + y as u16;
+    let bg = Color::Rgb(0, 0, 0);
+    let on = Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD);
+    let off = Style::default().fg(Color::Rgb(110, 110, 120)).bg(bg);
+    buf.set_style(Rect { x, y, width: w, height: 1 }, Style::default().bg(bg));
+    for xx in x..x + w {
+        buf[(xx, y)].set_char(' ');
+    }
+    let pause = if p.ended { " ↻ " } else if p.paused || p.loading() { " ▶ " } else { " ❚❚ " };
+    let vol = if p.muted() { " muted ".to_string() } else { format!(" vol {:.0}% ", p.level() * 100.0) };
+    let left = [(" |◀ ".to_string(), Ctl::Prev, true), (pause.to_string(), Ctl::Pause, true), (" ▶| ".to_string(), Ctl::Next, has_next), (vol, Ctl::Mute, true)];
+    let cc = p.caption_track().is_some();
+    let right = [(" CC ", Ctl::Captions, cc), (if full { " exit " } else { " full " }, Ctl::Full, true)];
+    let rw: u16 = right.iter().map(|r| r.0.width() as u16 + 1).sum();
+    let mut out = Vec::new();
+    let mut cx = x + 1;
+    for (label, c, lit) in left {
+        let lw = label.width() as u16;
+        if cx + lw + rw >= x + w {
+            break;
+        }
+        buf.set_string(cx, y, &label, if lit { on } else { off });
+        out.push((Rect { x: cx, y, width: lw, height: 1 }, c));
+        cx += lw;
+    }
+    let mut rx = x + w - rw;
+    for (label, c, lit) in right {
+        let lw = label.width() as u16;
+        // Captions on: underlined in the accent colour, like YouTube's red bar.
+        let st = if c == Ctl::Captions && lit { on.underline_color(Color::Rgb(255, 0, 0)).add_modifier(Modifier::UNDERLINED) } else if lit { on } else { off };
+        buf.set_string(rx, y, label, st);
+        out.push((Rect { x: rx, y, width: lw, height: 1 }, c));
+        rx += lw + 1;
+    }
+    out
 }
 
 /// Cells in the volume slider (0-150%).

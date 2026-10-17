@@ -1234,6 +1234,7 @@ Keys — player (anywhere while something is playing)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
   S                captions: your language first, then each track, then off (remembered)
   click the progress bar to seek; click the miniplayer to return to the video
+  move the mouse over the video for its controls: previous, play / pause, next, mute, CC, full
 
 Video is drawn as 24-bit colour half blocks, two pixels a cell. Only cells
 that change are sent, sized to what the terminal can take, so frames don't

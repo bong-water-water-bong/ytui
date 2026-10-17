@@ -111,7 +111,8 @@ It works like a browser for YouTube:
 - **Channel pages** (banner, avatar, Home/Videos/Shorts/Live/Playlists tabs) and **playlists**
 - **Subscriptions, history (with resume positions) and watch later**, stored locally in
   `~/.local/share/ytui/`
-- **Mouse**: click anything, wheel to scroll, click the progress bar to seek
+- **Mouse**: click anything, wheel to scroll, click the progress bar to seek; move over the
+  video for previous / play-pause / next / mute / CC / fullscreen controls
 
 - **Sign in** (optional) to like / dislike videos, comment and reply, send live chat
   messages, save videos to playlists and manage your playlists, and sync subscriptions with
