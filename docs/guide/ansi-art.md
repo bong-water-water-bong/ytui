@@ -45,7 +45,8 @@ across the cells of a single frame.
 ## The commands
 
 ```
-ytui --view-ans art.ans                  show art in the terminal
+ytui art.ans                             open art in the app
+ytui --view-ans art.ans                  draw art straight to the terminal
 ytui --snapshot-ans VIDEO -o art.ans     save one video frame as ANSI art (24-bit)
 ytui --convert-ans art.ans -o out.ans    re-encode existing art
 ```

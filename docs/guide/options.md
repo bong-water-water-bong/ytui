@@ -13,7 +13,8 @@ description: All ytui command-line options and environment variables, for render
 | `ytui QUERY...` | Open a search |
 | `ytui URL` | Open a video, playlist or channel URL |
 | `ytui --snapshot SRC [--at SECONDS] [--cols N --rows N]` | Print one rendered frame of a URL or file, then exit |
-| `ytui --view-ans FILE` | Show ANSI art in the terminal |
+| `ytui FILE.ans` | Open ANSI art in the app |
+| `ytui --view-ans FILE` | Draw ANSI art straight to the terminal |
 | `ytui --snapshot-ans SRC [-o FILE]` | Save a video frame as ANSI art (`.ANS` with SAUCE) |
 | `ytui --convert-ans FILE [-o FILE]` | Re-encode ANSI art |
 | `ytui --import-subs FILE` | Import a Google Takeout `subscriptions.csv` |

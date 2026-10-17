@@ -271,7 +271,8 @@ ytui speaks the format the BBS art scene has used since 1990: 80×25 text mode, 
 the 16-colour attribute byte.
 
 ```
-ytui --view-ans art.ans                  show art in the terminal
+ytui art.ans                             open art in the app
+ytui --view-ans art.ans                  draw art straight to the terminal
 ytui --snapshot-ans VIDEO -o art.ans     save a video frame as ANSI art
 ytui --convert-ans art.ans -o out.ans    re-encode existing art
 ```
