@@ -1,6 +1,7 @@
 # Docs sidebar, in reading order.
 - { title: Overview, url: /guide/ }
 - { title: Install, url: /guide/install/ }
+- { title: Watch YouTube in the terminal, url: /guide/watch-youtube-in-terminal/ }
 - { title: Using ytui, url: /guide/usage/ }
 - { title: Render modes, url: /guide/render-modes/ }
 - { title: Pixel graphics, url: /guide/pixel-graphics/ }
@@ -9,3 +10,4 @@
 - { title: Keys, url: /guide/keys/ }
 - { title: Command-line options, url: /guide/options/ }
 - { title: Troubleshooting, url: /guide/troubleshooting/ }
+- { title: Compared with others, url: /guide/alternatives/ }

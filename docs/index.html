@@ -47,7 +47,32 @@ layout: null
     "https://bong-water-water-bong.github.io/ytui/screenshots/glow.jpg",
     "https://bong-water-water-bong.github.io/ytui/screenshots/sixel.jpg"
   ],
+  "softwareVersion": "2026.10.16",
+  "datePublished": "2026-10-16",
+  "programmingLanguage": "Rust",
+  "isAccessibleForFree": true,
+  "featureList": [
+    "Watch YouTube in the terminal as ASCII art, glow, or Unicode mosaics",
+    "Sixel and kitty graphics for real pixels",
+    "Native GPU video window on Windows Terminal, up to 1080p60",
+    "60 fps playback through libmpv with hardware decoding",
+    "Home, Trending, search, channels, playlists, comments and live chat",
+    "Captions, autoplay, tabs and watch later",
+    "Works over SSH and inside tmux",
+    "No YouTube API key needed"
+  ],
+  "author": { "@type": "Person", "name": "bong-water-water-bong", "url": "https://github.com/bong-water-water-bong" },
+  "sameAs": ["https://github.com/bong-water-water-bong/ytui"],
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "ytui",
+  "alternateName": "ytui: YouTube in the terminal",
+  "url": "https://bong-water-water-bong.github.io/ytui/"
 }
 </script>
 <script type="application/ld+json">
@@ -74,6 +99,21 @@ layout: null
       "@type": "Question",
       "name": "Does ytui work over SSH?",
       "acceptedAnswer": { "@type": "Answer", "text": "Yes. The character render modes work in any truecolour terminal, so you can watch over SSH. Audio is off by default over SSH." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is there a YouTube TUI for Windows?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. ytui runs natively on Windows 10 and 11 in Windows Terminal, with sixel graphics, WASAPI audio and a native GPU video window. The Windows download includes libmpv." }
+    },
+    {
+      "@type": "Question",
+      "name": "How is ytui different from ytfzf or youtube-tui?",
+      "acceptedAnswer": { "@type": "Answer", "text": "ytfzf and youtube-tui help you find a video in the terminal and then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as ASCII art, Unicode mosaics, sixel or kitty graphics, in a YouTube-style interface with Home, channels, comments and live chat." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is ytui free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. ytui is free and open source under the MIT licence." }
     }
   ]
 }
@@ -105,7 +145,7 @@ layout: null
       <a class="alt" href="https://github.com/bong-water-water-bong/ytui">View the source on GitHub</a>
     </div>
     <figure class="shot-hero">
-      <div class="frame"><img src="screenshots/home.jpg" width="1573" height="978" alt="ytui's Home page in Windows Terminal: a grid of trending YouTube videos with thumbnails, a sidebar and category chips" fetchpriority="high"></div>
+      <div class="frame"><img src="screenshots/home.jpg" srcset="screenshots/home-800.jpg 800w, screenshots/home.jpg 1573w" decoding="async" sizes="(max-width: 1212px) calc(100vw - 46px), 1166px" width="1573" height="978" alt="ytui's Home page in Windows Terminal: a grid of trending YouTube videos with thumbnails, a sidebar and category chips" fetchpriority="high"></div>
       <figcaption>Home while signed out: YouTube's Trending feed in Windows Terminal, with the thumbnails drawn as pixel graphics.</figcaption>
     </figure>
   </div>
@@ -113,7 +153,7 @@ layout: null
   <section id="install" aria-labelledby="install-h">
     <div class="wrap">
       <h2 id="install-h">Install</h2>
-      <p class="sub">Download the package for your system from the <a href="https://github.com/bong-water-water-bong/ytui/releases/latest">latest release</a>, then install the tools ytui plays through.</p>
+      <p class="sub">Download the package for your system from the <a href="https://github.com/bong-water-water-bong/ytui/releases/latest">latest release</a>, then install the tools ytui plays through. The <a href="guide/watch-youtube-in-terminal/">step-by-step guide to watching YouTube in the terminal</a> walks through each system, SSH and tmux.</p>
       <div class="install">
         <div class="os">
           <h3>Windows 10 and 11</h3>
@@ -140,19 +180,19 @@ layout: null
       <p class="sub">Press <kbd>m</kbd> to cycle the character modes. Press <kbd>G</kbd> for pixel graphics and <kbd>N</kbd> for the native window. Press <kbd>o</kbd> to tune the picture.</p>
       <div class="gallery">
         <figure>
-          <div class="frame"><img src="screenshots/glow.jpg" width="1573" height="978" loading="lazy" alt="Big Buck Bunny drawn as coloured ASCII characters in glow mode, fullscreen"></div>
+          <div class="frame"><img src="screenshots/glow.jpg" srcset="screenshots/glow-800.jpg 800w, screenshots/glow.jpg 1573w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1573" height="978" loading="lazy" alt="Big Buck Bunny drawn as coloured ASCII characters in glow mode, fullscreen"></div>
           <figcaption><strong>Glow.</strong> Shape-matched ASCII in boosted colour over a dimmed copy of the picture.</figcaption>
         </figure>
         <figure>
-          <div class="frame"><img src="screenshots/sixel.jpg" width="1696" height="785" loading="lazy" alt="ytui drawing Big Buck Bunny with sixel graphics inside the terminal"></div>
+          <div class="frame"><img src="screenshots/sixel.jpg" srcset="screenshots/sixel-800.jpg 800w, screenshots/sixel.jpg 1696w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1696" height="785" loading="lazy" alt="ytui drawing Big Buck Bunny with sixel graphics inside the terminal"></div>
           <figcaption><strong>Sixel and kitty graphics.</strong> Real pixels inside the terminal, at about 30 fps.</figcaption>
         </figure>
         <figure>
-          <div class="frame"><img src="screenshots/native-window.jpg" width="1696" height="785" loading="lazy" alt="ytui in Windows Terminal playing video in a native GPU window with the player bar below"></div>
+          <div class="frame"><img src="screenshots/native-window.jpg" srcset="screenshots/native-window-800.jpg 800w, screenshots/native-window.jpg 1696w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1696" height="785" loading="lazy" alt="ytui in Windows Terminal playing video in a native GPU window with the player bar below"></div>
           <figcaption><strong>Native window.</strong> On Windows Terminal, GPU-decoded 1080p60 video sits over the player area.</figcaption>
         </figure>
         <figure>
-          <div class="frame"><img src="screenshots/glow-look-panel.jpg" width="1573" height="978" loading="lazy" alt="The look panel open over glow-mode video, with sliders for brightness, saturation, background and contrast"></div>
+          <div class="frame"><img src="screenshots/glow-look-panel.jpg" srcset="screenshots/glow-look-panel-800.jpg 800w, screenshots/glow-look-panel.jpg 1573w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1573" height="978" loading="lazy" alt="The look panel open over glow-mode video, with sliders for brightness, saturation, background and contrast"></div>
           <figcaption><strong>Look panel.</strong> Adjust the mode, brightness, saturation, background, contrast and auto-exposure. Your settings are kept between runs.</figcaption>
         </figure>
       </div>
@@ -208,7 +248,19 @@ layout: null
         </details>
         <details>
           <summary>Does it work over SSH?</summary>
-          <p>Yes. The character render modes work in any truecolour terminal, so you can watch over SSH. Audio is off by default over SSH; choose an output with <code>--audio</code>.</p>
+          <p>Yes. The character render modes work in any truecolour terminal, so you can watch over SSH. Audio is off by default over SSH; choose an output with <code>--audio</code>. See <a href="guide/watch-youtube-in-terminal/#watch-youtube-over-ssh">watching YouTube over SSH</a>.</p>
+        </details>
+        <details>
+          <summary>Is there a YouTube TUI for Windows?</summary>
+          <p>Yes. ytui runs natively on Windows 10 and 11 in Windows Terminal, with sixel graphics, WASAPI audio and a native GPU video window. The Windows download includes libmpv.</p>
+        </details>
+        <details>
+          <summary>How is ytui different from ytfzf or youtube-tui?</summary>
+          <p>ytfzf and youtube-tui help you find a video in the terminal, then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as ASCII art, Unicode mosaics, sixel or kitty graphics, in a YouTube-style interface with Home, channels, comments and live chat. See <a href="guide/alternatives/">terminal YouTube clients compared</a>.</p>
+        </details>
+        <details>
+          <summary>Is ytui free?</summary>
+          <p>Yes. ytui is free and open source under the MIT licence.</p>
         </details>
       </div>
     </div>

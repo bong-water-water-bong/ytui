@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {% seo title=false %}
+{% if page.url == "/404.html" %}<meta name="robots" content="noindex">{% endif %}
 <title>{% if page.url == "/guide/" %}{{ page.title }}{% else %}{{ page.title }} · ytui docs{% endif %}</title>
 <meta name="theme-color" content="#e8eaee" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">

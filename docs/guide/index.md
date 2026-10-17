@@ -12,7 +12,7 @@ video streams, and libmpv (or ffmpeg) plays them.
 
 ## Start here
 
-1. [Install ytui](install/) and the tools it plays through.
+1. [Install ytui](install/) and the tools it plays through. The [step-by-step guide](watch-youtube-in-terminal/) covers each system, SSH and tmux.
 2. Run `ytui`. It opens YouTube's Home page.
 3. Press `/` to search, then `Enter` to play a video. Press `?` at any time to see every key.
 
@@ -25,3 +25,4 @@ video streams, and libmpv (or ffmpeg) plays them.
 - [Signing in](sign-in/): getting past YouTube's bot check, and Google sign-in for likes, comments and playlists.
 - [Keys](keys/) and [command-line options](options/).
 - [Troubleshooting](troubleshooting/) for when something doesn't play or look right.
+- [Terminal YouTube clients compared](alternatives/): ytui next to ytfzf, youtube-tui, yewtube and mpv.
