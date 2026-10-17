@@ -22,7 +22,8 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 
 - **Watch YouTube in the terminal:** truecolour half blocks, sending only what changed, so playback stays smooth.
 - **60 fps playback through ffmpeg:** streams up to 720p, the lowest height YouTube serves at 60 fps.
-- **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more, and a Music link in the sidebar for YouTube's Music channel. Also search, channels, playlists, comments and live chat.
+- **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more. Also search, channels, playlists, comments and live chat.
+- **YouTube Music:** the Music link opens music.youtube.com in ytui: Home, Explore, charts, moods and genres, search, artists, albums, your library, and a music player with a queue, lyrics and related songs.
 - **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
 - **Captions, volume slider, autoplay, tabs and watch later.** Mouse and keyboard both work.
 - **Runs over SSH:** it works in any truecolour terminal.
@@ -119,6 +120,18 @@ It works like a browser for YouTube:
 
 Browsing uses YouTube's own web JSON API directly (no API key, no account); `yt-dlp` is only used
 to resolve stream URLs. Press `?` in the app for every key.
+
+## YouTube Music
+
+**♫ Music** in the sidebar opens [YouTube Music](https://music.youtube.com/) in ytui. You get its
+Home, Explore (new releases, charts, moods and genres), search with Songs, Videos, Albums, Artists
+and Playlists, artist, album and playlist pages, and your Library when signed in. Songs play in a
+music player with Up next, Lyrics and Related tabs. A song from an album or playlist plays through
+that list; anywhere else it starts a radio. music.youtube.com links open there too.
+[More about YouTube Music in ytui](https://bong-water-water-bong.github.io/ytui/guide/youtube-music/).
+
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next](docs/screenshots/music-player.jpg)
+<sub>Shows *25 Years (Volume 2)* by [Kevin MacLeod](https://incompetech.com/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).</sub>
 
 ## Colours under tmux
 

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
 const FALLBACK_VERSION: &str = "2.20261015.01.00";
+const MUSIC_FALLBACK_VERSION: &str = "1.20261013.15.00";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct VideoItem {
@@ -28,6 +29,9 @@ pub struct VideoItem {
     pub live: bool,
     #[serde(default)]
     pub short: bool,
+    /// A song or music video from YouTube Music: plays in the music player.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub music: bool,
 }
 
 impl VideoItem {
@@ -199,6 +203,8 @@ pub struct Api {
     visitor: String,
     /// Signed in with browser cookies: requests carry them like youtube.com.
     auth: std::sync::RwLock<Option<WebAuth>>,
+    /// YouTube Music's web client version and visitor id, fetched on first use.
+    music: std::sync::OnceLock<(String, String)>,
 }
 
 /// The browser session ytui signs requests with.
@@ -220,9 +226,13 @@ impl WebAuth {
 
     /// "SAPISIDHASH <time>_<sha1(time sapisid origin)>", as youtube.com does.
     fn authorization(&self) -> String {
+        self.authorization_for("https://www.youtube.com")
+    }
+
+    fn authorization_for(&self, origin: &str) -> String {
         use sha1::{Digest, Sha1};
         let ts = now_secs();
-        let h = Sha1::digest(format!("{ts} {} https://www.youtube.com", self.sapisid));
+        let h = Sha1::digest(format!("{ts} {} {origin}", self.sapisid));
         let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
         format!("SAPISIDHASH {ts}_{hex}")
     }
@@ -248,7 +258,7 @@ impl Api {
         if let Ok(v) = std::fs::read(&path).map(|b| serde_json::from_slice::<Value>(&b).unwrap_or_default()) {
             if now.saturating_sub(v["ts"].as_u64().unwrap_or(0)) < 86400 {
                 if let (Some(ver), Some(vis)) = (v["ver"].as_str(), v["visitor"].as_str()) {
-                    return Api { agent, ver: ver.into(), visitor: vis.into(), auth: std::sync::RwLock::new(WebAuth::load()) };
+                    return Api { agent, ver: ver.into(), visitor: vis.into(), auth: std::sync::RwLock::new(WebAuth::load()), music: Default::default() };
                 }
             }
         }
@@ -270,7 +280,7 @@ impl Api {
         let visitor = grab("VISITOR_DATA").unwrap_or_default();
         let _ = std::fs::create_dir_all(cache_dir());
         let _ = std::fs::write(&path, json!({"ver": ver, "visitor": visitor, "ts": now}).to_string());
-        Api { agent, ver, visitor, auth: std::sync::RwLock::new(WebAuth::load()) }
+        Api { agent, ver, visitor, auth: std::sync::RwLock::new(WebAuth::load()), music: Default::default() }
     }
 
     /// Pick up a new sign-in (or sign-out).
@@ -359,6 +369,61 @@ impl Api {
         match r {
             Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
             Err(ureq::Error::Status(code, _)) => bail!("YouTube returned HTTP {code}"),
+            Err(e) => bail!("network: {e}"),
+        }
+    }
+
+    /// YouTube Music's client version and visitor id (cached for a day).
+    fn music_client(&self) -> &(String, String) {
+        self.music.get_or_init(|| {
+            let path = cache_dir().join("ytmusic.json");
+            let now = now_secs();
+            if let Ok(v) = std::fs::read(&path).map(|b| serde_json::from_slice::<Value>(&b).unwrap_or_default()) {
+                if now.saturating_sub(v["ts"].as_u64().unwrap_or(0)) < 86400 {
+                    if let (Some(ver), Some(vis)) = (v["ver"].as_str(), v["visitor"].as_str()) {
+                        return (ver.into(), vis.into());
+                    }
+                }
+            }
+            let html = self.agent.get("https://music.youtube.com/").set("Accept-Language", "en-US").call().ok().and_then(|r| r.into_string().ok()).unwrap_or_default();
+            let grab = |key: &str| {
+                let pat = format!("\"{key}\":\"");
+                html.find(&pat).map(|i| {
+                    let rest = &html[i + pat.len()..];
+                    rest[..rest.find('"').unwrap_or(0)].to_string()
+                })
+            };
+            let ver = grab("INNERTUBE_CLIENT_VERSION").unwrap_or_else(|| MUSIC_FALLBACK_VERSION.into());
+            let vis = grab("VISITOR_DATA").unwrap_or_default();
+            let _ = std::fs::create_dir_all(cache_dir());
+            let _ = std::fs::write(&path, json!({"ver": ver, "visitor": vis, "ts": now}).to_string());
+            (ver, vis)
+        })
+    }
+
+    /// A request to YouTube Music's API (music.youtube.com), as its web
+    /// client makes it, signed in when ytui is.
+    pub fn music_post(&self, ep: &str, mut body: Value) -> Result<Value> {
+        let (ver, vis) = self.music_client();
+        body["context"] = json!({"client": {"clientName": "WEB_REMIX", "clientVersion": ver, "hl": "en", "gl": "US", "visitorData": vis}});
+        let mut req = self
+            .agent
+            .post(&format!("https://music.youtube.com/youtubei/v1/{ep}?prettyPrint=false"))
+            .set("Content-Type", "application/json")
+            .set("X-YouTube-Client-Name", "67")
+            .set("X-YouTube-Client-Version", ver)
+            .set("Origin", "https://music.youtube.com")
+            .set("Referer", "https://music.youtube.com/");
+        if let Some(a) = self.auth.read().unwrap().as_ref() {
+            req = req
+                .set("Cookie", &a.cookie)
+                .set("Authorization", &a.authorization_for("https://music.youtube.com"))
+                .set("X-Origin", "https://music.youtube.com")
+                .set("X-Goog-AuthUser", "0");
+        }
+        match req.send_string(&body.to_string()) {
+            Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
+            Err(ureq::Error::Status(code, _)) => bail!("YouTube Music returned HTTP {code}"),
             Err(e) => bail!("network: {e}"),
         }
     }
@@ -675,6 +740,28 @@ pub fn urlencode(s: &str) -> String {
         .collect()
 }
 
+/// Decode a URL query value ("+" and %XX escapes).
+pub fn urldecode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => match std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or(()) {
+                Ok(v) => {
+                    out.push(v);
+                    i += 2;
+                }
+                Err(_) => out.push(b'%'),
+            },
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn query_param(url: &str, key: &str) -> Option<String> {
     let q = url.split_once('?')?.1;
     q.split('&').find_map(|kv| {
@@ -706,6 +793,7 @@ pub fn looks_like_url(s: &str) -> bool {
             || s.starts_with("www.")
             || s.starts_with("youtube.com")
             || s.starts_with("m.youtube.com")
+            || s.starts_with("music.youtube.com")
             || s.starts_with("youtu.be")
             || s.starts_with('@'))
 }
@@ -743,7 +831,7 @@ pub fn find<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     }
 }
 
-fn find_all<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
+pub fn find_all<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
     match v {
         Value::Object(m) => {
             for (k, x) in m {
@@ -780,11 +868,11 @@ fn urls(v: &Value) -> Vec<String> {
     out
 }
 
-fn first_url(v: &Value) -> Option<String> {
+pub fn first_url(v: &Value) -> Option<String> {
     urls(v).into_iter().next()
 }
 
-fn last_url(v: &Value) -> Option<String> {
+pub fn last_url(v: &Value) -> Option<String> {
     urls(v).into_iter().last()
 }
 
@@ -896,6 +984,7 @@ fn video_renderer(x: &Value) -> Option<VideoItem> {
         published: text(&x["publishedTimeText"]),
         live,
         short: false,
+        music: false,
     })
 }
 
@@ -919,6 +1008,7 @@ fn lockup(x: &Value) -> Option<Item> {
                 published: r1.get(1).cloned(),
                 live,
                 short: false,
+                music: false,
             }))
         }
         "LOCKUP_CONTENT_TYPE_PLAYLIST" | "LOCKUP_CONTENT_TYPE_ALBUM" | "LOCKUP_CONTENT_TYPE_PODCAST" | "LOCKUP_CONTENT_TYPE_STATION" => {

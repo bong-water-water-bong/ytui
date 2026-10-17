@@ -6,6 +6,7 @@
 
 use crate::api::{ChannelPage, Comment, Entry, Feed, Item, PlaylistPage, VideoItem, WatchInfo};
 use crate::auth::{MyPlaylist, PlItem};
+use crate::music::{self, Browse, CardKind, Header, MItem, MusicPage, Song};
 use crate::store::Store;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -56,6 +57,35 @@ pub struct Watch {
     pub qpos: usize,
     /// Your rating when signed in: "like" / "dislike" / "none".
     pub rating: Option<String>,
+    /// Playing from YouTube Music: the music player's state.
+    pub music: Option<MusicNow>,
+}
+
+/// The YouTube Music player page: queue, lyrics and related.
+#[derive(Default)]
+pub struct MusicNow {
+    /// Playlist the song plays in (None: a radio from the song).
+    pub playlist: Option<String>,
+    /// 0 Up next, 1 Lyrics, 2 Related.
+    pub tab: usize,
+    pub next: Option<music::Next>,
+    pub lyrics: Option<Result<music::Lyrics, String>>,
+    pub related: Option<Result<MusicPage, String>>,
+    pub album: Option<(String, String)>,
+    /// The list the song was played from (an album, playlist or shelf),
+    /// kept as the queue; empty starts a radio from the song.
+    pub list: Vec<Song>,
+}
+
+/// Which YouTube Music page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MRoute {
+    Home,
+    Explore,
+    /// A library shelf (index into music::LIBRARY).
+    Library(usize),
+    Search { q: String, filter: usize },
+    Browse(Browse),
 }
 
 pub enum Kind {
@@ -73,6 +103,8 @@ pub enum Kind {
     Playlists { list: Option<Vec<MyPlaylist>> },
     /// One of your playlists, managed through the Data API.
     MyPlaylist { id: String, info: Option<MyPlaylist>, items: Vec<PlItem> },
+    /// A YouTube Music page.
+    Music { route: MRoute, page: Option<MusicPage> },
 }
 
 /// Per-draw context that isn't part of the page itself.
@@ -118,6 +150,7 @@ impl Page {
             Kind::Search { q, .. } => q.clone(),
             Kind::Channel { page, .. } => page.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Channel".into()),
             Kind::Playlist { page, .. } => page.as_ref().map(|p| p.title.clone()).unwrap_or_else(|| "Playlist".into()),
+            Kind::Watch(w) if w.music.is_some() && !w.video.title.is_empty() => w.video.title.clone(),
             Kind::Watch(w) => w.info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| w.video.title.clone()),
             Kind::Subs { .. } => "Subscriptions".into(),
             Kind::History => "History".into(),
@@ -126,6 +159,14 @@ impl Page {
             Kind::Account => "Account".into(),
             Kind::Playlists { .. } => "Playlists".into(),
             Kind::MyPlaylist { info, .. } => info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| "Playlist".into()),
+            Kind::Music { route, page } => match (route, page.as_ref().and_then(|p| p.header.as_ref())) {
+                (MRoute::Search { q, .. }, _) => q.clone(),
+                (_, Some(h)) => h.title.clone(),
+                (MRoute::Home, _) => "YouTube Music".into(),
+                (MRoute::Explore, _) => "Explore".into(),
+                (MRoute::Library(i), _) => music::LIBRARY[*i].0.into(),
+                (MRoute::Browse(_), _) => "YouTube Music".into(),
+            },
         }
     }
 
@@ -135,6 +176,7 @@ impl Page {
             Kind::Search { q, .. } => format!("youtube.com/results?search_query={}", crate::api::urlencode(q)),
             Kind::Channel { id, .. } => format!("youtube.com/channel/{id}"),
             Kind::Playlist { id, .. } => format!("youtube.com/playlist?list={id}"),
+            Kind::Watch(w) if w.music.is_some() => format!("music.youtube.com/watch?v={}", w.video.id),
             Kind::Watch(w) => format!("youtube.com/watch?v={}", w.video.id),
             Kind::Subs { .. } => "ytui://subscriptions".into(),
             Kind::History => "ytui://history".into(),
@@ -143,6 +185,13 @@ impl Page {
             Kind::Account => "ytui://account".into(),
             Kind::Playlists { .. } => "ytui://playlists".into(),
             Kind::MyPlaylist { id, .. } => format!("youtube.com/playlist?list={id}"),
+            Kind::Music { route, .. } => match route {
+                MRoute::Home => "music.youtube.com".into(),
+                MRoute::Explore => "music.youtube.com/explore".into(),
+                MRoute::Library(_) => "music.youtube.com/library".into(),
+                MRoute::Search { q, .. } => format!("music.youtube.com/search?q={}", crate::api::urlencode(q)),
+                MRoute::Browse(b) => music::address(b),
+            },
         }
     }
 
@@ -153,6 +202,7 @@ impl Page {
             Kind::Channel { page: Some(p), .. } => p.feed.cont.as_deref(),
             Kind::Playlist { page: Some(p), .. } => p.feed.cont.as_deref(),
             Kind::Watch(w) => w.comments_cont.as_deref(),
+            Kind::Music { page: Some(p), .. } => p.cont.as_deref(),
             _ => None,
         }
     }
@@ -206,6 +256,23 @@ pub enum Act {
     /// Move item idx by -1 / +1.
     PlMove(usize, i64),
     PlRemove(usize),
+    /// Go to a YouTube Music page.
+    MusicGo(MRoute),
+    /// Item (section, index) of the music page shown: play a song in its
+    /// list, or open a card.
+    MusicItem(usize, usize),
+    /// Same, for the Related tab of the music player.
+    MusicRelated(usize, usize),
+    /// Play entry n of the music player's queue.
+    MusicQueue(usize),
+    /// Play a playlist from its start (a header's Play / Shuffle / Radio).
+    MusicPlaylist(String),
+    /// Search filter / library shelf / player tab.
+    MusicFilter(usize),
+    MusicLib(usize),
+    MusicTab(usize),
+    /// Open the address bar to search YouTube Music.
+    MusicSearch,
 }
 
 #[derive(Clone)]
@@ -676,7 +743,13 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                 y = b.status(y, page, "", false);
             }
         }
-        Kind::Watch(wt) => y = watch_layout(&mut b, page, wt, w, vh, ctx),
+        Kind::Watch(wt) => {
+            y = match &wt.music {
+                Some(m) => music_watch_layout(&mut b, wt, m, w, vh),
+                None => watch_layout(&mut b, page, wt, w, vh, ctx),
+            }
+        }
+        Kind::Music { route, page: mp } => y = music_layout(&mut b, page, route, mp.as_ref(), iw, ctx),
         Kind::Subs { feed } => {
             b.line(1, y, vec![Span::styled("Subscriptions", bold)]);
             y += 2;
@@ -1169,7 +1242,435 @@ pile up; fast motion gets a little coarser instead.
 Pages
   Home         For you (from your history and subscriptions) and topic chips
   Subscriptions  latest uploads from channels you subscribed to (kept locally)
-  Music        YouTube's Music channel: new and trending songs, top hits
+  Music        YouTube Music: Home, Explore, charts, search, artists, albums,
+               your library, and a player with Up next, Lyrics and Related
   History      everything you watched, with resume positions
   Watch later  your saved videos
 ";
+
+// ------------------------------------------------------------ YouTube Music
+
+const MUSIC_RED: Color = Color::Rgb(255, 0, 51);
+
+/// The YouTube Music bar over every music page: its logo, Home, Explore,
+/// Library and a search button.
+fn music_bar(b: &mut B, y: usize, route: &MRoute) -> usize {
+    let mut x = 1;
+    b.line(x, y, vec![Span::styled("♫ ".to_string(), Style::default().fg(MUSIC_RED).add_modifier(Modifier::BOLD)), Span::styled("Music".to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))]);
+    b.tgt(x, y, 7, 1, Act::MusicGo(MRoute::Home));
+    x += 10;
+    for (label, r) in [("Home", MRoute::Home), ("Explore", MRoute::Explore), ("Library", MRoute::Library(0))] {
+        let on = match (&r, route) {
+            (MRoute::Library(_), MRoute::Library(_)) => true,
+            _ => &r == route,
+        };
+        x += b.button(x, y, label, Act::MusicGo(r), on) + 1;
+    }
+    b.button(x + 2, y, "⌕ Search music", Act::MusicSearch, false);
+    2
+}
+
+/// Square album art: `w` cells wide is `w / 2` rows high.
+fn art(b: &mut B, x: u16, y: usize, w: u16, url: Option<&String>) -> u16 {
+    let h = (w / 2).max(1);
+    match url {
+        Some(u) => b.prims.push(Prim::Image { x, y, w, h, url: u.clone(), badge: None, progress: None }),
+        None => b.prims.push(Prim::Fill { x, y, w, h, color: PANEL }),
+    }
+    h
+}
+
+/// Artist banner, or album / playlist art with its details and buttons.
+fn music_header(b: &mut B, y0: usize, w: u16, h: &Header) -> usize {
+    let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let mut y = y0;
+    let buttons = |b: &mut B, x: u16, y: usize| {
+        let mut bx = x;
+        if let Some(p) = &h.play {
+            bx += b.button(bx, y, if h.banner { "⇄ Shuffle" } else { "▶ Play" }, Act::MusicPlaylist(p.clone()), true) + 1;
+        }
+        if let Some(p) = &h.shuffle {
+            bx += b.button(bx, y, if h.banner { "◉ Radio" } else { "⇄ Shuffle" }, Act::MusicPlaylist(p.clone()), false) + 1;
+        }
+        if let Some(p) = &h.radio {
+            bx += b.button(bx, y, "◉ Radio", Act::MusicPlaylist(p.clone()), false) + 1;
+        }
+        if let Some(c) = &h.channel {
+            let subbed = b.store.is_sub(c);
+            let label = match (&h.subscribers, subbed) {
+                (_, true) => "Subscribed ✓".to_string(),
+                (Some(n), false) => format!("Subscribe {n}"),
+                (None, false) => "Subscribe".to_string(),
+            };
+            b.button(bx, y, &label, Act::ToggleSub(c.clone(), h.title.clone()), !subbed);
+        }
+    };
+    // Title-only headers (charts, moods, history): a heading.
+    if h.thumb.is_none() && h.play.is_none() {
+        b.line(1, y, vec![Span::styled(h.title.clone(), bold)]);
+        if !h.subtitle.is_empty() {
+            b.line(1, y + 1, vec![Span::styled(trunc(&h.subtitle, w as usize), st(META))]);
+            return 3;
+        }
+        return 2;
+    }
+    if h.banner {
+        if let Some(u) = &h.thumb {
+            let bh = ((w as f32) * 0.16).clamp(6.0, 16.0) as u16;
+            b.prims.push(Prim::Image { x: 1, y, w, h: bh, url: u.clone(), badge: None, progress: None });
+            y += bh as usize + 1;
+        }
+        b.line(1, y, vec![Span::styled(h.title.clone(), bold)]);
+        let mut meta = Vec::new();
+        if let Some(s) = &h.subscribers {
+            meta.push(format!("{s} subscribers"));
+        }
+        if !h.subtitle.is_empty() {
+            meta.push(h.subtitle.clone());
+        }
+        y += 1;
+        if !meta.is_empty() {
+            b.line(1, y, vec![Span::styled(trunc(&meta.join(" · "), w as usize), st(META))]);
+            y += 1;
+        }
+        if !h.description.is_empty() {
+            y += b.para(1, y, w, &h.description, st(DIM), 3);
+        }
+        y += 1;
+        buttons(b, 1, y);
+        return y + 2 - y0;
+    }
+    let aw = (w / 4).clamp(14, 32);
+    let ah = art(b, 1, y, aw, h.thumb.as_ref());
+    let tx = 1 + aw + 3;
+    let tw = w.saturating_sub(aw + 3);
+    let mut ty = y;
+    ty += b.para(tx, ty, tw, &h.title, bold, 2);
+    if let Some((name, id)) = &h.artist {
+        let n = trunc(name, tw as usize);
+        let nw = n.width() as u16;
+        b.line(tx, ty, vec![Span::styled(n, Style::default().fg(Color::White))]);
+        b.tgt(tx, ty, nw, 1, Act::MusicGo(MRoute::Browse(Browse::new(id))));
+        ty += 1;
+    }
+    for t in [&h.subtitle, &h.second] {
+        if !t.is_empty() {
+            b.line(tx, ty, vec![Span::styled(trunc(t, tw as usize), st(META))]);
+            ty += 1;
+        }
+    }
+    if !h.description.is_empty() {
+        ty += 1;
+        ty += b.para(tx, ty, tw, &h.description, st(DIM), 3);
+    }
+    ty += 1;
+    buttons(b, tx, ty);
+    ty += 2;
+    y + (ah as usize).max(ty - y) + 1 - y0
+}
+
+/// One song row: art (or its number), title, artists · album · plays, and
+/// the duration at the right.
+fn song_row(b: &mut B, x: u16, y: usize, w: u16, s: &Song, numbered: bool, now: bool, act: Act) {
+    let mut tx = x;
+    if numbered {
+        // Album tracks: the number, as YouTube Music lists them.
+        b.line(x, y, vec![Span::styled(format!("{:>3}", s.index.as_deref().unwrap_or("")), st(META))]);
+        tx += 5;
+    } else {
+        art(b, x, y, 4, s.thumb.as_ref());
+        tx += 6;
+        if let Some(i) = &s.index {
+            // Chart positions.
+            b.line(tx, y, vec![Span::styled(format!("{i:>3} "), st(META))]);
+            tx += 4;
+        }
+    }
+    let dur = s.video.duration.clone().unwrap_or_default();
+    let tw = (x + w).saturating_sub(tx + dur.width() as u16 + 2) as usize;
+    let title_style = if now { Style::default().fg(MUSIC_RED).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White).add_modifier(Modifier::BOLD) };
+    let mark = if now { "▶ " } else { "" };
+    b.line(tx, y, vec![Span::styled(trunc(&format!("{mark}{}", s.video.title), tw), title_style)]);
+    let mut meta = Vec::new();
+    if !s.video.channel.is_empty() {
+        meta.push(s.video.channel.clone());
+    }
+    if let Some((a, _)) = &s.album {
+        if *a != s.video.title && !numbered {
+            meta.push(a.clone());
+        }
+    }
+    if let Some(v) = &s.video.views {
+        meta.push(v.clone());
+    }
+    b.line(tx, y + 1, vec![Span::styled(trunc(&meta.join(" · "), tw), st(META))]);
+    if !dur.is_empty() {
+        b.line(x + w - dur.width() as u16, y, vec![Span::styled(dur, st(META))]);
+    }
+    b.tgt(x, y, w, 2, act);
+}
+
+/// A card: square art, title, subtitle.
+fn music_card(b: &mut B, x: u16, y: usize, w: u16, c: &music::Card, act: Act) -> usize {
+    let ah = art(b, x, y, w, c.thumb.as_ref());
+    let mut yy = y + ah as usize + 1;
+    let style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    yy += b.para(x, yy, w, &c.title, style, 2);
+    let mut sub = c.subtitle.clone();
+    if c.artist && !sub.starts_with("Artist") {
+        sub = if sub.is_empty() { "Artist".into() } else { format!("Artist • {sub}") };
+    }
+    yy += b.para(x, yy, w, &sub, st(META), 2);
+    if matches!(c.kind, CardKind::Play { .. }) {
+        b.line(x, y, vec![Span::styled(" ▶ ".to_string(), Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)))]);
+    }
+    b.tgt(x, y, w, (yy - y) as u16, act);
+    yy - y
+}
+
+/// A page's sections. `all` shows every item (a "more" page); otherwise a
+/// row of cards and a few songs each, as YouTube Music's shelves do.
+fn music_sections(b: &mut B, y0: usize, x0: u16, w: u16, page: &MusicPage, all: bool, act: &dyn Fn(usize, usize) -> Act, now: Option<&str>) -> usize {
+    let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let mut y = y0;
+    // Album and playlist tracks: one numbered list, in full.
+    let tracks = page.header.as_ref().is_some_and(|h| !h.banner && h.thumb.is_some());
+    for (si, sec) in page.sections.iter().enumerate() {
+        if !sec.title.is_empty() {
+            b.line(x0, y, vec![Span::styled(trunc(&sec.title, w as usize - 8), bold)]);
+            if let Some(m) = &sec.more {
+                let label = "More ›";
+                let mx = x0 + w - label.width() as u16;
+                b.line(mx, y, vec![Span::styled(label.to_string(), st(META))]);
+                let target = match m.id.strip_prefix("filter:").and_then(|i| i.parse().ok()) {
+                    Some(i) => Act::MusicFilter(i),
+                    None => Act::MusicGo(MRoute::Browse(m.clone())),
+                };
+                b.tgt(mx, y, label.width() as u16, 1, target);
+            }
+            y += 2;
+        }
+        if let Some(t) = &sec.text {
+            y += b.para(x0, y, w, t, st(Color::Rgb(220, 220, 220)), if all { 400 } else { 6 }) + 1;
+            continue;
+        }
+        let songs = sec.items.iter().filter(|i| matches!(i, MItem::Song(_))).count();
+        let navs = sec.items.iter().filter(|i| matches!(i, MItem::Nav { .. })).count();
+        if navs > 0 && navs == sec.items.len() {
+            // Mood and genre buttons, each with its colour stripe.
+            let (mut x, mut row) = (x0, 0);
+            let cap = if all { usize::MAX } else { 4 };
+            for (ii, it) in sec.items.iter().enumerate() {
+                let MItem::Nav { label, color, .. } = it else { continue };
+                let bw = (label.width() as u16 + 4).max(14);
+                if x > x0 && x + bw > x0 + w {
+                    x = x0;
+                    row += 2;
+                    if row / 2 >= cap {
+                        break;
+                    }
+                }
+                let c = color.map(|c| Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)).unwrap_or(META);
+                let pad = " ".repeat((bw as usize).saturating_sub(label.width() + 3));
+                b.line(x, y + row, vec![Span::styled("▍".to_string(), Style::default().fg(c).bg(BUTTON)), Span::styled(format!(" {label}{pad} "), Style::default().fg(Color::White).bg(BUTTON))]);
+                b.tgt(x, y + row, bw, 1, act(si, ii));
+                x += bw + 1;
+            }
+            y += row + 2;
+        } else if songs * 2 >= sec.items.len() {
+            // Songs: in columns where there's room, like Quick picks.
+            let full = all || tracks;
+            let cols = if full || w < 90 { 1 } else { ((w + 2) / 46).clamp(1, 3) as usize };
+            let per_col = if full { usize::MAX } else { 4 };
+            let shown: Vec<(usize, &MItem)> = sec.items.iter().enumerate().take(cols.saturating_mul(per_col)).collect();
+            let rows = shown.len().div_ceil(cols);
+            let cw = (w + 2) / cols as u16 - 2;
+            for (k, (ii, it)) in shown.iter().enumerate() {
+                let (c, r) = (k / rows, k % rows);
+                let x = x0 + c as u16 * (cw + 2);
+                match it {
+                    MItem::Song(s) => {
+                        let album_track = tracks && s.thumb.is_some() && s.thumb == page.header.as_ref().and_then(|h| h.thumb.clone());
+                        song_row(b, x, y + r * 3, cw, s, album_track, now == Some(s.video.id.as_str()), act(si, *ii))
+                    }
+                    MItem::Card(c) => {
+                        // A card among songs (search): a row with its art.
+                        art(b, x, y + r * 3, 4, c.thumb.as_ref());
+                        b.line(x + 6, y + r * 3, vec![Span::styled(trunc(&c.title, cw as usize - 6), bold)]);
+                        b.line(x + 6, y + r * 3 + 1, vec![Span::styled(trunc(&c.subtitle, cw as usize - 6), st(META))]);
+                        b.tgt(x, y + r * 3, cw, 2, act(si, *ii));
+                    }
+                    MItem::Nav { .. } => {}
+                }
+            }
+            y += rows * 3 + 1;
+        } else {
+            // Cards: a grid, one or two rows unless showing everything.
+            let n = ((w + 2) / 24).max(2) as usize;
+            let cw = (w + 2) / n as u16 - 2;
+            let cap = if all || page.sections.len() <= 2 { usize::MAX } else if sec.items.len() > n * 2 { n * 2 } else { usize::MAX };
+            let mut row_h = 0;
+            let mut col = 0;
+            for (ii, it) in sec.items.iter().enumerate().take(cap) {
+                let x = x0 + col as u16 * (cw + 2);
+                let h = match it {
+                    MItem::Card(c) => music_card(b, x, y, cw, c, act(si, ii)),
+                    MItem::Song(s) => {
+                        let c = music::Card { title: s.video.title.clone(), subtitle: s.video.channel.clone(), thumb: s.thumb.clone(), kind: CardKind::Play { video: s.video.clone(), playlist: s.playlist.clone() }, artist: false };
+                        music_card(b, x, y, cw, &c, act(si, ii))
+                    }
+                    MItem::Nav { .. } => 0,
+                };
+                row_h = row_h.max(h);
+                col += 1;
+                if col == n {
+                    y += row_h + 1;
+                    col = 0;
+                    row_h = 0;
+                }
+            }
+            if col > 0 {
+                y += row_h + 1;
+            }
+            y += 1;
+        }
+    }
+    y
+}
+
+fn music_layout(b: &mut B, page: &Page, route: &MRoute, mp: Option<&MusicPage>, w: u16, ctx: &Ctx) -> usize {
+    let mut y = music_bar(b, 0, route) + 1;
+    match route {
+        MRoute::Search { filter, .. } => {
+            let labels: Vec<String> = music::FILTERS.iter().map(|f| f.0.to_string()).collect();
+            y += b.chips(1, y, w, &labels, Some(*filter), Act::MusicFilter) + 1;
+        }
+        MRoute::Library(i) => {
+            if ctx.yt_account.is_none() && ctx.yt_cookies.is_none() {
+                b.line(1, y, vec![Span::styled("Sign in to see your library: playlists, liked songs, albums, artists and history.".to_string(), st(META))]);
+                b.button(1, y + 2, "Sign in", Act::SignIn, true);
+                return y + 4;
+            }
+            let labels: Vec<String> = music::LIBRARY.iter().map(|l| l.0.to_string()).collect();
+            y += b.chips(1, y, w, &labels, Some(*i), Act::MusicLib) + 1;
+        }
+        _ => {}
+    }
+    let Some(mp) = mp else {
+        return b.status(y, page, "", false);
+    };
+    if let Some(h) = &mp.header {
+        y += music_header(b, y, w.saturating_sub(1), h) + 1;
+    }
+    y = b.status(y, page, "Nothing here.", !mp.sections.is_empty());
+    // A page reached through "More" is one long section: show it all.
+    let all = matches!(route, MRoute::Library(_)) || matches!(route, MRoute::Search { filter, .. } if *filter > 0) || mp.sections.len() == 1;
+    // One column clear of the scrollbar.
+    music_sections(b, y, 1, w.saturating_sub(1), mp, all, &|s, i| Act::MusicItem(s, i), None)
+}
+
+/// The music player: the picture, the song, and Up next / Lyrics / Related.
+fn music_watch_layout(b: &mut B, wt: &Watch, m: &MusicNow, w: u16, vh: u16) -> usize {
+    let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let two = w >= 110;
+    let lw = if two { w * 56 / 100 } else { w } - 1;
+    let max_h = ((vh as f32) * 0.62) as u16;
+    let mut ph = ((lw as f32) * 0.28125).round() as u16;
+    let mut pw = lw;
+    if ph > max_h {
+        ph = max_h.max(4);
+        pw = ((ph as f32) / 0.28125).round() as u16;
+    }
+    let px = 1 + (lw - pw.min(lw)) / 2;
+    b.prims.push(Prim::Player { x: px, y: 0, w: pw.min(lw), h: ph, id: wt.video.id.clone() });
+    b.tgt(px, 0, pw.min(lw), ph, Act::Player);
+    b.prims.push(Prim::PlayerBar { x: 1, y: ph as usize, w: lw, id: wt.video.id.clone() });
+    b.tgt(1, ph as usize, lw, 1, Act::PlayerBar);
+    let mut y = ph as usize + 2;
+    let title = wt.info.as_ref().map(|i| i.title.clone()).filter(|_| wt.video.title.is_empty()).unwrap_or_else(|| wt.video.title.clone());
+    y += b.para(1, y, lw, &title, bold, 2);
+    // Artist and album, each a link.
+    let mut x = 1u16;
+    let artist = if wt.video.channel.is_empty() { wt.info.as_ref().map(|i| i.channel.clone()).unwrap_or_default() } else { wt.video.channel.clone() };
+    let aw = artist.width() as u16;
+    b.line(x, y, vec![Span::styled(artist.clone(), st(Color::White))]);
+    if let Some(id) = wt.video.channel_id.clone().or_else(|| wt.info.as_ref().map(|i| i.channel_id.clone())).filter(|i| !i.is_empty()) {
+        b.tgt(x, y, aw.max(1), 1, Act::MusicGo(MRoute::Browse(Browse::new(&id))));
+    }
+    x += aw;
+    if let Some((name, id)) = &m.album {
+        b.line(x, y, vec![Span::styled(" · ".to_string(), st(META)), Span::styled(name.clone(), st(META))]);
+        b.tgt(x + 3, y, name.width() as u16, 1, Act::MusicGo(MRoute::Browse(Browse::new(id))));
+    }
+    y += 2;
+    let rating = wt.rating.as_deref().unwrap_or("none");
+    let mut bx = 1;
+    bx += b.button(bx, y, "▲ Like", Act::Rate("like".into()), rating == "like") + 1;
+    bx += b.button(bx, y, "▼", Act::Rate("dislike".into()), rating == "dislike") + 1;
+    bx += b.button(bx, y, "≡+ Save", Act::SaveTo(wt.video.clone()), false) + 1;
+    let saved = b.store.later.iter().any(|v| v.id == wt.video.id);
+    b.button(bx, y, if saved { "✓ Saved" } else { "+ Later" }, Act::ToggleLater(wt.video.clone()), false);
+    y += 2;
+    // Tabs: beside the player when wide, else below.
+    let (tx, tw, mut ty) = if two { (lw + 3, w.saturating_sub(lw + 4), 0) } else { (1, lw, y + 1) };
+    let mut x = tx;
+    for (i, t) in ["UP NEXT", "LYRICS", "RELATED"].iter().enumerate() {
+        let on = i == m.tab;
+        let style = if on { Style::default().fg(Color::White).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { st(META) };
+        b.line(x, ty, vec![Span::styled(t.to_string(), style)]);
+        b.tgt(x, ty, t.width() as u16, 1, Act::MusicTab(i));
+        x += t.width() as u16 + 4;
+    }
+    b.line(tx, ty + 1, vec![Span::styled("─".repeat(tw as usize), st(Color::Rgb(60, 60, 70)))]);
+    ty += 3;
+    match m.tab {
+        0 => match &m.next {
+            Some(n) if !n.queue.is_empty() => {
+                for (i, s) in n.queue.iter().enumerate() {
+                    // No track or chart numbers in the queue.
+                    let s = Song { index: None, ..s.clone() };
+                    song_row(b, tx, ty, tw, &s, false, s.video.id == wt.video.id, Act::MusicQueue(i));
+                    ty += 3;
+                }
+            }
+            Some(_) => {
+                b.line(tx, ty, vec![Span::styled("Nothing up next.".to_string(), st(META))]);
+                ty += 2;
+            }
+            None => {
+                b.line(tx, ty, vec![Span::styled("Loading…".to_string(), st(META))]);
+                ty += 2;
+            }
+        },
+        1 => match &m.lyrics {
+            Some(Ok(l)) => {
+                for line in l.text.lines() {
+                    ty += b.para(tx, ty, tw, line, st(Color::Rgb(230, 230, 230)), 20).max(1);
+                }
+                ty += 1;
+                b.line(tx, ty, vec![Span::styled(l.source.clone(), st(DIM))]);
+                ty += 2;
+            }
+            Some(Err(e)) => {
+                b.line(tx, ty, vec![Span::styled(e.clone(), st(META))]);
+                ty += 2;
+            }
+            None => {
+                b.line(tx, ty, vec![Span::styled("Loading lyrics…".to_string(), st(META))]);
+                ty += 2;
+            }
+        },
+        _ => match &m.related {
+            Some(Ok(p)) => ty = music_sections(b, ty, tx, tw, p, false, &|s, i| Act::MusicRelated(s, i), None),
+            Some(Err(e)) => {
+                b.line(tx, ty, vec![Span::styled(e.clone(), st(META))]);
+                ty += 2;
+            }
+            None => {
+                b.line(tx, ty, vec![Span::styled("Loading…".to_string(), st(META))]);
+                ty += 2;
+            }
+        },
+    }
+    y.max(ty)
+}
