@@ -21,6 +21,7 @@ description: All ytui command-line options and environment variables, for render
 | `ytui --logout` | Sign out and revoke access |
 | `ytui --help-login` | How to create the Google OAuth client |
 | `ytui --demo3d [SCENE]` | 3D engine showcase: `logo`, `knot`, `terrain` or `visualizer` |
+| `ytui --uninstall [--yes]` | Sign out and remove ytui, its settings, data and cache ([details](../install/#uninstall)) |
 
 ## Options
 

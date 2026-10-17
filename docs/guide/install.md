@@ -66,3 +66,19 @@ On Windows, for a source build, put `libmpv-2.dll` from a
 Subscriptions, history, watch later, settings and sign-in are stored in `~/.local/share/ytui/`
 (`%USERPROFILE%\.local\share\ytui\` on Windows). Set `XDG_DATA_HOME` and `XDG_CONFIG_HOME` to
 keep them somewhere else.
+
+## Uninstall
+
+```
+ytui --uninstall
+```
+
+ytui first lists everything it will remove and asks before deleting anything:
+
+- your settings and playback sign-in cookies (`~/.config/ytui/`)
+- your history, subscriptions, watch later, Google sign-in and ytui's sign-in browser profile (`~/.local/share/ytui/`)
+- its cache (`~/.cache/ytui/`)
+- the `ytui` program itself, plus the files that came with it in the release folder (`libmpv-2.dll` and the licences)
+
+If you're signed in with Google, it also signs you out, which revokes ytui's access to your account. yt-dlp, ffmpeg and mpv
+stay installed, because other programs may use them. Add `--yes` to skip the question, for example in a script.

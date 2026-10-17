@@ -228,7 +228,7 @@ impl WebAuth {
     }
 }
 
-fn cache_dir() -> std::path::PathBuf {
+pub fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| crate::sys::home().join(".cache"));

@@ -55,6 +55,8 @@ Then install the tools ytui uses:
 
 Or build from source with `cargo build --release` (see [Build](#build)).
 
+To remove ytui and everything it stored, run `ytui --uninstall`. It lists what it will delete and asks first.
+
 ## Requirements
 
 - `yt-dlp` (plus Node.js 22+ or Deno, which yt-dlp needs for YouTube)
