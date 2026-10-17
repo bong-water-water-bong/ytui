@@ -26,6 +26,14 @@ and below.
 
 ![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box]({{ '/screenshots/captions.jpg' | relative_url }})
 
+## Player controls
+
+Move the mouse over the video, or press a player key, and a control row shows on the video's bottom line,
+as on YouTube: previous, play/pause, next and volume on the left, captions (`CC`) and fullscreen on the
+right. It stays up while the video is paused and hides three seconds after the last movement. Click the
+volume to mute. Previous goes back to the start, or to the previous video in a playlist or album when
+you're in its first five seconds. The progress bar, time and volume slider stay on the player bar below.
+
 ## Audio
 
 ytui plays audio through PipeWire or PulseAudio (`pw-cat` or `pacat`), or through ALSA (`aplay`),

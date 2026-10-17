@@ -28,7 +28,7 @@ See [command-line options](../options/) for everything else.
 - **Search** has filters for videos, shorts, channels, playlists, live and newest, and keeps loading more as you scroll.
 - **Channel pages** show the banner and avatar, with Home, Videos, Shorts, Live and Playlists tabs.
 - **Subscriptions, history and watch later** are stored on your computer. History remembers where you stopped in each video.
-- **Mouse:** click anything, scroll with the wheel, and click the progress bar to seek.
+- **Mouse:** click anything, scroll with the wheel, and click the progress bar to seek. Move the mouse over the video for its controls.
 
 ## The watch page
 
