@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Files a release package puts next to the binary (libmpv-2.dll: older
 /// Windows packages).
-const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE"];
+const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE", "NOTICE"];
 
 pub fn run(yes: bool) -> Result<()> {
     let exe = std::env::current_exe().ok();

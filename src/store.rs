@@ -41,11 +41,8 @@ pub struct Store {
     /// Auto-exposure for video.
     #[serde(default = "yes")]
     pub exposure: bool,
-    /// Use the terminal's pixel graphics (kitty / sixel) when available.
-    #[serde(default = "yes")]
-    pub gfx: bool,
-    /// Look panel (glow mode): ink brightness, saturation, background
-    /// (how much picture shows behind the characters) and contrast.
+    /// Look panel: brightness, saturation, background (how much picture
+    /// shows behind the glyphs) and contrast (the shape exponent).
     #[serde(default = "look_bright")]
     pub look_bright: f32,
     #[serde(default = "look_sat")]
@@ -69,12 +66,13 @@ fn one() -> f32 {
     1.0
 }
 
+// The look defaults are react-video-ascii's.
 fn look_bright() -> f32 {
-    1.25
+    1.0
 }
 
 fn look_sat() -> f32 {
-    1.25
+    1.0
 }
 
 fn look_bg() -> f32 {
@@ -82,7 +80,7 @@ fn look_bg() -> f32 {
 }
 
 fn look_contrast() -> f32 {
-    1.8
+    2.0
 }
 
 fn path() -> PathBuf {
@@ -102,7 +100,6 @@ impl Store {
                 volume: 1.0,
                 show_chat: true,
                 exposure: true,
-                gfx: true,
                 look_bright: look_bright(),
                 look_sat: look_sat(),
                 look_bg: look_bg(),

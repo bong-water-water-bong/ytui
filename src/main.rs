@@ -5,20 +5,14 @@ mod browser_login;
 mod bench;
 mod chat;
 mod cookies;
-mod demo;
-mod diacritics;
-mod engine3d;
-mod gfx;
 mod glyphs;
 mod out;
 mod page;
 mod player;
 mod proxy;
 mod render;
-mod scenes;
 mod store;
 mod sys;
-mod textmode;
 mod term;
 mod thumbs;
 mod uninstall;
@@ -32,7 +26,7 @@ use render::{Img, Mode, Renderer};
 
 const HELP: &str = "\
 ytui - YouTube in the terminal: a full browser-style client with videos
-rendered as colour ASCII / Unicode mosaics
+rendered as 24-bit colour braille or glow ASCII
 
 USAGE:
   ytui                          open Home
@@ -40,12 +34,6 @@ USAGE:
   ytui URL                      open a video, playlist or channel URL
   ytui --snapshot SRC [--at SECONDS] [--cols N --rows N]
                                 print one rendered frame (SRC = URL or file)
-  ytui --snapshot-ans SRC [-o FILE] [--at SECONDS] [--cols N --rows N]
-                                save a frame as ANSI art (.ANS with SAUCE)
-  ytui --convert-ans FILE [-o FILE]
-                                re-encode ANSI art (normalise, or fix iCE)
-  ytui --view-ans FILE
-                                play ANSI art in the terminal, as-is
   ytui --import-subs FILE       import a Google Takeout subscriptions.csv
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
@@ -55,12 +43,10 @@ USAGE:
                                 your browser's cookie extension, ytui does the rest
   ytui --signout-cookies        forget those cookies
   ytui --help-cookies           more about that
-  ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
   ytui --uninstall [--yes]      sign out and remove ytui, its settings and data
 
 OPTIONS:
-  --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock |
-                 braille | ansi | ansi9 | ansi-16 | ansi9-16 | ansiblink
+  --mode M       braille | glow (default braille)
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --fullscreen   start the player fullscreen
@@ -68,28 +54,15 @@ OPTIONS:
   --height N     max stream height to fetch (default 720, the lowest height
                  YouTube serves at 60 fps)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
-  --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
-  --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
-  --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
-  --gfx-px N     longest edge of pixel images (default 960 over SSH, 1920 locally)
   --cookies FILE cookies.txt for yt-dlp (default: cookies.txt in the config
                  directory, if present; see --help-cookies)
   --cookies-from-browser B  read cookies from browser B (firefox works; Chrome
                  and Edge usually can't be read while running)
-  --sixel-colors N  colours per sixel video frame, 2-255 (default 255; 64 is
-                 ~40% faster to send but posterises soft shading)
-  -o, --out FILE  output path for --snapshot-ans / --convert-ans
-  --no-ice        write ANSI art with the background high bit as blink
-                  (8 backgrounds) instead of iCE colours (16)
-  --compact       write CR/LF-separated rows instead of absolute cursor
-                  moves: smaller files, but clients that wrap at column 80
-                  will band them
-  --bits N        8 or 9: cell width in dots when writing ANSI art. 9 repeats
-                  the last column of block characters, as real text mode does
-  --palette       write 16-colour ANSI art instead of 24-bit (much smaller)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
+
+Glow and braille follow react-video-ascii by Lucas Jin (MIT); see NOTICE.
 ";
 
 fn main() -> Result<()> {
@@ -117,28 +90,14 @@ fn main() -> Result<()> {
     let mut fullscreen = false;
     let mut max_h: Option<u32> = None;
     let mut snapshot: Option<String> = None;
-    let mut snapshot_ans: Option<String> = None;
-    let mut convert_ans: Option<String> = None;
-    let mut view_ans: Option<String> = None;
-    let mut out_path: Option<String> = None;
-    let mut ans_ice = true;
-    let mut ans_compact = false;
-    let mut ans_bits: usize = 8;
-    let mut ans_truecolor = true;
     let mut bench: Option<String> = None;
     let mut bench_render: Option<String> = None;
     let mut secs = 8.0;
     let mut import: Option<String> = None;
     let mut login = false;
-    let mut demo: Option<String> = None;
     let mut client: Option<String> = None;
     let mut at = 0.0;
     let mut exposure = true;
-    let mut gfx_mode = std::env::var("YTUI_GFX").unwrap_or_else(|_| "auto".into());
-    let mut gfx_fps: Option<f32> = None;
-    let mut gfx_px: Option<usize> = None;
-    let mut sixel_colors: Option<usize> = None;
-    let mut colors = std::env::var("YTUI_COLORS").unwrap_or_else(|_| "auto".into());
     let (mut scols, mut srows) = (None, None);
     let mut query = Vec::new();
     let mut cookies: Option<String> = std::env::var("YTUI_COOKIES").ok();
@@ -169,20 +128,6 @@ fn main() -> Result<()> {
             "--fullscreen" => fullscreen = true,
             "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),
-            "--snapshot-ans" => snapshot_ans = Some(val("--snapshot-ans")?),
-            "--convert-ans" => convert_ans = Some(val("--convert-ans")?),
-            "--view-ans" => view_ans = Some(val("--view-ans")?),
-            "-o" | "--out" => out_path = Some(val("--out")?),
-            "--no-ice" => ans_ice = false,
-            "--compact" => ans_compact = true,
-            "--truecolor" | "--24bit" => ans_truecolor = true,
-            "--palette" | "--no-truecolor" => ans_truecolor = false,
-            "--bits" => {
-                ans_bits = val("--bits")?.parse()?;
-                if ans_bits != 8 && ans_bits != 9 {
-                    bail!("--bits must be 8 or 9");
-                }
-            }
             "--bench" => bench = Some(val("--bench")?),
             "--bench-render" => {
                 let src = val("--bench-render")?;
@@ -191,7 +136,6 @@ fn main() -> Result<()> {
             "--seconds" => secs = val("--seconds")?.parse()?,
             "--import-subs" => import = Some(val("--import-subs")?),
             "--login" => login = true,
-            "--demo3d" => demo = Some(args.next().unwrap_or_default()),
             "--client" => client = Some(val("--client")?),
             "--logout" => return auth::logout(),
             "--uninstall" => return uninstall::run(args.any(|a| a == "--yes" || a == "-y")),
@@ -231,11 +175,6 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--at" => at = val("--at")?.parse()?,
-            "--gfx" => gfx_mode = val("--gfx")?,
-            "--colors" => colors = val("--colors")?,
-            "--gfx-fps" => gfx_fps = Some(val("--gfx-fps")?.parse()?),
-            "--gfx-px" => gfx_px = Some(val("--gfx-px")?.parse()?),
-            "--sixel-colors" => sixel_colors = Some(val("--sixel-colors")?.parse()?),
             "--exposure" => exposure = !matches!(val("--exposure")?.as_str(), "off" | "no" | "0" | "false"),
             "--cols" => scols = Some(val("--cols")?.parse()?),
             "--rows" => srows = Some(val("--rows")?.parse()?),
@@ -260,20 +199,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Art));
-
-    if let (Some(d), Ok(path)) = (&demo, std::env::var("YTUI_3D_DUMP")) {
-        let kind = scenes::Kind::parse(d).unwrap_or(scenes::Kind::Logo);
-        let t = std::env::var("YTUI_3D_T").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
-        return demo::dump(kind, t, 1080, 588, &path);
-    }
-    if let Some(d) = demo {
-        let kind = scenes::Kind::parse(&d).unwrap_or(scenes::Kind::Logo);
-        if mode.is_none() {
-            renderer.mode = Mode::Classic;
-        }
-        return demo::run(kind, renderer);
-    }
+    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Braille));
 
     if let Some(src) = bench_render {
         return bench::render(&src, if at > 0.0 { at } else { 60.0 }, scols.unwrap_or(184), srows.unwrap_or(39), max_h.unwrap_or(480));
@@ -281,27 +207,6 @@ fn main() -> Result<()> {
 
     if let Some(src) = bench {
         return bench::run(&src, secs, Opts { audio, fps }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
-    }
-
-    if let Some(path) = view_ans {
-        return view_ans_file(&path, ans_ice);
-    }
-
-    // ANSI art output. Both paths return, since neither opens the UI.
-    if convert_ans.is_some() || snapshot_ans.is_some() {
-        let opts = AnsOpts {
-            out: out_path.clone(),
-            ice: if ans_ice { textmode::Ice::On } else { textmode::Ice::Off },
-            ice_forced: !ans_ice,
-            style: if ans_compact { textmode::Style::Compact } else { textmode::Style::Portable },
-            bits: ans_bits,
-            truecolor: ans_truecolor,
-        };
-        if let Some(path) = convert_ans {
-            return write_ans_from_file(&path, &opts);
-        }
-        let src = snapshot_ans.expect("checked above");
-        return write_ans_from_video(&src, at, &opts, exposure, scols, srows, max_h.unwrap_or(480));
     }
 
     if let Some(src) = snapshot {
@@ -329,66 +234,10 @@ fn main() -> Result<()> {
 
     player::clean_stale_fifos();
     let mut hints: Vec<String> = Vec::new();
-    // Ask the terminal about pixel graphics before the UI takes it over.
-    let gfx = match gfx_mode.as_str() {
-        "off" | "none" | "no" => None,
-        m => {
-            let caps = gfx::detect();
-            hints = caps.why_not().into_iter().collect();
-            let proto = match m {
-                "kitty" => Some(gfx::Proto::Kitty),
-                "sixel" => Some(gfx::Proto::Sixel),
-                _ => caps.choose(),
-            };
-            proto.map(|p| {
-                let mut g = gfx::Gfx::new(p, &caps);
-                if let Some(f) = gfx_fps {
-                    g.max_fps = f;
-                }
-                if let Some(px) = gfx_px {
-                    g.max_px = px.max(64);
-                }
-                if let Some(c) = sixel_colors {
-                    g.video_colors = c.clamp(2, 255);
-                }
-                g
-            })
-        }
-    };
-    let p256 = match colors.as_str() {
-        "256" => true,
-        "true" | "truecolor" | "24bit" => false,
-        _ => gfx::tmux_lacks_rgb(),
-    };
-    render::PALETTE_256.store(p256, std::sync::atomic::Ordering::Relaxed);
-    if p256 && colors == "auto" {
-        hints.insert(0, "tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
-    }
-    // The mosaic modes emit Unicode that a monospace font is not obliged to
-    // have. Every font path we probe lacks braille and sextant, so say so
-    // rather than let the user pick a mode that draws nothing but boxes.
-    {
-        let cov = glyphs::Glyphs::coverage();
-        let missing: Vec<&str> = [
-            ("sextant", cov.sextant),
-            ("braille", cov.braille),
-        ]
-        .iter()
-        .filter(|(_, ok)| !ok)
-        .map(|(name, _)| *name)
-        .collect();
-        if !missing.is_empty() {
-            hints.insert(
-                0,
-                format!(
-                    "your font has no {} glyphs: set YTUI_FONT to a font that does",
-                    missing.join(" or ")
-                ),
-            );
-        }
+    if tmux_lacks_rgb() {
+        hints.push("tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
     }
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
-    app.set_gfx(gfx);
     if let Some(h) = hints.last() {
         app.hint(h.clone());
     }
@@ -408,15 +257,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(buf))?;
     app.set_fullscreen(fullscreen);
     if let Some(q) = start {
-        // `ytui art.ans` shows the art; anything else goes through search and
-        // URL resolution as before.
-        if q.to_ascii_lowercase().ends_with(".ans") && std::path::Path::new(&q).is_file() {
-            if let Err(e) = app.open_art(&q) {
-                bail!("{e}");
-            }
-        } else {
-            app.open_query(&q);
-        }
+        app.open_query(&q);
     }
     let res = app.run(&mut terminal, &out, rx);
     out.drain();
@@ -425,185 +266,15 @@ fn main() -> Result<()> {
     res
 }
 
-/// How to write ANSI art, from the command line.
-struct AnsOpts {
-    out: Option<String>,
-    ice: textmode::Ice,
-    /// Did the user actually pass --no-ice, or is `ice` just the default?
-    ice_forced: bool,
-    style: textmode::Style,
-    bits: usize,
-    /// Write 24-bit colour into the file as PabloDraw sequences.
-    truecolor: bool,
-}
-
-impl AnsOpts {
-    fn write_opts(&self) -> textmode::WriteOpts {
-        textmode::WriteOpts {
-            style: self.style,
-            ice: self.ice,
-            sauce: true,
-            bits: self.bits,
-            truecolor: self.truecolor,
-        }
-    }
-}
-
-/// Write bytes to `out`, or to stdout when there is no path.
-fn emit(bytes: &[u8], out: &Option<String>) -> Result<()> {
-    match out {
-        Some(p) => {
-            std::fs::write(p, bytes)?;
-            eprintln!("wrote {p} ({} bytes)", bytes.len());
-        }
-        None => {
-            use std::io::Write;
-            std::io::stdout().write_all(bytes)?;
-        }
-    }
-    Ok(())
-}
-
-/// Re-encode an existing `.ANS`: parse it, then write it back out.
-///
-/// Useful for normalising a file (absolute row placement, a fresh SAUCE) and
-/// for re-reading art whose iCE bit the file got wrong, with `--no-ice`.
-fn write_ans_from_file(path: &str, opts: &AnsOpts) -> Result<()> {
-    let data = std::fs::read(path)
-        .map_err(|e| anyhow::anyhow!("cannot read {path}: {e}"))?;
-    let mut art = textmode::read_ansi(
-        &data,
-        textmode::ReadOpts { ice: opts.ice, width: None, use_sauce: true },
-    );
-    // Re-encode with the file's own iCE answer unless the caller insisted.
-    // Otherwise `--convert-ans` would silently flip a file's background
-    // interpretation, which is exactly what it is often used to check.
-    let mut wo = opts.write_opts();
-    if let (false, Some(s)) = (opts.ice_forced, art.sauce.as_ref()) {
-        wo.ice = if s.ice() { textmode::Ice::On } else { textmode::Ice::Off };
-    }
-    if art.sauce.is_none() {
-        // Give the output a record even if the input had none, so the result
-        // is a well-formed art file.
-        art.sauce = Some(textmode::Sauce {
-            title: std::path::Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            ..Default::default()
-        });
-    }
-    let bytes = textmode::write_ansi(&art, wo);
-    if let Some(s) = &art.sauce {
-        eprintln!(
-            "{}x{} · {} · iCE {} · font {}",
-            art.cols,
-            art.rows,
-            if s.title.is_empty() { "(untitled)" } else { &s.title },
-            if s.ice() { "on" } else { "off" },
-            s.font
-        );
-    }
-    emit(&bytes, &opts.out)
-}
-
-/// Grab one frame of a video and save it as ANSI art.
-fn write_ans_from_video(
-    src: &str,
-    at: f64,
-    opts: &AnsOpts,
-    exposure: bool,
-    scols: Option<usize>,
-    srows: Option<usize>,
-    max_h: u32,
-) -> Result<()> {
-    let (_tc, _tr) = crossterm::terminal::size()
-        .map(|(c, r)| (c as usize, r as usize))
-        .unwrap_or((textmode::SCREEN_COLS, textmode::SCREEN_ROWS + 1));
-    let (input, aspect) = if std::path::Path::new(src).exists() {
-        (src.to_string(), 16.0 / 9.0)
-    } else {
-        let s = yt::resolve(src, max_h)?;
-        (s.video_url, s.aspect)
-    };
-    // Art was drawn to 80x25, and cells are 8x16 dots, so the picture is
-    // 640x400 unless the caller says otherwise.
-    let cols = scols.unwrap_or(textmode::SCREEN_COLS);
-    let rows = srows.unwrap_or(textmode::SCREEN_ROWS);
-    let mut px = player::grab_frame(&input, at, cols * 8, rows * textmode::GLYPH_H)
-        .ok_or_else(|| anyhow::anyhow!("could not decode a frame"))?;
-    let mut ae = render::Exposure::new(exposure);
-    ae.measure(&px, 1.0);
-    ae.apply(&mut px);
-
-    let art = if opts.truecolor {
-        textmode::from_image_rgb(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.bits)
-    } else {
-        textmode::from_image(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.ice, textmode::Rgb::Vga, opts.bits)
-    };
-    let bytes = textmode::write_ansi(&art, opts.write_opts());
-    eprintln!(
-        "{}x{} cells, {} bytes, {}",
-        art.cols,
-        art.rows,
-        bytes.len(),
-        if opts.truecolor {
-            "24-bit colour".to_string()
-        } else {
-            format!("16 colours, iCE {}", if opts.ice == textmode::Ice::On { "on" } else { "off" })
-        }
-    );
-    let _ = aspect;
-    emit(&bytes, &opts.out)
-}
-
-/// Show an ANSI art file on the terminal, exactly as its author drew it.
-///
-/// This is the "just look at it" path: the file is emitted with its own
-/// attributes preserved, so the terminal does the rendering and what you see
-/// is what the art says, not our interpretation of it.
-fn view_ans_file(path: &str, ice_flag: bool) -> Result<()> {
-    let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot read {path}: {e}"))?;
-    let art = textmode::read_ansi(
-        &data,
-        textmode::ReadOpts {
-            ice: if ice_flag { textmode::Ice::On } else { textmode::Ice::Off },
-            width: None,
-            use_sauce: true,
-        },
-    );
-    if let Some(s) = &art.sauce {
-        eprintln!(
-            "{}{}{} · {}x{} · iCE {}",
-            if s.title.is_empty() { "(untitled)".to_string() } else { s.title.clone() },
-            if s.author.is_empty() { String::new() } else { format!(" by {}", s.author) },
-            if s.group.is_empty() { String::new() } else { format!(" of {}", s.group) },
-            art.cols,
-            art.rows,
-            if s.ice() { "on" } else { "off" },
-        );
-    }
-    // Re-emit through the encoder so what appears is normalised (absolute row
-    // placement, no reliance on the terminal's own wrapping) rather than the
-    // original byte soup, which may assume a specific client.
-    let bytes = textmode::write_ansi(
-        &art,
-        textmode::WriteOpts {
-            style: textmode::Style::Portable,
-            ice: if sweet_ice(&art, ice_flag) { textmode::Ice::On } else { textmode::Ice::Off },
-            sauce: false,
-            bits: 8,
-            truecolor: false,
-        },
-    );
-    emit(&bytes, &None)
-}
-
-/// Which iCE answer to use for a file: its own SAUCE flag if it has one,
-/// otherwise the caller's.
-fn sweet_ice(art: &textmode::Art, fallback: bool) -> bool {
-    match &art.sauce {
-        Some(s) if s.datatype == 1 => s.ice(),
-        _ => fallback,
-    }
+/// tmux drawing to a terminal it doesn't know does 24-bit colour: it then
+/// rounds every colour to the 256-colour palette.
+fn tmux_lacks_rgb() -> bool {
+    std::env::var_os("TMUX").is_some()
+        && std::process::Command::new("tmux")
+            .args(["display-message", "-p", "#{client_termfeatures}"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .is_some_and(|f| !f.is_empty() && !f.split(',').any(|x| x == "RGB"))
 }

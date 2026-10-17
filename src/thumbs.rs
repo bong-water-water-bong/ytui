@@ -1,8 +1,8 @@
 //! Background image loader (thumbnails, avatars, banners) plus a cache of
-//! images already converted to terminal cells for a given size and mode.
+//! images already converted to terminal cells for a given size.
 
 use crate::glyphs::{CH, CW};
-use crate::render::{Cell, Img, Mode, Renderer};
+use crate::render::{Cell, Img, Renderer};
 use image::imageops::FilterType;
 use image::RgbImage;
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ enum Slot {
 pub struct Thumbs {
     images: Arc<Mutex<HashMap<String, Slot>>>,
     tx: Sender<String>,
-    cells: HashMap<(String, u16, u16, Mode), Vec<Cell>>,
+    cells: HashMap<(String, u16, u16), Vec<Cell>>,
 }
 
 impl Thumbs {
@@ -68,30 +68,15 @@ impl Thumbs {
         }
     }
 
-    /// RGB pixels for `url` cropped to fill exactly pw x ph (None while loading).
-    pub fn pixels(&self, url: &str, pw: usize, ph: usize) -> Option<Vec<u8>> {
-        let img = self.image(url)?;
-        Some(cover(&img, pw as u32, ph as u32).into_raw())
-    }
-
     /// Cells for `url` cropped to fill w x h cells, or None while loading.
-    pub fn cells(&mut self, url: &str, w: u16, h: u16, r: &mut Renderer) -> Option<&Vec<Cell>> {
-        // Small images read best as mosaics; follow the user's mode only when
-        // it is itself a mosaic (e.g. quadrant for fonts without sextants).
-        // Half blocks render in every font (sextant glyphs are missing from many).
-        let mode = match r.mode {
-            Mode::Art | Mode::Ascii | Mode::Classic => Mode::HalfBlock,
-            m => m,
-        };
-        let key = (url.to_string(), w, h, mode);
+    pub fn cells(&mut self, url: &str, w: u16, h: u16) -> Option<&Vec<Cell>> {
+        let key = (url.to_string(), w, h);
         if !self.cells.contains_key(&key) {
             let img = self.image(url)?;
             let (pw, ph) = (w as u32 * CW as u32, h as u32 * CH as u32);
             let scaled = cover(&img, pw, ph);
             let mut out = Vec::new();
-            let saved = std::mem::replace(&mut r.mode, mode);
-            r.render(&Img { w: pw as usize, h: ph as usize, px: scaled.as_raw() }, w as usize, h as usize, &mut out);
-            r.mode = saved;
+            Renderer::thumb(&Img { w: pw as usize, h: ph as usize, px: scaled.as_raw() }, w as usize, h as usize, &mut out);
             if self.cells.len() > 500 {
                 self.cells.clear();
             }

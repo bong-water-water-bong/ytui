@@ -90,11 +90,7 @@ struct Shared {
     done: AtomicBool,
     err: Mutex<String>,
     audio_failed: AtomicBool,
-    /// Newest mono samples (48 kHz) for the visualiser.
-    pcm: Mutex<std::collections::VecDeque<f32>>,
 }
-
-const PCM_KEEP: usize = 4096;
 
 pub use crate::sys::die_with_parent;
 use crate::sys::on_path;
@@ -232,9 +228,8 @@ impl Drop for Decoder {
 /// Volume as f32 bits, shared with the audio thread.
 pub type Volume = Arc<AtomicU32>;
 
-/// Read PCM from the fifo, keep a copy for the visualiser, scale by the
-/// volume, feed the sink (if any). If the sink dies, keep draining so video
-/// carries on.
+/// Read PCM from the fifo, scale by the volume, feed the sink. If the sink
+/// dies, keep draining so video carries on.
 fn audio_pump(fifo: Arc<PcmPipe>, sink: Option<Command>, vol: Volume, sh: Arc<Shared>) {
     std::thread::spawn(move || {
         let Some(mut f) = fifo.open() else { return };
@@ -245,17 +240,6 @@ fn audio_pump(fifo: Arc<PcmPipe>, sink: Option<Command>, vol: Volume, sh: Arc<Sh
         }
         let mut buf = vec![0u8; 4096];
         while f.read_exact(&mut buf).is_ok() {
-            {
-                let mut pcm = sh.pcm.lock().unwrap();
-                for fr in buf.chunks_exact(4) {
-                    let l = i16::from_le_bytes([fr[0], fr[1]]) as f32;
-                    let r = i16::from_le_bytes([fr[2], fr[3]]) as f32;
-                    pcm.push_back((l + r) / 65536.0);
-                }
-                while pcm.len() > PCM_KEEP {
-                    pcm.pop_front();
-                }
-            }
             let g = f32::from_bits(vol.load(Ordering::Relaxed));
             if (g - 1.0).abs() > 1e-3 {
                 for s in buf.chunks_exact_mut(2) {
@@ -295,9 +279,8 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         cmd.args(["-readrate", "1", "-i", &crate::proxy::wrap(url)]);
     };
     input(&mut cmd, &s.video_url);
-    // Audio is always decoded when the stream has it: played through the
-    // sink, or (sound off) only analysed for the visualiser.
     let audio_map = match &s.audio_url {
+        _ if opts.audio == Audio::None => None,
         Some(a) => {
             input(&mut cmd, a);
             Some("1:a:0")
@@ -312,14 +295,13 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
     if let Some(m) = audio_map {
         cmd.args(["-map", m]);
         let player = sink_cmd(opts.audio);
-        let raw_ok = player.is_some() || opts.audio == Audio::None;
-        match (raw_ok, PcmPipe::new()) {
+        match (player.is_some(), PcmPipe::new()) {
             (true, Some(f)) => {
                 cmd.args(["-f", "s16le", "-ac", "2", "-ar", "48000", "-y"]).arg(f.target());
                 sink = player;
                 fifo = Some(Arc::new(f));
             }
-            _ if opts.audio == Audio::None || cfg!(windows) => {
+            _ if cfg!(windows) => {
                 // (Windows ffmpeg has no audio output device of its own.)
                 cmd.args(["-f", "null", "-"]);
             }
@@ -342,7 +324,6 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         done: AtomicBool::new(false),
         err: Mutex::new(String::new()),
         audio_failed: AtomicBool::new(false),
-        pcm: Mutex::new(std::collections::VecDeque::with_capacity(PCM_KEEP)),
     });
     if let Some(f) = &fifo {
         audio_pump(f.clone(), sink, vol.clone(), sh.clone());
@@ -396,10 +377,6 @@ pub struct Player {
     pub exposure: Exposure,
     /// Frame number the exposure was last measured on.
     exp_seen: u64,
-    /// Decoded pixels per terminal cell (6x12 for glyphs; more for pixel
-    /// graphics backends).
-    px_cell: (f32, f32),
-    pix: Vec<u8>,
     fps_win: (Instant, u32),
     pub fps: f64,
     /// Selected caption track (index into stream.subs).
@@ -435,8 +412,6 @@ impl Player {
             cells: Vec::new(),
             exposure: Exposure::new(exposure),
             exp_seen: u64::MAX,
-            px_cell: (CW as f32, CH as f32),
-            pix: Vec::new(),
             fps_win: (Instant::now(), 0),
             fps: 0.0,
             cc: None,
@@ -464,10 +439,10 @@ impl Player {
         self.dec.is_some() && !self.paused && !self.ended
     }
 
-    /// Decode size in pixels for the current terminal and cell size.
+    /// Decode size in pixels for the current terminal.
     fn decode_size(&self) -> (usize, usize) {
         let (w, h, _, _) = fit(self.stream.aspect, self.term.0, self.term.1);
-        (((w as f32 * self.px_cell.0) as usize).max(2) & !1, ((h as f32 * self.px_cell.1) as usize).max(2) & !1)
+        ((w * CW).max(2) & !1, (h * CH).max(2) & !1)
     }
 
     fn restart(&mut self) {
@@ -540,35 +515,6 @@ impl Player {
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
         self.apply_volume();
-    }
-
-    /// Decode at this many pixels per terminal cell (restarts if changed).
-    pub fn set_px_cell(&mut self, px: (f32, f32)) {
-        if (self.px_cell.0 - px.0).abs() > 0.01 || (self.px_cell.1 - px.1).abs() > 0.01 {
-            self.px_cell = px;
-            self.respawn();
-        }
-    }
-
-    /// The current frame at decoded resolution with auto-exposure applied,
-    /// plus its frame number: (rgb, w, h, seq).
-    pub fn pixels(&mut self) -> Option<(&[u8], usize, usize, u64)> {
-        if self.fw == 0 || self.frame.len() != self.fw * self.fh * 3 {
-            return None;
-        }
-        if self.exposure.on && self.seen != self.exp_seen {
-            self.exposure.measure(&self.frame, 0.15);
-            self.exp_seen = self.seen;
-        }
-        self.pix.clear();
-        self.pix.extend_from_slice(&self.frame);
-        self.exposure.apply(&mut self.pix);
-        Some((&self.pix, self.fw, self.fh, self.seen))
-    }
-
-    /// Newest mono samples for the visualiser (empty when there's no audio).
-    pub fn samples(&self) -> Vec<f32> {
-        self.dec.as_ref().map(|d| d.sh.pcm.lock().unwrap().iter().copied().collect()).unwrap_or_default()
     }
 
     pub fn set_term(&mut self, cols: usize, rows: usize) {
@@ -760,10 +706,7 @@ impl Player {
             downsample(&self.frame, self.fw, self.fh, tw, th, &mut self.scratch);
         }
         self.exposure.apply(&mut self.scratch);
-        // Video: keep art-mode characters steady between frames.
-        r.temporal = true;
         r.render(&Img { w: tw, h: th, px: &self.scratch }, cw, ch, &mut self.cells);
-        r.temporal = false;
         Some((&self.cells, cw, ch, x0, y0))
     }
 }

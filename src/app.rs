@@ -6,10 +6,6 @@
 use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
 use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
-use crate::engine3d::Engine;
-use crate::gfx::{Gfx, Key as GKey, Proto};
-use crate::glyphs::{CH as GH, CW as GW};
-use crate::scenes::{Analyzer, Kind as SceneKind, Orbit, Scenes};
 use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Mode, Renderer};
@@ -213,22 +209,8 @@ pub struct App {
     auth: Option<Arc<Auth>>,
     compose: Option<Compose>,
     dialog: Option<Dialog>,
-    /// 3D audio visualiser instead of the video picture.
-    viz: bool,
-    engine3d: Engine,
-    scenes: Scenes,
-    analyzer: Analyzer,
-    viz_cells: Vec<Cell>,
-    viz_last: Instant,
-    t0: Instant,
-    /// Pixel graphics backend (kitty / sixel), if the terminal has one.
-    gfx: Option<Gfx>,
-    /// Bytes for the backend to write after the current frame.
-    gfx_out: Vec<u8>,
-    /// Frame counter for animated pixel images (3D scenes).
-    gfx_seq: u64,
-    /// Graphics just toggled: clear the screen (and kitty images).
-    gfx_reset: bool,
+    /// Bytes to write after the current frame.
+    frame_out: Vec<u8>,
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
@@ -277,21 +259,9 @@ impl App {
         self.fs_on_play = on;
     }
 
-    pub fn set_gfx(&mut self, g: Option<Gfx>) {
-        if let Some(g) = &g {
-            self.flash(format!("pixel graphics: {} (G switches to characters)", g.proto.name()));
-        }
-        self.gfx = g;
-    }
-
     /// Show a startup hint in the status bar (longer than a normal flash).
     pub fn hint(&mut self, msg: String) {
         self.status = (msg, Instant::now() + Duration::from_secs(8));
-    }
-
-    /// Pixel backend, when present and switched on.
-    fn gfx_active(&self) -> bool {
-        self.gfx.is_some() && self.store.gfx
     }
 
     pub fn new(mut renderer: Renderer, opts: Opts, max_h: Option<u32>, mode_forced: bool) -> (App, Receiver<Msg>) {
@@ -309,7 +279,7 @@ impl App {
         renderer.bright = store.look_bright;
         renderer.sat = store.look_sat;
         renderer.bg_level = store.look_bg;
-        renderer.glob_exp = store.look_contrast;
+        renderer.contrast = store.look_contrast;
         let app = App {
             api: Arc::new(Api::new()),
             tx,
@@ -331,17 +301,7 @@ impl App {
             auth: Auth::load().map(Arc::new),
             compose: None,
             dialog: None,
-            viz: false,
-            engine3d: Engine::new(),
-            scenes: Scenes::new(),
-            analyzer: Analyzer::default(),
-            viz_cells: Vec::new(),
-            viz_last: Instant::now(),
-            t0: Instant::now(),
-            gfx: None,
-            gfx_out: Vec::new(),
-            gfx_seq: 0,
-            gfx_reset: false,
+            frame_out: Vec::new(),
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
@@ -371,20 +331,6 @@ impl App {
     fn mk(&mut self, kind: Kind) -> Page {
         self.next_uid += 1;
         Page::new(self.next_uid, kind)
-    }
-
-    /// Open an ANSI art file as the current tab's page.
-    ///
-    /// Art is not fetched from anywhere and has nothing to load, so unlike the
-    /// YouTube pages this is synchronous: parse, convert to cells, show it.
-    pub fn open_art(&mut self, path: &str) -> Result<(), String> {
-        let art = page::ArtPage::load(path)?;
-        let page = self.mk(Kind::Art(Box::new(art)));
-        let t = &mut self.tabs[self.cur];
-        t.pages.push(page);
-        t.idx = t.pages.len() - 1;
-        self.dirty = true;
-        Ok(())
     }
 
     fn tab(&self) -> &Tab {
@@ -1826,11 +1772,6 @@ impl App {
     // ------------------------------------------------------------ input
 
     fn on_event(&mut self, ev: Event) {
-        if matches!(ev, Event::Resize(..)) {
-            if let Some(g) = &mut self.gfx {
-                g.force = true;
-            }
-        }
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(t) => {
@@ -1895,7 +1836,7 @@ impl App {
             1 => self.renderer.bright,
             2 => self.renderer.sat,
             3 => self.renderer.bg_level,
-            4 => self.renderer.glob_exp,
+            4 => self.renderer.contrast,
             _ => 0.0,
         }
     }
@@ -1908,7 +1849,7 @@ impl App {
             1 => (self.renderer.bright, self.store.look_bright) = (v, v),
             2 => (self.renderer.sat, self.store.look_sat) = (v, v),
             3 => (self.renderer.bg_level, self.store.look_bg) = (v, v),
-            4 => (self.renderer.glob_exp, self.store.look_contrast) = (v, v),
+            4 => (self.renderer.contrast, self.store.look_contrast) = (v, v),
             _ => return,
         }
         self.store.touch();
@@ -1925,18 +1866,6 @@ impl App {
                 self.renderer.mode = all[((at + dir as isize).rem_euclid(n)) as usize];
                 self.store.mode = Some(self.renderer.mode.name().into());
                 self.store.touch();
-                // The text-mode modes fit 256 glyphs per cell. Say so when the
-                // terminal is big enough that they will not keep up, rather
-                // than letting the picture crawl and look broken.
-                let (cols, rows) = (self.term.0 as usize, self.term.1 as usize);
-                if self.renderer.mode.too_slow(cols, rows) {
-                    let ms = self.renderer.mode.cost_ms(cols, rows);
-                    self.flash(format!(
-                        "{}: about {:.0} ms a frame at {cols}x{rows} — a smaller window or a mosaic mode will be fluid",
-                        self.renderer.mode.name(),
-                        ms
-                    ));
-                }
             }
             5 => {
                 self.store.exposure = !self.store.exposure;
@@ -1982,7 +1911,6 @@ impl App {
             buf[(xx, r.y + h - 1)].set_char('─').set_style(border);
         }
         buf.set_string(r.x + 2, r.y, " Look ", Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD));
-        let glow = matches!(self.renderer.mode, Mode::Glow);
         let label_w = 15u16;
         let slider_w = w - label_w - 11;
         for (i, &(name, lo, hi, step)) in LOOK_ROWS.iter().enumerate() {
@@ -1997,12 +1925,10 @@ impl App {
             if step > 0.0 {
                 let v = self.look_value(i);
                 let lit = (((v - lo) / (hi - lo)) * slider_w as f32).round() as u16;
-                // Sliders other than contrast only change glow mode.
-                let live = glow || i == 4;
                 for k in 0..slider_w {
                     let c = &mut buf[(sx + k, y)];
                     if k < lit {
-                        c.set_char('█').set_fg(if live { Color::White } else { Color::Rgb(120, 120, 130) });
+                        c.set_char('█').set_fg(Color::White);
                     } else {
                         c.set_char('▁').set_fg(Color::Rgb(90, 90, 100));
                     }
@@ -2017,7 +1943,7 @@ impl App {
             }
             self.geo.look.push((row, slider, i));
         }
-        let hint = if glow { "↑↓ choose · ←→ adjust · click/drag · o close" } else { "switch Mode to glow for the colour sliders" };
+        let hint = "↑↓ choose · ←→ adjust · click/drag · o close";
         buf.set_string(r.x + 2, r.y + h - 2, page::trunc(hint, w as usize - 4), Style::default().fg(DIM).bg(bg));
     }
 
@@ -2431,19 +2357,13 @@ impl App {
             KeyCode::Right if alt => self.forward(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('?') => self.navigate(Kind::Help),
-            KeyCode::Char('o') => {
-                self.look = Some(0);
-                if !matches!(self.renderer.mode, Mode::Glow | Mode::Classic) {
-                    self.flash("brightness, saturation and background apply to glow mode (Mode row)");
-                }
-            }
+            KeyCode::Char('o') => self.look = Some(0),
             KeyCode::Char('m') => {
                 self.renderer.mode = self.renderer.mode.next();
                 self.store.mode = Some(self.renderer.mode.name().into());
                 self.store.touch();
                 self.flash(format!("render mode: {}", self.renderer.mode.name()));
             }
-            KeyCode::Char('B') => self.renderer.ascii_bg = !self.renderer.ascii_bg,
             KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
             KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
             KeyCode::Char('M') => {
@@ -2454,17 +2374,6 @@ impl App {
                 }
             }
             KeyCode::Char('I') => self.open_chat_compose(),
-            KeyCode::Char('G') => {
-                if let Some(g) = &self.gfx {
-                    self.store.gfx = !self.store.gfx;
-                    self.store.touch();
-                    self.gfx_reset = true;
-                    let name = g.proto.name();
-                    self.flash(if self.store.gfx { format!("pixel graphics ({name})") } else { "character rendering".to_string() });
-                } else {
-                    self.flash("this terminal has no kitty or sixel graphics (see --gfx)");
-                }
-            }
             KeyCode::Char('E') => {
                 self.store.exposure = !self.store.exposure;
                 self.store.touch();
@@ -2473,10 +2382,6 @@ impl App {
                     p.exposure.reset();
                 }
                 self.flash(if self.store.exposure { "auto-exposure on" } else { "auto-exposure off" });
-            }
-            KeyCode::Char('V') => {
-                self.viz = !self.viz;
-                self.flash(if self.viz { "3D visualiser on (V to switch back to video)" } else { "video" });
             }
             KeyCode::Char('P') => {
                 let v = match self.focused() {
@@ -2503,10 +2408,8 @@ impl App {
                 self.store_changed();
                 self.flash(if self.store.show_chat { "chat shown" } else { "chat hidden" });
             }
-            KeyCode::Char('[') => self.renderer.glob_exp = (self.renderer.glob_exp - 0.2).max(1.0),
-            KeyCode::Char(']') => self.renderer.glob_exp += 0.2,
-            KeyCode::Char('{') => self.renderer.dir_exp = (self.renderer.dir_exp - 0.25).max(1.0),
-            KeyCode::Char('}') => self.renderer.dir_exp += 0.25,
+            KeyCode::Char('[') => self.set_look(4, self.renderer.contrast - LOOK_ROWS[4].3),
+            KeyCode::Char(']') => self.set_look(4, self.renderer.contrast + LOOK_ROWS[4].3),
             KeyCode::Char('a') => {
                 self.store.autoplay = !self.store.autoplay;
                 self.store_changed();
@@ -2597,17 +2500,10 @@ impl App {
     // ------------------------------------------------------------ drawing
 
     pub fn draw(&mut self, f: &mut Frame) {
-        self.gfx_seq += 1;
         self.draw_ui(f);
         if self.look.is_some() {
             let area = f.area();
             self.draw_look(f.buffer_mut(), area);
-        }
-        if self.gfx_active() {
-            if let Some(g) = &mut self.gfx {
-                let bytes = g.finish(f.buffer_mut());
-                self.gfx_out.extend(bytes);
-            }
         }
     }
 
@@ -2615,18 +2511,8 @@ impl App {
         let area = f.area();
         self.geo = Geo::default();
         self.term = (area.width, area.height);
-        // Decode video at the pixel backend's resolution, or 6x12 per cell for glyphs.
-        let px_cell = match (&self.gfx, self.store.gfx) {
-            (Some(g), true) => {
-                let rows = area.height.saturating_sub(1).max(1);
-                let (pw, ph) = g.px_for(area.width, rows);
-                (pw as f32 / area.width as f32, ph as f32 / rows as f32)
-            }
-            _ => (GW as f32, GH as f32),
-        };
         if let Some(p) = &mut self.player {
             p.set_term(area.width as usize, area.height.saturating_sub(1) as usize);
-            p.set_px_cell(px_cell);
         }
         if area.height < 8 || area.width < 30 {
             f.buffer_mut().set_string(0, 0, "window too small", Style::default());
@@ -2882,8 +2768,6 @@ impl App {
         let scroll = page.scroll;
         let mut player_visible = false;
         let pending_id = self.pending.as_ref().map(|p| p.0.id.clone());
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
         for prim in &doc.prims {
             match prim {
                 Prim::Text { x, y, line } => {
@@ -2904,24 +2788,9 @@ impl App {
                     }
                     let iw = (*iw).min(w.saturating_sub(*x));
                     let sy = *y as i64 - scroll as i64;
-                    let mut placed = false;
-                    if gfx_on {
-                        if let Some(g) = self.gfx.as_mut() {
-                            // Sixel can't have text over it: keep the badge row as text.
-                            let rows = if g.proto == Proto::Sixel && (badge.is_some() || progress.is_some()) && *h > 2 { *h - 1 } else { *h };
-                            if g.proto == Proto::Sixel && rows < *h {
-                                fill(buf, r, r.x + x, sy + rows as i64, iw, 1, Color::Rgb(20, 20, 24));
-                            }
-                            let thumbs = &self.thumbs;
-                            let name = format!("{url}|{iw}x{rows}");
-                            placed = g.place(buf, r, r.x + x, sy, iw, rows, GKey { name: &name, seq: None }, &mut |pw, ph| thumbs.pixels(url, pw, ph));
-                        }
-                    }
-                    if !placed {
-                        match self.thumbs.cells(url, iw, *h, &mut self.renderer) {
-                            Some(cells) => blit(buf, r, r.x + x, sy, cells, iw as usize, *h as usize),
-                            None => fill(buf, r, r.x + x, sy, iw, *h, Color::Rgb(38, 38, 46)),
-                        }
+                    match self.thumbs.cells(url, iw, *h) {
+                        Some(cells) => blit(buf, r, r.x + x, sy, cells, iw as usize, *h as usize),
+                        None => fill(buf, r, r.x + x, sy, iw, *h, Color::Rgb(38, 38, 46)),
                     }
                     let by = *y as i64 + *h as i64 - 1 - scroll as i64;
                     if let Some(p) = progress {
@@ -2952,43 +2821,11 @@ impl App {
                     match mine {
                         Some(p) => {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
-                            let t = self.t0.elapsed().as_secs_f32();
-                            if self.viz && gfx_on {
-                            } else if self.viz && gfx_on {
-                                let samples = p.samples();
-                                let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-                                if let Some(g) = self.gfx.as_mut() {
-                                    g.place(buf, r, r.x + x, sy, pw, *h, GKey { name: "viz-inline", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-                                }
-                            } else if self.viz {
-                                let samples = p.samples();
-                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                            } else if gfx_on && p.pixels().is_some() {
-                                let (px, fw, fh, fseq) = p.pixels().unwrap();
-                                let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, pw as usize, *h as usize);
-                                if let Some(g) = self.gfx.as_mut() {
-                                    g.place(buf, r, r.x + x + ox as u16, sy + oy as i64, cw as u16, ch as u16, GKey { name: "video-inline", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-                                }
-                            } else {
-                                match p.cells(&mut self.renderer, pw as usize, *h as usize) {
-                                    Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
-                                    None => {
-                                        // Connecting: keep the 3D logo spinning until the first frame.
-                                        let t = self.t0.elapsed().as_secs_f32();
-                                        render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                        blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                                        let msg = " Loading video… ";
-                                        let y = sy + *h as i64 - 2;
-                                        if y >= 0 && y < vh as i64 {
-                                            buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-                                        }
-                                    }
-                                }
+                            match p.cells(&mut self.renderer, pw as usize, *h as usize) {
+                                Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
+                                None => center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… "),
                             }
-                            if !self.viz {
-                                draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
-                            }
+                            draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
                             } else if p.ended {
@@ -2998,30 +2835,12 @@ impl App {
                         None => {
                             let loading = pending_id.as_deref() == Some(id.as_str());
                             if loading {
-                                // Spinning 3D logo while the stream resolves.
-                                let t = self.t0.elapsed().as_secs_f32();
-                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                                let msg = " Loading video… ";
-                                let y = sy + *h as i64 - 2;
-                                if y >= 0 && y < vh as i64 {
-                                    buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-                                }
+                                center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
                             } else {
                                 let url = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
                                 let (cw, ch, ox, oy) = fit(16.0 / 9.0, pw as usize, *h as usize);
-                                let mut placed = false;
-                                if gfx_on {
-                                    if let Some(g) = self.gfx.as_mut() {
-                                        let thumbs = &self.thumbs;
-                                        let name = format!("{url}|{cw}x{ch}");
-                                        placed = g.place(buf, r, r.x + x + ox as u16, sy + oy as i64, cw as u16, ch as u16, GKey { name: &name, seq: None }, &mut |tw, th| thumbs.pixels(&url, tw, th));
-                                    }
-                                }
-                                if !placed {
-                                    if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16, &mut self.renderer) {
-                                        blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
-                                    }
+                                if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16) {
+                                    blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
                                 }
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ▶  Enter / click to play ");
                             }
@@ -3072,18 +2891,6 @@ impl App {
                 buf[(r.x + w - 1, r.y + i)].set_char(if on { '┃' } else { '│' }).set_fg(if on { Color::Rgb(140, 140, 150) } else { Color::Rgb(40, 40, 48) });
             }
         }
-        // ANSI art is a cell grid, so it is drawn straight into the buffer
-        // instead of going through the span-based doc layout. Scrolled by the
-        // same `page.scroll` the doc reports.
-        if std::env::var_os("YTUI_ART_DEBUG").is_some() {
-            eprintln!("draw_page: kind={:?} rect=({},{},{}x{})", std::mem::discriminant(&page.kind), r.x, r.y, r.width, r.height);
-        }
-        if let Kind::Art(a) = &page.kind {
-            // `blit` takes `sy` relative to the clip's top, not a screen row.
-            // One row is left for the path line the doc draws.
-            let top = 1 - scroll as i64;
-            blit(buf, r, r.x, top, &a.cells, a.cols, a.rows);
-        }
         player_visible
     }
 
@@ -3098,34 +2905,12 @@ impl App {
         let r = Rect { x: pr.x + pr.width - mw - 1, y: pr.y + pr.height - h, width: mw, height: h };
         fill(buf, pr, r.x.saturating_sub(1).max(pr.x), (r.y - pr.y) as i64, mw + 1, h, Color::Rgb(20, 20, 24));
         fill(buf, r, r.x, 0, mw, vh, Color::Black);
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
-        if self.viz && gfx_on {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, r, r.x, 0, mw, vh, GKey { name: "viz-mini", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-            }
-        } else if self.viz {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, mw as usize, vh as usize, &mut self.viz_cells);
-            blit(buf, r, r.x, 0, &self.viz_cells, mw as usize, vh as usize);
-        } else if gfx_on && p.pixels().is_some() {
-            let (px, fw, fh, fseq) = p.pixels().unwrap();
-            let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, mw as usize, vh as usize);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, r, r.x + ox as u16, oy as i64, cw as u16, ch as u16, GKey { name: "video-mini", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-            }
-        } else if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
+        if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
         }
-        if !self.viz {
-            draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
-        }
+        draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
         // Overlay controls on the video, like YouTube's miniplayer.
         let ctl = Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
         let expand = Rect { x: r.x, y: r.y, width: 4, height: 1 };
@@ -3155,35 +2940,11 @@ impl App {
         let side = self.store.show_chat && self.chat.as_ref().is_some_and(|c| c.video == p.video.id) && area.width >= 100;
         let vw = if side { area.width - 44 } else { area.width };
         let varea = Rect { width: vw, ..area };
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
-        if self.viz && gfx_on {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, varea, area.x, 0, vw, vh, GKey { name: "viz-full", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-            }
-        } else if self.viz {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, vw as usize, vh as usize, &mut self.viz_cells);
-            blit(buf, varea, area.x, 0, &self.viz_cells, vw as usize, vh as usize);
-        } else if gfx_on && p.pixels().is_some() {
-            let (px, fw, fh, fseq) = p.pixels().unwrap();
-            let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, vw as usize, vh as usize);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, varea, area.x + ox as u16, oy as i64, cw as u16, ch as u16, GKey { name: "video-full", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-            }
-        } else {
-            match p.cells(&mut self.renderer, vw as usize, vh as usize) {
-                Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
-                None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
-            }
+        match p.cells(&mut self.renderer, vw as usize, vh as usize) {
+            Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
+            None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
         }
-        if !self.viz {
-            draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
-        }
+        draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
             draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref(), inp);
@@ -3278,14 +3039,6 @@ impl App {
                     self.load_more();
                 }
             }
-            if self.gfx_reset {
-                self.gfx_reset = false;
-                let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
-                out.push(&bytes);
-                terminal.clear()?;
-                out.push(&[]);
-                self.dirty = true;
-            }
             if self.dirty || fresh {
                 last_draw = Instant::now();
                 let t0 = Instant::now();
@@ -3294,18 +3047,17 @@ impl App {
                 }
                 terminal.draw(|f| self.draw(f))?;
                 let t1 = Instant::now();
-                let gfx_bytes = self.gfx_out.len();
                 if sync {
-                    self.gfx_out.extend_from_slice(b"\x1b[?2026l");
+                    self.frame_out.extend_from_slice(b"\x1b[?2026l");
                 }
                 // The whole frame goes out as one write on the output thread;
                 // this waits only for the previous frame to be taken.
-                out.push(&self.gfx_out);
-                self.gfx_out.clear();
+                out.push(&self.frame_out);
+                self.frame_out.clear();
                 self.dirty = false;
                 if let Some(s) = &mut self.stats {
                     let p = self.player.as_ref();
-                    s.frame(t1 - t0, t1.elapsed(), gfx_bytes, p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
+                    s.frame(t1 - t0, t1.elapsed(), p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
                 }
             }
             if last_save.elapsed() > Duration::from_secs(20) {
@@ -3327,65 +3079,9 @@ impl App {
         }
         self.stop();
         self.store.save();
-        let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
-        out.push(&bytes);
         out.drain();
         Ok(())
     }
-}
-
-/// Resample RGB24 to exactly tw x th.
-fn resize(px: &[u8], fw: usize, fh: usize, tw: usize, th: usize) -> Vec<u8> {
-    if (fw, fh) == (tw, th) {
-        return px.to_vec();
-    }
-    let mut out = Vec::new();
-    crate::player::downsample(px, fw, fh, tw, th, &mut out);
-    out
-}
-
-/// Render a 3D scene straight to pixels (for the pixel backends).
-#[allow(clippy::too_many_arguments)]
-fn viz_rgb(engine: &mut Engine, scenes: &Scenes, analyzer: &mut Analyzer, samples: &[f32], kind: SceneKind, t: f32, last: &mut Instant, w: usize, h: usize) -> Vec<u8> {
-    let dt = last.elapsed().as_secs_f32().clamp(0.0, 0.2);
-    *last = Instant::now();
-    analyzer.update(samples, dt);
-    let bands: &[f32] = if samples.is_empty() { &[] } else { &analyzer.bands };
-    let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
-    engine.render(&scene, &cam, w, h).to_vec()
-}
-
-/// Render a 3D scene into `out` (w x h cells) through the glyph renderer,
-/// with settings suited to 3D (dark crush, colour-value density, classic
-/// ASCII in place of the two-tone mode).
-#[allow(clippy::too_many_arguments)]
-fn render_viz(
-    engine: &mut Engine,
-    scenes: &Scenes,
-    analyzer: &mut Analyzer,
-    r: &mut Renderer,
-    samples: &[f32],
-    kind: SceneKind,
-    t: f32,
-    last: &mut Instant,
-    w: usize,
-    h: usize,
-    out: &mut Vec<Cell>,
-) {
-    let dt = last.elapsed().as_secs_f32().clamp(0.0, 0.2);
-    *last = Instant::now();
-    analyzer.update(samples, dt);
-    let bands: &[f32] = if samples.is_empty() { &[] } else { &analyzer.bands };
-    let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
-    let px = engine.render(&scene, &cam, w * GW, h * GH);
-    let saved = (r.mode, r.black, r.value_density);
-    if matches!(r.mode, Mode::Ascii | Mode::Art) {
-        r.mode = Mode::Classic;
-    }
-    r.black = 0.2;
-    r.value_density = true;
-    r.render(&crate::render::Img { w: w * GW, h: h * GH, px }, w, h, out);
-    (r.mode, r.black, r.value_density) = saved;
 }
 
 fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize, h: usize) {
@@ -3400,14 +3096,7 @@ fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize,
                 break;
             }
             let c = cells[yy * w + xx];
-            let (fg, bg) = if crate::render::PALETTE_256.load(std::sync::atomic::Ordering::Relaxed) {
-                // fg and bg are the top and bottom pixel rows of mosaic cells.
-                let (sx, sy) = (cx as usize, 2 * (clip.y as usize + y as usize));
-                (Color::Indexed(crate::render::xterm256(c.fg, sx, sy)), Color::Indexed(crate::render::xterm256(c.bg, sx, sy + 1)))
-            } else {
-                (Color::Rgb(c.fg[0], c.fg[1], c.fg[2]), Color::Rgb(c.bg[0], c.bg[1], c.bg[2]))
-            };
-            buf[(cx, clip.y + y as u16)].set_char(c.ch).set_fg(fg).set_bg(bg);
+            buf[(cx, clip.y + y as u16)].set_char(c.ch).set_fg(Color::Rgb(c.fg[0], c.fg[1], c.fg[2])).set_bg(Color::Rgb(c.bg[0], c.bg[1], c.bg[2]));
         }
     }
 }
@@ -3433,33 +3122,30 @@ struct Stats {
     since: Instant,
     n: u32,
     draw: Duration,
-    gfx: Duration,
-    gfx_max: Duration,
-    bytes: usize,
+    write: Duration,
+    write_max: Duration,
 }
 
 impl Stats {
     fn new(path: String) -> Stats {
         let _ = std::fs::write(&path, "");
-        Stats { path, since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+        Stats { path, ..Stats::new_keep() }
     }
 
-    fn frame(&mut self, draw: Duration, gfx: Duration, bytes: usize, decoded_fps: f64, pos: f64, dbg: String) {
+    fn frame(&mut self, draw: Duration, write: Duration, decoded_fps: f64, pos: f64, dbg: String) {
         self.n += 1;
         self.draw += draw;
-        self.gfx += gfx;
-        self.gfx_max = self.gfx_max.max(gfx);
-        self.bytes += bytes;
+        self.write += write;
+        self.write_max = self.write_max.max(write);
         let el = self.since.elapsed().as_secs_f64();
         if el >= 1.0 {
             let n = self.n.max(1) as f64;
             let line = format!(
-                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  gfx write {:6.2} ms (max {:6.1})  gfx {:7.1} KB/frame  {dbg}\n",
+                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  write {:6.2} ms (max {:6.1})  {dbg}\n",
                 self.n as f64 / el,
                 self.draw.as_secs_f64() * 1000.0 / n,
-                self.gfx.as_secs_f64() * 1000.0 / n,
-                self.gfx_max.as_secs_f64() * 1000.0,
-                self.bytes as f64 / n / 1024.0
+                self.write.as_secs_f64() * 1000.0 / n,
+                self.write_max.as_secs_f64() * 1000.0,
             );
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&self.path) {
@@ -3470,7 +3156,7 @@ impl Stats {
     }
 
     fn new_keep() -> Stats {
-        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, write: Duration::ZERO, write_max: Duration::ZERO }
     }
 }
 
