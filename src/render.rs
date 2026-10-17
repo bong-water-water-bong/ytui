@@ -33,27 +33,37 @@ pub enum Mode {
     Quadrant,
     HalfBlock,
     Braille,
-    /// Real text-mode art: CP437 glyphs from the IBM 8x16 ROM font, fitted to
-    /// the frame and coloured from the 16-colour DOS palette. With iCE on the
-    /// background may use the high bit, giving 8 foregrounds x 16 backgrounds.
+    /// Real text-mode art in 24-bit colour: CP437 glyphs from the IBM 8x16
+    /// ROM font, two colours per cell, whichever two fit the picture best.
     Ansi,
-    /// As [`Mode::Ansi`], but each cell claims only 8 backgrounds, so the art
-    /// stays true to a display that really did blink.
-    AnsiBlink,
-    /// Text-mode art at 9 dots per cell: the extra column repeats the last
-    /// dot of the block and line-drawing characters, so box rules join with
-    /// no seam, exactly as an 80-column VGA screen drew them.
+    /// [`Ansi`] at 9 dots per cell: the extra column repeats the last dot of
+    /// block and line-drawing characters, so box rules join with no seam.
     Ansi9,
-    /// [`Mode::Ansi`] with 24-bit colour instead of the 16-entry DOS palette:
-    /// the same CP437 glyphs and the same two-colours-per-cell fit, but the
-    /// colours are the best two for the cell rather than the nearest of 16.
-    Ansi24,
-    /// [`Mode::Ansi9`] with 24-bit colour.
-    Ansi9x24,
+    /// The period-correct version: the 16-colour DOS palette, with iCE
+    /// colours giving 8 foregrounds x 16 backgrounds.
+    Ansi16,
+    /// [`Ansi16`] at 9 dots per cell.
+    Ansi9x16,
+    /// [`Ansi16`] with backgrounds limited to the 8 that do not blink.
+    AnsiBlink,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 13] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille, Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9, Mode::Ansi24, Mode::Ansi9x24];
+    pub const ALL: [Mode; 13] = [
+        Mode::Glow,
+        Mode::Art,
+        Mode::Ascii,
+        Mode::Classic,
+        Mode::Sextant,
+        Mode::Quadrant,
+        Mode::HalfBlock,
+        Mode::Braille,
+        Mode::Ansi,
+        Mode::Ansi9,
+        Mode::Ansi16,
+        Mode::Ansi9x16,
+        Mode::AnsiBlink,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -65,11 +75,11 @@ impl Mode {
             Mode::Quadrant => "quadrant",
             Mode::HalfBlock => "halfblock",
             Mode::Braille => "braille",
-            Mode::Ansi => "ansi-16",
+            Mode::Ansi16 => "ansi-16",
             Mode::AnsiBlink => "ansiblink",
-            Mode::Ansi9x24 => "ansi9",
-            Mode::Ansi24 => "ansi",
-            Mode::Ansi9 => "ansi9-16",
+            Mode::Ansi9 => "ansi9",
+            Mode::Ansi => "ansi",
+            Mode::Ansi9x16 => "ansi9-16",
         }
     }
 
@@ -265,7 +275,7 @@ impl Renderer {
             }
             Mode::Quadrant => mosaic(img, cols, rows, out, 2, 2, |m| QUAD[m as usize], false),
             Mode::Sextant => mosaic(img, cols, rows, out, 2, 3, sextant, false),
-            Mode::Ansi | Mode::AnsiBlink | Mode::Ansi9 | Mode::Ansi24 | Mode::Ansi9x24 => {
+            Mode::Ansi16 | Mode::AnsiBlink | Mode::Ansi9x16 | Mode::Ansi | Mode::Ansi9 => {
                 self.text_art(img, cols, rows, out)
             }
             Mode::Braille => mosaic(img, cols, rows, out, 2, 4, |m| {
@@ -604,10 +614,10 @@ impl Renderer {
     /// watch and what `--snapshot-ans` writes come from the same code.
     fn text_art(&mut self, img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
         let binary = matches!(self.mode, Mode::AnsiBlink);
-        let bits = if matches!(self.mode, Mode::Ansi9 | Mode::Ansi9x24) { 9 } else { 8 };
+        let bits = if matches!(self.mode, Mode::Ansi9x16 | Mode::Ansi9) { 9 } else { 8 };
         // 24-bit modes pick the best two colours for the cell; the palette
         // modes round to the nearest of 16.
-        let truecolor = matches!(self.mode, Mode::Ansi24 | Mode::Ansi9x24);
+        let truecolor = matches!(self.mode, Mode::Ansi | Mode::Ansi9);
         // The cache is only valid for one geometry, and rebuilding the ink
         // masks is the expensive part of a frame.
         if self.tm_cache.as_ref().map(|(b, c, r, _)| (*b, *c, *r)) != Some((bits, cols, rows)) {
@@ -1039,7 +1049,7 @@ mod textmode_mode_tests {
     fn ansi_modes_produce_cp437_from_the_dos_palette() {
         let (cols, rows) = (40, 12);
         let px = frame(cols, rows);
-        for mode in [Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9] {
+        for mode in [Mode::Ansi16, Mode::AnsiBlink, Mode::Ansi9x16] {
             let mut r = Renderer::new(mode);
             let mut out = Vec::new();
             r.render(&Img { w: cols * CW, h: rows * CH, px: &px }, cols, rows, &mut out);
@@ -1085,7 +1095,7 @@ mod textmode_mode_tests {
         // Two identical frames must render identically, or video shimmers.
         let (cols, rows) = (24, 8);
         let px = frame(cols, rows);
-        let mut r = Renderer::new(Mode::Ansi);
+        let mut r = Renderer::new(Mode::Ansi16);
         let (mut a, mut b) = (Vec::new(), Vec::new());
         let img = Img { w: cols * CW, h: rows * CH, px: &px };
         r.render(&img, cols, rows, &mut a);
@@ -1095,7 +1105,7 @@ mod textmode_mode_tests {
 
     #[test]
     fn ansi_resize_rebuilds_the_mask_cache() {
-        let mut r = Renderer::new(Mode::Ansi);
+        let mut r = Renderer::new(Mode::Ansi16);
         let p1 = frame(16, 6);
         let mut out = Vec::new();
         r.render(&Img { w: 16 * CW, h: 6 * CH, px: &p1 }, 16, 6, &mut out);
@@ -1250,3 +1260,4 @@ mod mosaic_accuracy {
         assert_eq!(off, 0, "{off} cells have a background that is not the source's 80-tone");
     }
 }
+

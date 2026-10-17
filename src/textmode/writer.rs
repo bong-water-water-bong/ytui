@@ -109,17 +109,16 @@ pub fn dos_of(ansi: u8) -> u8 {
 /// and attribute 4 is red, while `ESC[31m` is red and `ESC[34m` is blue. Every
 /// conversion goes through [`ansi_of`] so the swap happens exactly once.
 ///
-/// `clear_bold` says whether a standing `ESC[1m` has to be cancelled first.
-/// `ESC[0m` would do it but also wipes the background, so the cancel is
-/// written as a bare reset only when needed and the caller restates the bg.
-fn fg_seq(idx: u8, clear_bold: bool) -> Vec<u8> {
+///
+/// Cancelling a standing `ESC[1m` is the caller's job: it needs an `ESC[0m`,
+/// which also wipes the background, so it must restate both.
+fn fg_seq(idx: u8) -> Vec<u8> {
     let idx = idx & 15;
     // Brightness is a property of the DOS attribute's bit 3, which survives
     // the permutation into ANSI order.
     let bright = idx >= 8;
     let a = ansi_of(idx % 8);
     if !bright {
-        let _ = clear_bold;
         format!("\x1b[3{}m", a).into_bytes()
     } else {
         // Bright: ESC[1m then the base colour, which is how art has always
@@ -201,7 +200,7 @@ pub fn write_ansi(art: &Art, opts: WriteOpts) -> Vec<u8> {
                     out.extend_from_slice(b"\x1b[0m");
                     out.extend_from_slice(&bg_seq(cell.bg, opts.ice));
                 }
-                out.extend_from_slice(&fg_seq(cell.fg, had_bold && !wants_bold));
+                out.extend_from_slice(&fg_seq(cell.fg));
             }
             // PabloDraw's truecolour extension, for anything the palette
             // cannot express. Written after the palette escapes so a reader
