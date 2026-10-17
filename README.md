@@ -6,7 +6,7 @@ Unicode mosaics, or as real pixels with sixel and kitty graphics. On Windows Ter
 play through a native GPU window. You don't need a browser or a YouTube API key. It's one small
 Rust binary, with yt-dlp and libmpv doing the heavy lifting.
 
-**[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS.
+**[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS · **[Website and docs](https://bong-water-water-bong.github.io/ytui/)**
 
 ![ytui's Home page, signed out, showing the Trending feed as a grid of thumbnails](docs/screenshots/home.jpg)
 *Home, signed out: the Trending feed, with thumbnails drawn as pixel graphics.*

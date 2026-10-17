@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% seo title=false %}
+<title>{% if page.url == "/guide/" %}{{ page.title }}{% else %}{{ page.title }} · ytui docs{% endif %}</title>
+<meta name="theme-color" content="#e8eaee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+<meta property="og:image" content="{{ '/social-preview.jpg' | absolute_url }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Martian+Mono:wdth,wght@87.5,500;100,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+{% assign i = 0 %}{% for item in site.data.nav %}{% if item.url == page.url %}{% assign i = forloop.index0 %}{% endif %}{% endfor %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "ytui", "item": "{{ '/' | absolute_url }}" },
+    { "@type": "ListItem", "position": 2, "name": "Docs", "item": "{{ '/guide/' | absolute_url }}" }{% if page.url != '/guide/' %},
+    { "@type": "ListItem", "position": 3, "name": {{ page.title | jsonify }}, "item": "{{ page.url | absolute_url }}" }{% endif %}
+  ]
+}
+</script>
+</head>
+<body class="docs">
+<header class="wrap top">
+  <a class="mark" href="{{ '/' | relative_url }}"><i aria-hidden="true"></i>ytui</a>
+  <nav aria-label="Site">
+    <a href="{{ '/guide/' | relative_url }}" aria-current="page">Docs</a>
+    <a href="https://github.com/bong-water-water-bong/ytui/releases/latest">Download</a>
+    <a href="https://github.com/bong-water-water-bong/ytui">GitHub</a>
+  </nav>
+</header>
+
+<div class="wrap doc-grid">
+  <nav class="doc-nav" aria-label="Docs">
+    <details open>
+      <summary>Docs</summary>
+      <ul>
+      {% for item in site.data.nav %}
+        <li><a href="{{ item.url | relative_url }}"{% if item.url == page.url %} aria-current="page"{% endif %}>{{ item.title }}</a></li>
+      {% endfor %}
+      </ul>
+    </details>
+  </nav>
+
+  <main class="doc">
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="doc-lede">{{ page.description }}</p>{% endif %}
+    {{ content }}
+
+    <nav class="pager" aria-label="Next and previous">
+      {% assign prev = i | minus: 1 %}{% assign next = i | plus: 1 %}
+      {% if i > 0 %}{% assign p = site.data.nav[prev] %}<a rel="prev" href="{{ p.url | relative_url }}"><span>Previous</span>{{ p.title }}</a>{% else %}<span></span>{% endif %}
+      {% if next < site.data.nav.size %}{% assign n = site.data.nav[next] %}<a rel="next" href="{{ n.url | relative_url }}"><span>Next</span>{{ n.title }}</a>{% endif %}
+    </nav>
+    <p class="edit"><a href="https://github.com/bong-water-water-bong/ytui/edit/main/docs/{{ page.path }}">Edit this page on GitHub</a></p>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>ytui is MIT licensed. <a href="https://github.com/bong-water-water-bong/ytui">Source on GitHub</a>. ytui is not affiliated with YouTube or Google.</p>
+  </div>
+</footer>
+</body>
+</html>

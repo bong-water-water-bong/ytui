@@ -1,0 +1,224 @@
+---
+layout: null
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ytui: watch YouTube in the terminal (TUI client for Windows, Linux, macOS)</title>
+<meta name="description" content="ytui is a free, open-source terminal YouTube client. Search and watch YouTube in your terminal as ASCII art, sixel or kitty graphics, at 60 fps. Windows, Linux and macOS.">
+<link rel="canonical" href="https://bong-water-water-bong.github.io/ytui/">
+<meta name="theme-color" content="#e8eaee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ytui">
+<meta property="og:title" content="ytui: watch YouTube in the terminal">
+<meta property="og:description" content="A terminal YouTube client. Play video as ASCII art, sixel or kitty graphics at 60 fps, on Windows, Linux and macOS.">
+<meta property="og:url" content="https://bong-water-water-bong.github.io/ytui/">
+<meta property="og:image" content="https://bong-water-water-bong.github.io/ytui/social-preview.jpg">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="ytui playing Big Buck Bunny as coloured ASCII characters in a terminal">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Martian+Mono:wdth,wght@87.5,500;100,700&display=swap" rel="stylesheet">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "ytui",
+  "alternateName": "YouTube TUI",
+  "description": "A terminal YouTube client: search, browse and watch YouTube in the terminal as ASCII art, Unicode mosaics, sixel or kitty graphics, at up to 60 fps.",
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Video player",
+  "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
+  "url": "https://bong-water-water-bong.github.io/ytui/",
+  "downloadUrl": "https://github.com/bong-water-water-bong/ytui/releases/latest",
+  "codeRepository": "https://github.com/bong-water-water-bong/ytui",
+  "license": "https://opensource.org/licenses/MIT",
+  "image": "https://bong-water-water-bong.github.io/ytui/screenshots/home.jpg",
+  "screenshot": [
+    "https://bong-water-water-bong.github.io/ytui/screenshots/home.jpg",
+    "https://bong-water-water-bong.github.io/ytui/screenshots/glow.jpg",
+    "https://bong-water-water-bong.github.io/ytui/screenshots/sixel.jpg"
+  ],
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I watch YouTube in the terminal?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Install ytui from the GitHub releases page, install yt-dlp and ffmpeg, then run ytui. It opens YouTube's Home page in your terminal; press / to search and Enter to play a video." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does ytui need a YouTube account or API key?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Searching, browsing and watching work signed out with no API key. Signing in with Google is optional and adds your recommendations, subscriptions, playlists, likes and comments." }
+    },
+    {
+      "@type": "Question",
+      "name": "Which terminals show real pixels?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Terminals with sixel (Windows Terminal, WezTerm, foot, xterm, mlterm, Konsole) or the kitty graphics protocol (kitty, Ghostty), including inside tmux. Any other truecolour terminal gets ASCII art or Unicode mosaics." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does ytui work over SSH?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The character render modes work in any truecolour terminal, so you can watch over SSH. Audio is off by default over SSH." }
+    }
+  ]
+}
+</script>
+
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="wrap top">
+  <a class="mark" href="./"><i aria-hidden="true"></i>ytui</a>
+  <nav aria-label="Sections">
+    <a href="guide/">Docs</a>
+    <a href="#install">Install</a>
+    <a href="#modes">Render modes</a>
+    <a href="#features">Features</a>
+    <a href="#faq">FAQ</a>
+    <a href="https://github.com/bong-water-water-bong/ytui">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <h1>Watch YouTube in the terminal</h1>
+    <p class="lede">ytui is a free, open-source YouTube client for your terminal. You can search, browse Home and Trending, and play videos as ASCII art or real pixels at up to 60 fps. It runs on Windows, Linux and macOS, with no browser and no API key.</p>
+    <div class="actions">
+      <a class="btn" href="https://github.com/bong-water-water-bong/ytui/releases/latest">Download ytui</a>
+      <a class="alt" href="guide/">Read the docs</a>
+      <a class="alt" href="https://github.com/bong-water-water-bong/ytui">View the source on GitHub</a>
+    </div>
+    <figure class="shot-hero">
+      <div class="frame"><img src="screenshots/home.jpg" width="1573" height="978" alt="ytui's Home page in Windows Terminal: a grid of trending YouTube videos with thumbnails, a sidebar and category chips" fetchpriority="high"></div>
+      <figcaption>Home while signed out: YouTube's Trending feed in Windows Terminal, with the thumbnails drawn as pixel graphics.</figcaption>
+    </figure>
+  </div>
+
+  <section id="install" aria-labelledby="install-h">
+    <div class="wrap">
+      <h2 id="install-h">Install</h2>
+      <p class="sub">Download the package for your system from the <a href="https://github.com/bong-water-water-bong/ytui/releases/latest">latest release</a>, then install the tools ytui plays through.</p>
+      <div class="install">
+        <div class="os">
+          <h3>Windows 10 and 11</h3>
+          <p>Unzip and run <code>ytui.exe</code> in Windows Terminal. libmpv is included.</p>
+          <pre><code>winget install yt-dlp.yt-dlp Gyan.FFmpeg DenoLand.Deno</code></pre>
+        </div>
+        <div class="os">
+          <h3>macOS (Apple Silicon)</h3>
+          <p>Extract the archive and run <code>ytui</code> from your terminal.</p>
+          <pre><code>brew install yt-dlp ffmpeg deno mpv</code></pre>
+        </div>
+        <div class="os">
+          <h3>Linux (x86_64)</h3>
+          <p>Install yt-dlp, ffmpeg, Node.js 22+ or Deno, and libmpv with your package manager. Or build from source:</p>
+          <pre><code>cargo build --release</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="modes" aria-labelledby="modes-h">
+    <div class="wrap">
+      <h2 id="modes-h">Pick how video looks</h2>
+      <p class="sub">Press <kbd>m</kbd> to cycle the character modes. Press <kbd>G</kbd> for pixel graphics and <kbd>N</kbd> for the native window. Press <kbd>o</kbd> to tune the picture.</p>
+      <div class="gallery">
+        <figure>
+          <div class="frame"><img src="screenshots/glow.jpg" width="1573" height="978" loading="lazy" alt="Big Buck Bunny drawn as coloured ASCII characters in glow mode, fullscreen"></div>
+          <figcaption><strong>Glow.</strong> Shape-matched ASCII in boosted colour over a dimmed copy of the picture.</figcaption>
+        </figure>
+        <figure>
+          <div class="frame"><img src="screenshots/sixel.jpg" width="1696" height="785" loading="lazy" alt="ytui drawing Big Buck Bunny with sixel graphics inside the terminal"></div>
+          <figcaption><strong>Sixel and kitty graphics.</strong> Real pixels inside the terminal, at about 30 fps.</figcaption>
+        </figure>
+        <figure>
+          <div class="frame"><img src="screenshots/native-window.jpg" width="1696" height="785" loading="lazy" alt="ytui in Windows Terminal playing video in a native GPU window with the player bar below"></div>
+          <figcaption><strong>Native window.</strong> On Windows Terminal, GPU-decoded 1080p60 video sits over the player area.</figcaption>
+        </figure>
+        <figure>
+          <div class="frame"><img src="screenshots/glow-look-panel.jpg" width="1573" height="978" loading="lazy" alt="The look panel open over glow-mode video, with sliders for brightness, saturation, background and contrast"></div>
+          <figcaption><strong>Look panel.</strong> Adjust the mode, brightness, saturation, background, contrast and auto-exposure. Your settings are kept between runs.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" aria-labelledby="features-h">
+    <div class="wrap">
+      <h2 id="features-h">YouTube's layout, in a terminal</h2>
+      <dl class="features">
+        <div><dt>Home, Trending and categories</dt><dd>Music, Gaming, News, Live, Sports, Learning, Podcasts and Movies, as a thumbnail grid you can click.</dd></div>
+        <div><dt>Search, channels and playlists</dt><dd>Press <kbd>/</kbd> to search or paste a URL. Open channels, playlists, comments and live chat.</dd></div>
+        <div><dt>60 fps playback through libmpv</dt><dd>Hardware decoding, seeks in about a tenth of a second, instant pause and A/V sync. It falls back to ffmpeg when libmpv isn't installed.</dd></div>
+        <div><dt>Captions</dt><dd>Press <kbd>S</kbd> to cycle caption tracks. Your language choice is remembered for later videos.</dd></div>
+        <div><dt>Optional Google sign-in</dt><dd>See your recommendations, subscriptions and playlists, and like and comment. Signing in also keeps videos playing when YouTube asks you to "confirm you're not a bot".</dd></div>
+        <div><dt>Works over SSH and in tmux</dt><dd>Character modes run in any truecolour terminal. tmux without truecolour gets dithered 256-colour output.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="keys" aria-labelledby="keys-h">
+    <div class="wrap">
+      <h2 id="keys-h">Keys you'll use most</h2>
+      <table class="keys">
+        <tbody>
+          <tr><th><kbd>/</kbd></th><td>Search or open a URL</td></tr>
+          <tr><th>Arrows, <kbd>Enter</kbd></th><td>Move and open</td></tr>
+          <tr><th><kbd>space</kbd> <kbd>f</kbd></th><td>Pause, fullscreen</td></tr>
+          <tr><th><kbd>,</kbd> <kbd>.</kbd> and <kbd>0</kbd>–<kbd>9</kbd></th><td>Seek 10 seconds, or jump to a point</td></tr>
+          <tr><th><kbd>+</kbd> <kbd>-</kbd> <kbd>M</kbd></th><td>Volume up, down, mute</td></tr>
+          <tr><th><kbd>m</kbd> <kbd>o</kbd></th><td>Cycle render mode, open the look panel</td></tr>
+          <tr><th><kbd>?</kbd> <kbd>q</kbd></th><td>Help, quit</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="faq" aria-labelledby="faq-h">
+    <div class="wrap">
+      <h2 id="faq-h">Questions</h2>
+      <div class="faq">
+        <details open>
+          <summary>How do I watch YouTube in the terminal?</summary>
+          <p>Download ytui from the <a href="https://github.com/bong-water-water-bong/ytui/releases/latest">releases page</a>, install yt-dlp and ffmpeg, and run <code>ytui</code>. It opens YouTube's Home page in your terminal. Press <kbd>/</kbd> to search and <kbd>Enter</kbd> to play a video. You can also start with a search, like <code>ytui lofi hip hop</code>, or with a video URL.</p>
+        </details>
+        <details>
+          <summary>Does ytui need a YouTube account or API key?</summary>
+          <p>No. Searching, browsing and watching work signed out, with no API key. Signing in with Google is optional. It adds your recommendations, subscriptions, playlists, likes and comments.</p>
+        </details>
+        <details>
+          <summary>Which terminals show real pixels?</summary>
+          <p>Terminals with sixel (Windows Terminal, WezTerm, foot, xterm, mlterm, Konsole) or the kitty graphics protocol (kitty, Ghostty), including inside tmux. Every other truecolour terminal gets ASCII art or Unicode mosaics.</p>
+        </details>
+        <details>
+          <summary>Does it work over SSH?</summary>
+          <p>Yes. The character render modes work in any truecolour terminal, so you can watch over SSH. Audio is off by default over SSH; choose an output with <code>--audio</code>.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>ytui is MIT licensed. <a href="https://github.com/bong-water-water-bong/ytui">Source on GitHub</a>.</p>
+    <p>Video screenshots show <a href="https://peach.blender.org/">Big Buck Bunny</a>, © Blender Foundation, licensed CC BY 3.0. ytui is not affiliated with YouTube or Google.</p>
+  </div>
+</footer>
+</body>
+</html>

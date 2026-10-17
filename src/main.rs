@@ -65,7 +65,7 @@ OPTIONS:
   --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
   --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
   --gfx-fps N    cap pixel video at N fps (default 12 over SSH, unlimited locally)
-  --gfx-px N     longest edge of pixel images (default 640 over SSH, 1280 locally)
+  --gfx-px N     longest edge of pixel images (default 960 over SSH, 1920 locally)
   --cookies FILE cookies.txt for yt-dlp (default: cookies.txt in the config
                  directory, if present; see --help-cookies)
   --cookies-from-browser B  read cookies from browser B (firefox works; Chrome

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://bong-water-water-bong.github.io/ytui/sitemap.xml
