@@ -8,6 +8,7 @@
 
 /// Where the terminal's character grid sits on screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Grid {
     /// Screen position of cell (0, 0)'s top-left corner.
     pub x: i32,

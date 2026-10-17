@@ -870,6 +870,7 @@ impl Player {
 
     /// Switch between the native window (Some) and terminal rendering,
     /// keeping the position and pause state.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_native(&mut self, wid: Option<i64>) {
         if self.opts.wid == wid || !self.opts.mpv {
             return;

@@ -314,6 +314,9 @@ fn main() -> Result<()> {
         hints.insert(0, "libmpv not found: playing through ffmpeg (no captions); see README".into());
     }
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, mode.is_some());
+    // --no-native only matters to the Windows overlay.
+    #[cfg(not(windows))]
+    let _ = native;
     #[cfg(windows)]
     if use_mpv && native && std::env::var("SSH_CONNECTION").is_err() {
         if let Some(o) = overlay::Overlay::new() {
