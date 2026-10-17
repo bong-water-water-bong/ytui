@@ -20,6 +20,7 @@ mod render;
 mod scenes;
 mod store;
 mod sys;
+mod textmode;
 mod term;
 mod thumbs;
 mod uninstall;
