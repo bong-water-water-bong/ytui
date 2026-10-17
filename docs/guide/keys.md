@@ -1,6 +1,6 @@
 ---
 title: Keys
-description: Every ytui keyboard shortcut for browsing, playback, volume, captions and the picture.
+description: Every ytui keyboard shortcut for browsing, playback, volume, captions and the picture, plus the mouse and player controls.
 ---
 
 Press `?` in ytui to see these at any time. The mouse works too: click anything, scroll with the wheel, and click

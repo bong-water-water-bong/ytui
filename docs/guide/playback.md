@@ -1,6 +1,6 @@
 ---
 title: Playback and audio
-description: How ytui plays YouTube through ffmpeg at up to 60 fps, plus captions, audio output and volume.
+description: How ytui plays YouTube through ffmpeg at up to 60 fps, its YouTube-style player controls, captions, audio output and volume.
 ---
 
 ## ffmpeg
@@ -24,7 +24,7 @@ then off. The language you pick is remembered for later videos. ytui fetches the
 file itself and draws each caption as bold white text in a solid black box, with a blank row above
 and below.
 
-![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box]({{ '/screenshots/captions.jpg' | relative_url }})
+![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box, and the player controls below it]({{ '/screenshots/captions.jpg' | relative_url }})
 
 ## Player controls
 
