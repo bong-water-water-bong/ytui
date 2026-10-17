@@ -1943,7 +1943,7 @@ impl App {
             }
             self.geo.look.push((row, slider, i));
         }
-        let hint = "↑↓ choose · ←→ adjust · click/drag · o close";
+        let hint = "↑↓ choose · ←→ adjust · drag · o close";
         buf.set_string(r.x + 2, r.y + h - 2, page::trunc(hint, w as usize - 4), Style::default().fg(DIM).bg(bg));
     }
 
