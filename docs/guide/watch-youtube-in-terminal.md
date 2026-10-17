@@ -57,7 +57,7 @@ Download `ytui-<version>-macos-arm64.tar.gz` from the
 Video is drawn as truecolour half blocks, two pixels per cell, sized to your terminal. A bigger
 window gives a sharper picture. See [video in the terminal](../render-modes/) for how it works.
 
-![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
+![Big Buck Bunny sitting in a meadow, drawn as half blocks, fullscreen and paused, with the player controls and the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
 
 ## Watch YouTube over SSH
 

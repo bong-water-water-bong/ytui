@@ -1,5 +1,5 @@
 title: ytui
-description: A terminal YouTube client. Watch YouTube in the terminal as 24-bit colour half blocks at up to 60 fps, on Windows, Linux and macOS.
+description: A terminal YouTube and YouTube Music client. Watch YouTube in the terminal as 24-bit colour half blocks at up to 60 fps, with YouTube-style player controls, on Windows, Linux and macOS.
 url: https://bong-water-water-bong.github.io
 baseurl: /ytui
 lang: en

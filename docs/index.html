@@ -6,8 +6,8 @@ layout: null
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ytui: watch YouTube in the terminal (TUI client for Windows, Linux, macOS)</title>
-<meta name="description" content="ytui is a free, open-source terminal YouTube and YouTube Music client. Search and watch YouTube in your terminal as 24-bit colour half blocks, at 60 fps. Windows, Linux and macOS.">
+<title>ytui: watch YouTube in the terminal on Windows, Linux, macOS</title>
+<meta name="description" content="Free, open-source YouTube and YouTube Music in the terminal: 60 fps video in 24-bit colour, with YouTube-style player controls. Windows, Linux and macOS.">
 <link rel="canonical" href="https://bong-water-water-bong.github.io/ytui/">
 <meta name="theme-color" content="#e8eaee" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
@@ -15,14 +15,14 @@ layout: null
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="ytui">
 <meta property="og:title" content="ytui: watch YouTube in the terminal">
-<meta property="og:description" content="A terminal YouTube client. Play video as 24-bit colour half blocks at 60 fps, on Windows, Linux and macOS.">
+<meta property="og:description" content="A terminal YouTube and YouTube Music client. Play 60 fps video as 24-bit colour half blocks, with YouTube-style player controls, on Windows, Linux and macOS.">
 <meta property="og:url" content="https://bong-water-water-bong.github.io/ytui/">
 <meta property="og:image" content="https://bong-water-water-bong.github.io/ytui/social-preview.jpg">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="640">
-<meta property="og:image:alt" content="ytui playing Big Buck Bunny as 24-bit colour half blocks in a terminal">
+<meta property="og:image:alt" content="ytui playing Big Buck Bunny as 24-bit colour half blocks in a terminal, paused with the player controls showing">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image:alt" content="ytui playing Big Buck Bunny as 24-bit colour half blocks in a terminal">
+<meta name="twitter:image:alt" content="ytui playing Big Buck Bunny as 24-bit colour half blocks in a terminal, paused with the player controls showing">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,7 +34,7 @@ layout: null
   "@type": "SoftwareApplication",
   "name": "ytui",
   "alternateName": "YouTube TUI",
-  "description": "A terminal YouTube client: search, browse and watch YouTube in the terminal as 24-bit colour half blocks, at up to 60 fps.",
+  "description": "A terminal YouTube and YouTube Music client: search, browse and watch YouTube in the terminal as 24-bit colour half blocks, at up to 60 fps, with YouTube-style player controls.",
   "applicationCategory": "MultimediaApplication",
   "applicationSubCategory": "Video player",
   "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
@@ -46,7 +46,8 @@ layout: null
   "screenshot": [
     "https://bong-water-water-bong.github.io/ytui/screenshots/home.jpg",
     "https://bong-water-water-bong.github.io/ytui/screenshots/halfblock.jpg",
-    "https://bong-water-water-bong.github.io/ytui/screenshots/captions.jpg"
+    "https://bong-water-water-bong.github.io/ytui/screenshots/captions.jpg",
+    "https://bong-water-water-bong.github.io/ytui/screenshots/music-player.jpg"
   ],
   "softwareVersion": "2026.10.17",
   "datePublished": "2026-10-16",
@@ -56,6 +57,7 @@ layout: null
   "featureList": [
     "Watch YouTube in the terminal as 24-bit colour half blocks",
     "60 fps playback through ffmpeg",
+    "YouTube-style player controls on the video: previous, play/pause, next, mute, captions and fullscreen",
     "Home, Trending, search, channels, playlists, comments and live chat",
     "YouTube Music: Home, Explore, charts, search, artists, albums, library, queue and lyrics",
     "Captions, autoplay, tabs and watch later",
@@ -90,6 +92,11 @@ layout: null
       "@type": "Question",
       "name": "Does ytui need a YouTube account or API key?",
       "acceptedAnswer": { "@type": "Answer", "text": "No. Searching, browsing and watching work signed out with no API key. Signing in with Google is optional and adds your recommendations, subscriptions, playlists, likes and comments." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I control playback with the mouse?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Move the mouse over the video and ytui shows YouTube-style controls on it: previous, play/pause, next, mute, captions and fullscreen. Click the progress bar to seek and drag the volume slider. The keyboard works too: space pauses, comma and period seek, and f goes fullscreen." }
     },
     {
       "@type": "Question",
@@ -181,11 +188,11 @@ layout: null
       <p class="sub">Each cell is a truecolour half block: two pixels, one above the other. ytui sends only the cells that changed and sizes each frame to what your terminal can keep up with, so fast motion gets slightly coarser instead of dropping frames. <a href="guide/render-modes/">How it works</a>.</p>
       <div class="gallery">
         <figure>
-          <div class="frame"><img src="screenshots/halfblock.jpg" srcset="screenshots/halfblock-800.jpg 800w, screenshots/halfblock.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom"></div>
-          <figcaption><strong>Half blocks.</strong> Fullscreen and paused, with the player bar at the bottom.</figcaption>
+          <div class="frame"><img src="screenshots/halfblock.jpg" srcset="screenshots/halfblock-800.jpg 800w, screenshots/halfblock.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Big Buck Bunny sitting in a meadow, drawn as half blocks, fullscreen and paused, with the player controls and the player bar at the bottom"></div>
+          <figcaption><strong>Half blocks.</strong> Fullscreen and paused, with the player controls and the player bar at the bottom.</figcaption>
         </figure>
         <figure>
-          <div class="frame"><img src="screenshots/captions.jpg" srcset="screenshots/captions-800.jpg 800w, screenshots/captions.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box"></div>
+          <div class="frame"><img src="screenshots/captions.jpg" srcset="screenshots/captions-800.jpg 800w, screenshots/captions.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box, and the player controls below it"></div>
           <figcaption><strong>Captions.</strong> Bold white text in a solid black box. The first press of <kbd>S</kbd> picks your system language.</figcaption>
         </figure>
       </div>
@@ -200,6 +207,7 @@ layout: null
         <div><dt>YouTube Music</dt><dd>The <a href="guide/youtube-music/">Music</a> link opens YouTube Music in ytui: Home, Explore, charts, moods and genres, search, artists, albums, your library, and a music player with a queue, lyrics and related songs.</dd></div>
         <div><dt>Search, channels and playlists</dt><dd>Press <kbd>/</kbd> to search or paste a URL. Open channels, playlists, comments and live chat.</dd></div>
         <div><dt>60 fps playback through ffmpeg</dt><dd>Streams up to 720p by default, the lowest height YouTube serves at 60 fps.</dd></div>
+        <div><dt>Player controls</dt><dd>Move the mouse over the video for YouTube-style controls: previous, play/pause, next, mute, captions and fullscreen. Click the progress bar to seek, or drag the volume slider. Most have keys too: <kbd>space</kbd>, <kbd>n</kbd>, <kbd>M</kbd>, <kbd>S</kbd> and <kbd>f</kbd>.</dd></div>
         <div><dt>Captions</dt><dd>Press <kbd>S</kbd> for captions in your system language, then again to go through the other tracks. ytui draws them in a black box over the video, and your language choice is remembered for later videos.</dd></div>
         <div><dt>Optional Google sign-in</dt><dd>See your recommendations, subscriptions and playlists, and like and comment. Signing in also keeps videos playing when YouTube asks you to "confirm you're not a bot".</dd></div>
         <div><dt>Works over SSH and in tmux</dt><dd>ytui runs in any truecolour terminal. Inside tmux without truecolour, it tells you the one line to add to <code>~/.tmux.conf</code>.</dd></div>
@@ -235,6 +243,10 @@ layout: null
         <details>
           <summary>Does ytui need a YouTube account or API key?</summary>
           <p>No. Searching, browsing and watching work signed out, with no API key. Signing in with Google is optional. It adds your recommendations, subscriptions, playlists, likes and comments.</p>
+        </details>
+        <details>
+          <summary>Can I control playback with the mouse?</summary>
+          <p>Yes. Move the mouse over the video and ytui shows YouTube-style controls on it: previous, play/pause, next, mute, captions and fullscreen. Click the progress bar to seek and drag the volume slider. The keyboard works too: <kbd>space</kbd> pauses, <kbd>,</kbd> and <kbd>.</kbd> seek, and <kbd>f</kbd> goes fullscreen. See <a href="guide/playback/#player-controls">player controls</a>.</p>
         </details>
         <details>
           <summary>Which terminals does ytui work in?</summary>

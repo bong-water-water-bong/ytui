@@ -10,10 +10,10 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 ![ytui's Home page, signed out, showing the Trending feed as a grid of half-block thumbnails](docs/screenshots/home.jpg)
 *Home, signed out: the Trending feed, with thumbnails drawn as half blocks.*
 
-![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom](docs/screenshots/halfblock.jpg)
+![Big Buck Bunny sitting in a meadow, drawn as half blocks, fullscreen and paused, with the player controls and the player bar at the bottom](docs/screenshots/halfblock.jpg)
 *Fullscreen and paused: each cell is a `▀` half block, two pixels in 24-bit colour.*
 
-![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box](docs/screenshots/captions.jpg)
+![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box, and the player controls below it](docs/screenshots/captions.jpg)
 *Captions (`S`): bold white text in a solid black box, in your system language.*
 
 <sub>The half-block screenshot shows [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The captions screenshot shows [Sintel](https://durian.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
@@ -24,6 +24,7 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 - **60 fps playback through ffmpeg:** streams up to 720p, the lowest height YouTube serves at 60 fps.
 - **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more. Also search, channels, playlists, comments and live chat.
 - **YouTube Music:** the Music link opens music.youtube.com in ytui: Home, Explore, charts, moods and genres, search, artists, albums, your library, and a music player with a queue, lyrics and related songs.
+- **Player controls on the video:** move the mouse over it for YouTube-style previous, play/pause, next, mute, captions and fullscreen buttons.
 - **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
 - **Captions, volume slider, autoplay, tabs and watch later.** Mouse and keyboard both work.
 - **Runs over SSH:** it works in any truecolour terminal.
@@ -131,7 +132,7 @@ music player with Up next, Lyrics and Related tabs. A song from an album or play
 that list; anywhere else it starts a radio. music.youtube.com links open there too.
 [More about YouTube Music in ytui](https://bong-water-water-bong.github.io/ytui/guide/youtube-music/).
 
-![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next](docs/screenshots/music-player.jpg)
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover](docs/screenshots/music-player.jpg)
 <sub>Shows *25 Years (Volume 2)* by [Kevin MacLeod](https://incompetech.com/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).</sub>
 
 ## Colours under tmux

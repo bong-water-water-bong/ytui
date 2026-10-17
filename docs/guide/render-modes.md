@@ -10,7 +10,7 @@ grid, `cols × 2*rows` pixels, so nothing is scaled again in the terminal.
 
 Thumbnails, avatars and banners are drawn the same way.
 
-![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
+![Big Buck Bunny sitting in a meadow, drawn as half blocks, fullscreen and paused, with the player controls and the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
 
 ## Why it stays smooth
 
