@@ -3,6 +3,7 @@
 //! seek / pause behaviour and captions.
 
 use crate::player::{Opts, Player};
+use crate::out::BUDGET_SHARE;
 use crate::render::Renderer;
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -80,7 +81,7 @@ pub fn run(src: &str, secs: f64, opts: Opts, max_h: u32, mut r: Renderer, cols: 
         "{frames} frames in {el:.1}s = {:.1} fps shown, render {:.2} ms/frame ({}), pos {:.2}, note {:?}",
         frames as f64 / el.max(0.001),
         render_ms / frames.max(1) as f64,
-        r.mode.name(),
+        "halfblock",
         p.pos,
         p.note
     );
@@ -127,36 +128,41 @@ fn diff_bytes(prev: Option<&[crate::render::Cell]>, cur: &[crate::render::Cell],
     n
 }
 
-/// `--bench-render SRC`: renderer cost and output size per mode at a
-/// terminal size, over consecutive real video frames.
+/// `--bench-render SRC`: renderer cost and output size at a terminal size,
+/// over consecutive real video frames, with no byte budget and with the
+/// budgets a VTE-speed terminal (16 MB/s) gives at 30 and 60 fps.
 pub fn render(src: &str, at: f64, cols: usize, rows: usize, max_h: u32) -> Result<()> {
-    use crate::glyphs::{CH, CW};
-    use crate::render::{Img, Mode, Renderer};
+    use crate::render::{Img, Renderer, CH, CW};
     const N: usize = 60;
     let (w, h) = (cols * CW, rows * CH);
     let input = if std::path::Path::new(src).exists() { src.to_string() } else { crate::yt::resolve(src, max_h)?.video_url };
     let fr = frames(&input, at, N, w, h)?;
     println!("{} frames at {cols}x{rows} cells ({w}x{h} px)", fr.len());
-    for mode in Mode::ALL {
-        let mut r = Renderer::new(mode);
+    for (name, fps) in [("exact", 0.0), ("16MB/s 30fps", 30.0), ("16MB/s 60fps", 60.0)] {
+        let mut r = Renderer::new();
         let mut cells = Vec::new();
         let mut prev: Option<Vec<crate::render::Cell>> = None;
-        let (mut ms, mut bytes) = (Vec::new(), 0usize);
+        let (mut ms, mut bytes, mut tol) = (Vec::new(), 0usize, Vec::new());
         for f in &fr {
+            r.budget = if fps > 0.0 { Some((16e6 / fps * BUDGET_SHARE) as usize) } else { None };
             let t = Instant::now();
             r.render(&Img { w, h, px: f }, cols, rows, &mut cells);
             ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            tol.push(r.tol);
             bytes += diff_bytes(prev.as_deref(), &cells, cols);
             prev = Some(cells.clone());
         }
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        tol.sort();
+        let per = bytes as f64 / fr.len() as f64;
         println!(
-            "{:9} render median {:6.2} ms  p95 {:6.2} ms  | output {:6.1} KB/frame = {:5.2} MB/s at 30 fps",
-            mode.name(),
+            "{name:13} render median {:5.2} ms | output {:6.1} KB/frame = {:5.2} MB/s at {} fps | tolerance median {} max {}",
             ms[ms.len() / 2],
-            ms[ms.len() * 95 / 100],
-            bytes as f64 / fr.len() as f64 / 1024.0,
-            bytes as f64 / fr.len() as f64 * 30.0 / 1e6
+            per / 1024.0,
+            per * fps.max(30.0) / 1e6,
+            fps.max(30.0),
+            tol[tol.len() / 2],
+            tol[tol.len() - 1]
         );
     }
     Ok(())

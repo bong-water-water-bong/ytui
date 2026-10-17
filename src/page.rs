@@ -1159,15 +1159,12 @@ Keys — player (anywhere while something is playing)
   C                show / hide live chat            I                send a live chat message (signed in)
   P                save the focused / current video to a playlist (signed in)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
-  o                look panel: mode, brightness, saturation, background, contrast
-  S                captions: cycle off / each track (remembered across videos)
-  m                switch render mode (glow / braille)
-  [ ]              contrast down / up
+  S                captions: your language first, then each track, then off (remembered)
   click the progress bar to seek; click the miniplayer to return to the video
 
-Render modes (24-bit colour, after react-video-ascii by Lucas Jin)
-  glow       shape-matched ASCII in boosted colour over a dimmed copy of the picture
-  braille    2x4 dots in boosted colour over a dimmed copy of the picture
+Video is drawn as 24-bit colour half blocks, two pixels a cell. Only cells
+that change are sent, sized to what the terminal can take, so frames don't
+pile up; fast motion gets a little coarser instead.
 
 Pages
   Home         For you (from your history and subscriptions) and topic chips

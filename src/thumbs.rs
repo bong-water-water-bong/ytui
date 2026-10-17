@@ -1,7 +1,7 @@
 //! Background image loader (thumbnails, avatars, banners) plus a cache of
 //! images already converted to terminal cells for a given size.
 
-use crate::glyphs::{CH, CW};
+use crate::render::{CH, CW};
 use crate::render::{Cell, Img, Renderer};
 use image::imageops::FilterType;
 use image::RgbImage;
@@ -76,7 +76,7 @@ impl Thumbs {
             let (pw, ph) = (w as u32 * CW as u32, h as u32 * CH as u32);
             let scaled = cover(&img, pw, ph);
             let mut out = Vec::new();
-            Renderer::thumb(&Img { w: pw as usize, h: ph as usize, px: scaled.as_raw() }, w as usize, h as usize, &mut out);
+            Renderer::cells(&Img { w: pw as usize, h: ph as usize, px: scaled.as_raw() }, w as usize, h as usize, &mut out);
             if self.cells.len() > 500 {
                 self.cells.clear();
             }

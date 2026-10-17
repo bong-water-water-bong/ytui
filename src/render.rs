@@ -1,27 +1,28 @@
-//! Frame -> terminal cells. Input is an RGB24 image of exactly
-//! `cols*CW` x `rows*CH` pixels; output is one `Cell` per terminal cell, in
-//! 24-bit colour.
+//! Frame -> terminal cells: truecolour half blocks. Each cell is `▀` with
+//! the top pixel as its foreground and the bottom pixel as its background,
+//! so a frame is decoded at exactly `cols` x `2*rows` pixels.
 //!
-//! Both modes follow react-video-ascii by Lucas Jin (MIT, see NOTICE),
-//! translated from its two WebGL passes (src/shaders/fragment_pass1.glsl and
-//! fragment.glsl) to the terminal:
-//!
-//! - Shape (pass 1): sample the cell's luma in six circles, raise each
-//!   sample relative to the cell's brightest (`max * (s / max)^contrast`,
-//!   the reference's shape exponent, 2.0 by default) so edges sharpen, then
-//!   take the character with the nearest shape vector.
-//! - Colour (pass 2): the cell's colour has its HSL lightness scaled by
-//!   `bright` and saturation by `sat`. The glyph is drawn in that colour
-//!   over the same colour times `bg_level` (the reference's `bgOpacity`):
-//!   a terminal draws a glyph exactly as the shader's
-//!   `mix(bgColor, cellColor, glyphMask)`.
-//!
-//! Braille is ytui's own extension of the same look: the 2x4 dots take the
-//! place of the character set. Each dot's luma goes through the same shape
-//! step and is then compared with an ordered-dither threshold, so a cell
-//! lights more dots the brighter it is and the dots follow edges.
+//! What limits the frame rate is how many bytes the terminal can parse, not
+//! drawing: a full truecolour frame is ~40 bytes a cell (VTE reads about
+//! 16 MB/s, so a big window at 60 fps can't be rewritten whole). ratatui
+//! already sends only the cells that differ from the last frame, with
+//! colour escapes only where the colour changes; this renderer makes that
+//! diff small. A cell keeps the colours it is already showing until the
+//! picture there moves further than a tolerance, and the tolerance is
+//! chosen per frame as the smallest one whose changed cells fit the byte
+//! budget the terminal can take. A still or slow picture is sent exactly;
+//! fast motion gets coarser instead of dropping frames.
 
-use crate::glyphs::{self, CH, CIRCLES, CW, RADIUS, SHAPES};
+/// Pixels per cell: one wide, two high.
+pub const CW: usize = 1;
+pub const CH: usize = 2;
+
+/// Estimated output bytes for one changed cell (two colour escapes and the
+/// glyph, cursor moves amortised).
+pub const CELL_BYTES: usize = 40;
+
+/// Colour noise below this (per channel, 0-255) never counts as a change.
+const MIN_TOL: u8 = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
@@ -36,262 +37,85 @@ impl Default for Cell {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Mode {
-    /// Shape-matched ASCII in boosted colour over a dimmed copy of the
-    /// picture: the react-video-ascii look.
-    Glow,
-    /// 2x4 braille dots in boosted colour over a dimmed copy of the picture.
-    Braille,
-}
-
-impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Glow, Mode::Braille];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Mode::Braille => "braille",
-            Mode::Glow => "glow",
-        }
-    }
-
-    /// Parse a mode name or a prefix of one.
-    pub fn parse(s: &str) -> Option<Mode> {
-        let want = s.to_ascii_lowercase();
-        Mode::ALL.iter().copied().find(|m| !want.is_empty() && m.name().starts_with(&want))
-    }
-
-    pub fn next(self) -> Mode {
-        let i = Mode::ALL.iter().position(|&m| m == self).unwrap();
-        Mode::ALL[(i + 1) % Mode::ALL.len()]
-    }
-}
-
 pub struct Img<'a> {
     pub w: usize,
     pub h: usize,
     pub px: &'a [u8],
 }
 
+#[derive(Default)]
 pub struct Renderer {
-    pub mode: Mode,
-    /// Look panel: HSL lightness and saturation multipliers, how much of the
-    /// picture shows behind the glyphs (0 = black, 1 = full), and the shape
-    /// exponent.
-    pub bright: f32,
-    pub sat: f32,
-    pub bg_level: f32,
-    pub contrast: f32,
-    /// Sample points of each circle, relative to the cell origin in pixels.
-    taps: Vec<Vec<(f32, f32)>>,
-    /// The frame's luma, reused between frames.
-    lum: Vec<f32>,
+    /// Byte budget for the next frame's changed cells (None: no limit).
+    pub budget: Option<usize>,
+    /// Tolerance used for the last frame, for YTUI_STATS.
+    pub tol: u8,
+    /// Cells the last frame showed, and their grid size.
+    shown: Vec<Cell>,
+    dims: (usize, usize),
+    fresh: Vec<Cell>,
+    dist: Vec<u8>,
 }
 
-/// Braille dot bit for dot (col, row) in a 2x4 grid.
-const BRAILLE_BIT: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
-
-/// Ordered-dither thresholds for the 2x4 dots, indexed [row][col].
-const DITHER: [[f32; 2]; 4] = [[0.5 / 8.0, 4.5 / 8.0], [6.5 / 8.0, 2.5 / 8.0], [1.5 / 8.0, 5.5 / 8.0], [7.5 / 8.0, 3.5 / 8.0]];
-
-/// Luma with the reference's (Rec. 601) weights, 0..=1.
+/// Largest per-channel difference between two colours.
 #[inline]
-fn luma(p: &[u8]) -> f32 {
-    (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0
-}
-
-/// The shape step: `max * (s / max)^exp` for each sample.
-fn sharpen(v: &mut [f32], exp: f32) {
-    let max = v.iter().copied().fold(0f32, f32::max);
-    if max > 0.0 {
-        v.iter_mut().for_each(|s| *s = (*s / max).powf(exp) * max);
-    }
-}
-
-fn rgb2hsl(c: [f32; 3]) -> [f32; 3] {
-    let mx = c[0].max(c[1]).max(c[2]);
-    let mn = c[0].min(c[1]).min(c[2]);
-    let l = (mx + mn) * 0.5;
-    let d = mx - mn;
-    let (mut h, mut s) = (0.0, 0.0);
-    if d > 0.0 {
-        s = d / (1.0 - (2.0 * l - 1.0).abs());
-        h = if mx == c[0] {
-            ((c[1] - c[2]) / d).rem_euclid(6.0) / 6.0
-        } else if mx == c[1] {
-            ((c[2] - c[0]) / d + 2.0) / 6.0
-        } else {
-            ((c[0] - c[1]) / d + 4.0) / 6.0
-        };
-    }
-    [h, s, l]
-}
-
-fn hsl2rgb(c: [f32; 3]) -> [f32; 3] {
-    let [h, s, l] = c;
-    let a = s * (1.0 - (2.0 * l - 1.0).abs());
-    let ch = |o: f32| ((((h * 6.0 + o).rem_euclid(6.0)) - 3.0).abs() - 1.0).clamp(0.0, 1.0);
-    [l + a * (ch(0.0) - 0.5), l + a * (ch(4.0) - 0.5), l + a * (ch(2.0) - 0.5)]
-}
-
-/// The reference's colour grade: lightness x `bright`, saturation x `sat`.
-fn grade(c: [f32; 3], bright: f32, sat: f32) -> [f32; 3] {
-    let mut hsl = rgb2hsl(c);
-    hsl[2] = (hsl[2] * bright).clamp(0.0, 1.0);
-    hsl[1] = (hsl[1] * sat).clamp(0.0, 1.0);
-    hsl2rgb(hsl)
-}
-
-fn to_u8(c: [f32; 3], k: f32) -> [u8; 3] {
-    let q = |v: f32| (v * k * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
-    [q(c[0]), q(c[1]), q(c[2])]
-}
-
-/// Mean colour (0..=1) of a pixel box.
-fn box_avg(img: &Img, x: usize, y: usize, w: usize, h: usize) -> [f32; 3] {
-    let mut s = [0u32; 3];
-    for yy in y..y + h {
-        let row = &img.px[(yy * img.w + x) * 3..(yy * img.w + x + w) * 3];
-        for p in row.chunks_exact(3) {
-            s[0] += p[0] as u32;
-            s[1] += p[1] as u32;
-            s[2] += p[2] as u32;
-        }
-    }
-    let n = (w * h) as f32 * 255.0;
-    [s[0] as f32 / n, s[1] as f32 / n, s[2] as f32 / n]
+fn diff(a: [u8; 3], b: [u8; 3]) -> u8 {
+    a[0].abs_diff(b[0]).max(a[1].abs_diff(b[1])).max(a[2].abs_diff(b[2]))
 }
 
 impl Renderer {
-    pub fn new(mode: Mode) -> Renderer {
-        // The shader's taps: a disc of points on an n x n grid (n = 2 at the
-        // demo's 10-pixel cells), spread over the circle's radius.
-        const N: i32 = 2;
-        let r = RADIUS * CW as f32;
-        let taps = CIRCLES
-            .iter()
-            .map(|&(u, v)| {
-                let mut t = Vec::new();
-                for dx in -N..=N {
-                    for dy in -N..=N {
-                        if dx * dx + dy * dy <= N * N {
-                            t.push((u * CW as f32 + dx as f32 * r / N as f32, v * CH as f32 + dy as f32 * r / N as f32));
-                        }
-                    }
-                }
-                t
-            })
-            .collect();
-        // The demo's look: brightness and saturation 1.25, background 0.3,
-        // shape exponent 2.
-        Renderer { mode, bright: 1.25, sat: 1.25, bg_level: 0.3, contrast: 2.0, taps, lum: Vec::new() }
+    pub fn new() -> Renderer {
+        Renderer::default()
     }
 
+    /// Render `img` (`cols` x `2*rows` pixels) into `out`.
     pub fn render(&mut self, img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
+        Renderer::cells(img, cols, rows, &mut self.fresh);
+        let n = cols * rows;
+        if self.dims != (cols, rows) || self.shown.len() != n {
+            self.dims = (cols, rows);
+            self.shown.clone_from(&self.fresh);
+            self.tol = 0;
+            out.clone_from(&self.fresh);
+            return;
+        }
+        let mut hist = [0usize; 256];
+        self.dist.clear();
+        for (a, b) in self.fresh.iter().zip(&self.shown) {
+            let d = diff(a.fg, b.fg).max(diff(a.bg, b.bg));
+            hist[d as usize] += 1;
+            self.dist.push(d);
+        }
+        // Smallest tolerance whose changed cells (distance above it) fit.
+        let cap = self.budget.map_or(usize::MAX, |b| b / CELL_BYTES);
+        let mut tol = MIN_TOL;
+        let mut changed: usize = hist[tol as usize + 1..].iter().sum();
+        while changed > cap && tol < 255 {
+            tol += 1;
+            changed -= hist[tol as usize];
+        }
+        self.tol = tol;
+        for i in 0..n {
+            if self.dist[i] > tol {
+                self.shown[i] = self.fresh[i];
+            }
+        }
+        out.clone_from(&self.shown);
+    }
+
+    /// Plain half blocks with no history (thumbnails, snapshots).
+    pub fn cells(img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
         out.clear();
         out.resize(cols * rows, Cell::default());
         if img.w < cols * CW || img.h < rows * CH || img.px.len() < img.w * img.h * 3 {
             return;
         }
-        match self.mode {
-            Mode::Glow => self.glow(img, cols, rows, out),
-            Mode::Braille => self.braille(img, cols, rows, out),
-        }
-    }
-
-    /// Glyph colour and ground colour for a cell. The shader samples the
-    /// video once at the cell centre; the centre 2x2 pixels of the decoded
-    /// cell are that same bilinear sample.
-    fn colours(&self, img: &Img, cx: usize, cy: usize) -> ([u8; 3], [u8; 3]) {
-        let c = grade(box_avg(img, cx * CW + CW / 2 - 1, cy * CH + CH / 2 - 1, 2, 2), self.bright, self.sat);
-        (to_u8(c, 1.0), to_u8(c, self.bg_level))
-    }
-
-    fn glow(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell]) {
-        let (w, h) = (img.w, img.h);
-        self.lum.clear();
-        self.lum.extend(img.px[..w * h * 3].chunks_exact(3).map(luma));
-        // Bilinear sample at pixel coordinates (pixel centres at +0.5), edges
-        // clamped, as the shader's linear texture filter does.
-        let lum = &self.lum;
-        let at = |x: f32, y: f32| -> f32 {
-            let x = (x - 0.5).clamp(0.0, (w - 1) as f32);
-            let y = (y - 0.5).clamp(0.0, (h - 1) as f32);
-            let (x0, y0) = (x as usize, y as usize);
-            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-            let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-            let top = lum[y0 * w + x0] * (1.0 - fx) + lum[y0 * w + x1] * fx;
-            let bot = lum[y1 * w + x0] * (1.0 - fx) + lum[y1 * w + x1] * fx;
-            top * (1.0 - fy) + bot * fy
+        let px = |x: usize, y: usize| {
+            let i = (y * img.w + x) * 3;
+            [img.px[i], img.px[i + 1], img.px[i + 2]]
         };
         for cy in 0..rows {
             for cx in 0..cols {
-                let (ox, oy) = ((cx * CW) as f32, (cy * CH) as f32);
-                let mut v = [0f32; 6];
-                for (i, taps) in self.taps.iter().enumerate() {
-                    v[i] = taps.iter().map(|&(dx, dy)| at(ox + dx, oy + dy)).sum::<f32>() / taps.len() as f32;
-                }
-                sharpen(&mut v, self.contrast);
-                let (fg, bg) = self.colours(img, cx, cy);
-                out[cy * cols + cx] = Cell { ch: SHAPES[glyphs::nearest(&v)].1, fg, bg };
-            }
-        }
-    }
-
-    fn braille(&mut self, img: &Img, cols: usize, rows: usize, out: &mut [Cell]) {
-        let (dw, dh) = (CW / 2, CH / 4);
-        for cy in 0..rows {
-            for cx in 0..cols {
-                let mut v = [0f32; 8];
-                let mut c = [[0f32; 3]; 8];
-                for j in 0..4 {
-                    for i in 0..2 {
-                        let k = j * 2 + i;
-                        c[k] = box_avg(img, cx * CW + i * dw, cy * CH + j * dh, dw, dh);
-                        v[k] = 0.299 * c[k][0] + 0.587 * c[k][1] + 0.114 * c[k][2];
-                    }
-                }
-                sharpen(&mut v, self.contrast);
-                // Dots take the colour of the dots that light, the ground the
-                // colour of the ones that don't, so edges keep both sides.
-                let (mut bits, mut on, mut off, mut n) = (0, [0f32; 3], [0f32; 3], 0);
-                for j in 0..4 {
-                    for i in 0..2 {
-                        let k = j * 2 + i;
-                        let lit = v[k] > DITHER[j][i];
-                        let acc = if lit { &mut on } else { &mut off };
-                        for d in 0..3 {
-                            acc[d] += c[k][d];
-                        }
-                        if lit {
-                            bits |= BRAILLE_BIT[i][j];
-                            n += 1;
-                        }
-                    }
-                }
-                let mean = |a: [f32; 3], k: usize| if k == 0 { None } else { Some([a[0] / k as f32, a[1] / k as f32, a[2] / k as f32]) };
-                let all = mean([on[0] + off[0], on[1] + off[1], on[2] + off[2]], 8).unwrap();
-                let fg = grade(mean(on, n).unwrap_or(all), self.bright, self.sat);
-                let bg = grade(mean(off, 8 - n).unwrap_or(all), self.bright, self.sat);
-                out[cy * cols + cx] = Cell { ch: char::from_u32(0x2800 + bits).unwrap(), fg: to_u8(fg, 1.0), bg: to_u8(bg, self.bg_level) };
-            }
-        }
-    }
-
-    /// Thumbnails: half blocks (two colours per cell, top and bottom), the
-    /// most legible picture at the small sizes thumbnails are drawn at.
-    pub fn thumb(img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
-        out.clear();
-        out.resize(cols * rows, Cell::default());
-        if img.w < cols * CW || img.h < rows * CH || img.px.len() < img.w * img.h * 3 {
-            return;
-        }
-        for cy in 0..rows {
-            for cx in 0..cols {
-                let (x, y) = (cx * CW, cy * CH);
-                let top = box_avg(img, x, y, CW, CH / 2);
-                let bot = box_avg(img, x, y + CH / 2, CW, CH / 2);
-                out[cy * cols + cx] = Cell { ch: '▀', fg: to_u8(top, 1.0), bg: to_u8(bot, 1.0) };
+                out[cy * cols + cx] = Cell { ch: '▀', fg: px(cx, cy * 2), bg: px(cx, cy * 2 + 1) };
             }
         }
     }
@@ -385,82 +209,62 @@ impl Exposure {
 mod tests {
     use super::*;
 
-    fn flat(cols: usize, rows: usize, c: [u8; 3]) -> Vec<u8> {
-        c.repeat(cols * CW * rows * CH)
+    fn frame(cols: usize, rows: usize, f: impl Fn(usize, usize) -> [u8; 3]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for y in 0..rows * CH {
+            for x in 0..cols * CW {
+                v.extend_from_slice(&f(x, y));
+            }
+        }
+        v
     }
 
-    fn render(mode: Mode, px: &[u8], cols: usize, rows: usize) -> Vec<Cell> {
-        let mut r = Renderer::new(mode);
+    fn run(r: &mut Renderer, px: &[u8], cols: usize, rows: usize) -> Vec<Cell> {
         let mut out = Vec::new();
         r.render(&Img { w: cols * CW, h: rows * CH, px }, cols, rows, &mut out);
         out
     }
 
     #[test]
-    fn modes_parse_by_prefix_and_cycle() {
-        assert_eq!(Mode::parse("b"), Some(Mode::Braille));
-        assert_eq!(Mode::parse("GLOW"), Some(Mode::Glow));
-        assert_eq!(Mode::parse(""), None);
-        assert_eq!(Mode::parse("sextant"), None);
-        assert_eq!(Mode::Glow.next(), Mode::Braille);
-        assert_eq!(Mode::Braille.next(), Mode::Glow);
+    fn half_blocks_take_top_and_bottom_pixels() {
+        let px = frame(2, 1, |x, y| [x as u8 * 100, y as u8 * 200, 7]);
+        let out = run(&mut Renderer::new(), &px, 2, 1);
+        assert_eq!(out[0], Cell { ch: '▀', fg: [0, 0, 7], bg: [0, 200, 7] });
+        assert_eq!(out[1], Cell { ch: '▀', fg: [100, 0, 7], bg: [100, 200, 7] });
     }
 
     #[test]
-    fn grade_is_identity_at_one_and_scales_lightness() {
-        for c in [[0.2, 0.5, 0.9], [1.0, 0.0, 0.0], [0.3, 0.3, 0.3], [0.0, 0.0, 0.0]] {
-            let g = grade(c, 1.0, 1.0);
-            for d in 0..3 {
-                assert!((g[d] - c[d]).abs() < 1e-5, "{c:?} -> {g:?}");
-            }
-        }
-        let grey = grade([0.4, 0.4, 0.4], 1.5, 1.0);
-        assert!((grey[0] - 0.6).abs() < 1e-5);
-        let desat = grade([1.0, 0.0, 0.0], 1.0, 0.0);
-        assert!((desat[0] - desat[1]).abs() < 1e-5 && (desat[1] - desat[2]).abs() < 1e-5);
+    fn noise_below_the_floor_is_not_a_change() {
+        let mut r = Renderer::new();
+        let a = run(&mut r, &frame(8, 4, |_, _| [100; 3]), 8, 4);
+        let b = run(&mut r, &frame(8, 4, |x, _| [100 + (x % 3) as u8; 3]), 8, 4);
+        assert_eq!(a, b);
+        let c = run(&mut r, &frame(8, 4, |_, _| [180; 3]), 8, 4);
+        assert!(c.iter().all(|c| c.fg == [180; 3]));
     }
 
     #[test]
-    fn glow_black_is_empty_and_white_is_dense_over_a_dimmed_ground() {
-        let out = render(Mode::Glow, &flat(4, 2, [0; 3]), 4, 2);
-        assert!(out.iter().all(|c| c.ch == ' ' && c.bg == [0; 3]));
-        let out = render(Mode::Glow, &flat(4, 2, [255; 3]), 4, 2);
-        for c in &out {
-            assert_ne!(c.ch, ' ');
-            assert_eq!(c.fg, [255; 3]);
-            assert_eq!(c.bg, [77; 3], "ground is 0.3 of the colour");
-        }
+    fn budget_sends_the_biggest_changes_first() {
+        let mut r = Renderer::new();
+        run(&mut r, &frame(10, 1, |_, _| [0; 3]), 10, 1);
+        // Cell x changes by 20*x; room for three cells.
+        r.budget = Some(3 * CELL_BYTES);
+        let out = run(&mut r, &frame(10, 1, |x, _| [20 * x as u8; 3]), 10, 1);
+        let sent: Vec<usize> = (0..10).filter(|&x| out[x].fg != [0; 3]).collect();
+        assert_eq!(sent, vec![7, 8, 9]);
+        // Next frame, unlimited: everything catches up exactly.
+        r.budget = None;
+        let out = run(&mut r, &frame(10, 1, |x, _| [20 * x as u8; 3]), 10, 1);
+        assert!((0..10).all(|x| out[x].fg == [20 * x as u8; 3] || x == 0));
     }
 
     #[test]
-    fn braille_lights_dots_in_proportion_to_brightness() {
-        let dots = |v: u8| {
-            let out = render(Mode::Braille, &flat(1, 1, [v; 3]), 1, 1);
-            (out[0].ch as u32 - 0x2800).count_ones()
-        };
-        assert_eq!(dots(0), 0);
-        assert_eq!(dots(255), 8);
-        assert_eq!(dots(128), 4);
-        let mut last = 0;
-        for v in (0..=255).step_by(16) {
-            let n = dots(v as u8);
-            assert!(n >= last, "dot count must not drop as brightness rises");
-            last = n;
-        }
-    }
-
-    #[test]
-    fn braille_dots_follow_an_edge() {
-        // Left half of the cell white, right half black: only the left
-        // column of dots (bits 0x01 0x02 0x04 0x40) may light.
-        let mut px = vec![0u8; CW * CH * 3];
-        for y in 0..CH {
-            for x in 0..CW / 2 {
-                px[(y * CW + x) * 3..(y * CW + x) * 3 + 3].copy_from_slice(&[255; 3]);
-            }
-        }
-        let out = render(Mode::Braille, &px, 1, 1);
-        assert_eq!(out[0].ch as u32 - 0x2800, 0x01 | 0x02 | 0x04 | 0x40);
+    fn a_new_size_is_sent_whole() {
+        let mut r = Renderer::new();
+        r.budget = Some(0);
+        run(&mut r, &frame(4, 2, |_, _| [0; 3]), 4, 2);
+        let out = run(&mut r, &frame(5, 2, |_, _| [90; 3]), 5, 2);
+        assert!(out.iter().all(|c| c.fg == [90; 3]));
     }
 
     #[test]

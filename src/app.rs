@@ -8,7 +8,7 @@ use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
 use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
-use crate::render::{Cell, Mode, Renderer};
+use crate::render::{Cell, Renderer};
 use crate::store::Store;
 use crate::thumbs::Thumbs;
 use crate::yt::{self, fmt_time};
@@ -185,8 +185,6 @@ struct Geo {
     mini_bar: Option<Rect>,
     mini_btns: Vec<(Rect, MiniBtn)>,
     fs_bar: Option<Rect>,
-    /// Look panel rows: (row rect, slider rect, row index).
-    look: Vec<(Rect, Rect, usize)>,
     /// Player-bar volume sliders and seek bars drawn this frame.
     vol: Vec<Rect>,
     seek: Vec<Rect>,
@@ -228,8 +226,6 @@ pub struct App {
     account_name: Option<String>,
     /// A mouse drag that started on a player-bar control.
     drag: Option<Drag>,
-    /// Look panel open, with the selected row.
-    look: Option<usize>,
     /// Waiting for a cookie extension's export on the clipboard since .0;
     /// .1 is the clipboard sequence number last looked at.
     capture: Option<(Instant, u32)>,
@@ -269,22 +265,13 @@ impl App {
         self.status = (msg, Instant::now() + Duration::from_secs(8));
     }
 
-    pub fn new(mut renderer: Renderer, opts: Opts, max_h: Option<u32>, mode_forced: bool) -> (App, Receiver<Msg>) {
+    pub fn new(renderer: Renderer, opts: Opts, max_h: Option<u32>) -> (App, Receiver<Msg>) {
         let (tx, rx) = channel();
         let txw = tx.clone();
         let thumbs = Thumbs::new(move || {
             let _ = txw.send(Msg::Wake);
         });
         let store = Store::load();
-        if !mode_forced {
-            if let Some(m) = store.mode.as_deref().and_then(Mode::parse) {
-                renderer.mode = m;
-            }
-        }
-        renderer.bright = store.look_bright;
-        renderer.sat = store.look_sat;
-        renderer.bg_level = store.look_bg;
-        renderer.contrast = store.look_contrast;
         let app = App {
             api: Arc::new(Api::new()),
             tx,
@@ -315,7 +302,6 @@ impl App {
             login: None,
             account_name: None,
             drag: None,
-            look: None,
             capture: None,
             stats: std::env::var("YTUI_STATS").ok().map(Stats::new),
             fs_on_play: false,
@@ -1801,7 +1787,6 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
                 MouseEventKind::Drag(MouseButton::Left) => match self.drag {
                     Some(Drag::Volume(r)) => self.volume_at(r, m.column),
-                    Some(Drag::Look(r, i)) => self.look_at(i, r, m.column),
                     // Seek on release, so dragging doesn't restart playback per cell.
                     Some(Drag::Seek(_)) | None => {}
                 },
@@ -1837,123 +1822,6 @@ impl App {
         self.page().layout.as_ref().map(|l| &l.1)
     }
 
-    /// Current value of a look row.
-    fn look_value(&self, i: usize) -> f32 {
-        match i {
-            1 => self.renderer.bright,
-            2 => self.renderer.sat,
-            3 => self.renderer.bg_level,
-            4 => self.renderer.contrast,
-            _ => 0.0,
-        }
-    }
-
-    /// Set a look slider, keep it, and redraw.
-    fn set_look(&mut self, i: usize, v: f32) {
-        let (_, lo, hi, step) = LOOK_ROWS[i];
-        let v = ((v.clamp(lo, hi) / step).round() * step).clamp(lo, hi);
-        match i {
-            1 => (self.renderer.bright, self.store.look_bright) = (v, v),
-            2 => (self.renderer.sat, self.store.look_sat) = (v, v),
-            3 => (self.renderer.bg_level, self.store.look_bg) = (v, v),
-            4 => (self.renderer.contrast, self.store.look_contrast) = (v, v),
-            _ => return,
-        }
-        self.store.touch();
-        self.dirty = true;
-    }
-
-    /// Step a look row: sliders by one step, choices to the next option.
-    fn look_step(&mut self, i: usize, dir: f32) {
-        match i {
-            0 => {
-                let all = Mode::ALL;
-                let at = all.iter().position(|&m| m == self.renderer.mode).unwrap_or(0) as isize;
-                let n = all.len() as isize;
-                self.renderer.mode = all[((at + dir as isize).rem_euclid(n)) as usize];
-                self.store.mode = Some(self.renderer.mode.name().into());
-                self.store.touch();
-            }
-            5 => {
-                self.store.exposure = !self.store.exposure;
-                self.store.touch();
-                if let Some(p) = &mut self.player {
-                    p.exposure.on = self.store.exposure;
-                    p.exposure.reset();
-                }
-            }
-            _ => {
-                let step = LOOK_ROWS[i].3;
-                self.set_look(i, self.look_value(i) + dir * step);
-            }
-        }
-    }
-
-    /// Set a look slider from a position along it.
-    fn look_at(&mut self, i: usize, r: Rect, x: u16) {
-        let (_, lo, hi, _) = LOOK_ROWS[i];
-        let frac = (x.saturating_sub(r.x) as f32 / (r.width.max(2) - 1) as f32).clamp(0.0, 1.0);
-        self.set_look(i, lo + frac * (hi - lo));
-    }
-
-    /// The look panel: top right, over the picture, like a video editor's
-    /// inspector.
-    fn draw_look(&mut self, buf: &mut Buffer, area: Rect) {
-        let Some(sel) = self.look else { return };
-        let w: u16 = 46.min(area.width.saturating_sub(2));
-        let h: u16 = LOOK_ROWS.len() as u16 + 5;
-        if w < 30 || area.height < h + 2 {
-            return;
-        }
-        let r = Rect { x: area.x + area.width - w - 1, y: area.y + 1, width: w, height: h };
-        let bg = Color::Rgb(24, 24, 30);
-        for yy in r.y..r.y + r.height {
-            for xx in r.x..r.x + r.width {
-                buf[(xx, yy)].set_char(' ').set_bg(bg).set_fg(Color::White);
-            }
-        }
-        let border = Style::default().fg(ACCENT).bg(bg);
-        for xx in r.x..r.x + w {
-            buf[(xx, r.y)].set_char('─').set_style(border);
-            buf[(xx, r.y + h - 1)].set_char('─').set_style(border);
-        }
-        buf.set_string(r.x + 2, r.y, " Look ", Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD));
-        let label_w = 15u16;
-        let slider_w = w - label_w - 11;
-        for (i, &(name, lo, hi, step)) in LOOK_ROWS.iter().enumerate() {
-            let y = r.y + 2 + i as u16;
-            let row = Rect { x: r.x + 1, y, width: w - 2, height: 1 };
-            let on = i == sel;
-            let st = if on { Style::default().fg(Color::White).bg(ACCENT) } else { Style::default().fg(Color::Rgb(220, 220, 220)).bg(bg) };
-            buf.set_style(row, st);
-            buf.set_string(r.x + 2, y, name, st);
-            let sx = r.x + 2 + label_w;
-            let slider = Rect { x: sx, y, width: slider_w, height: 1 };
-            if step > 0.0 {
-                let v = self.look_value(i);
-                let lit = (((v - lo) / (hi - lo)) * slider_w as f32).round() as u16;
-                for k in 0..slider_w {
-                    let c = &mut buf[(sx + k, y)];
-                    if k < lit {
-                        c.set_char('█').set_fg(Color::White);
-                    } else {
-                        c.set_char('▁').set_fg(Color::Rgb(90, 90, 100));
-                    }
-                }
-                buf.set_string(sx + slider_w + 1, y, format!("{v:>5.2}"), st);
-            } else {
-                let text = match i {
-                    0 => format!("◂ {} ▸", self.renderer.mode.name()),
-                    _ => (if self.store.exposure { "on" } else { "off" }).to_string(),
-                };
-                buf.set_string(sx, y, text, st);
-            }
-            self.geo.look.push((row, slider, i));
-        }
-        let hint = "↑↓ choose · ←→ adjust · drag · o close";
-        buf.set_string(r.x + 2, r.y + h - 2, page::trunc(hint, w as usize - 4), Style::default().fg(DIM).bg(bg));
-    }
-
     /// Set the volume from a position on a slider (0-150%).
     fn volume_at(&mut self, r: Rect, x: u16) {
         let frac = ((x.saturating_sub(r.x) as f32 + 1.0) / r.width.max(1) as f32).clamp(0.0, 1.0);
@@ -1969,21 +1837,6 @@ impl App {
 
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
-        if self.look.is_some() {
-            if let Some(&(_, slider, i)) = self.geo.look.iter().find(|(r, ..)| hit(r)) {
-                self.look = Some(i);
-                if LOOK_ROWS[i].3 > 0.0 && hit(&slider) {
-                    self.drag = Some(Drag::Look(slider, i));
-                    self.look_at(i, slider, x);
-                } else if LOOK_ROWS[i].3 == 0.0 {
-                    self.look_step(i, 1.0);
-                }
-                return;
-            }
-            // A click elsewhere closes the panel.
-            self.look = None;
-            return;
-        }
         match self.bar_hit(x, y) {
             Some((true, r)) => {
                 self.drag = Some(Drag::Volume(r));
@@ -2191,18 +2044,6 @@ impl App {
             self.quit = true;
             return;
         }
-        // Look panel
-        if let Some(sel) = self.look {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('q') => self.look = None,
-                KeyCode::Up | KeyCode::Char('k') => self.look = Some(sel.saturating_sub(1)),
-                KeyCode::Down | KeyCode::Char('j') => self.look = Some((sel + 1).min(LOOK_ROWS.len() - 1)),
-                KeyCode::Left | KeyCode::Char('h') => self.look_step(sel, -1.0),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => self.look_step(sel, 1.0),
-                _ => return self.global_key(k),
-            }
-            return;
-        }
         // Dialog
         if let Some(d) = &mut self.dialog {
             match k.code {
@@ -2364,13 +2205,6 @@ impl App {
             KeyCode::Right if alt => self.forward(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('?') => self.navigate(Kind::Help),
-            KeyCode::Char('o') => self.look = Some(0),
-            KeyCode::Char('m') => {
-                self.renderer.mode = self.renderer.mode.next();
-                self.store.mode = Some(self.renderer.mode.name().into());
-                self.store.touch();
-                self.flash(format!("render mode: {}", self.renderer.mode.name()));
-            }
             KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
             KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
             KeyCode::Char('M') => {
@@ -2415,8 +2249,6 @@ impl App {
                 self.store_changed();
                 self.flash(if self.store.show_chat { "chat shown" } else { "chat hidden" });
             }
-            KeyCode::Char('[') => self.set_look(4, self.renderer.contrast - LOOK_ROWS[4].3),
-            KeyCode::Char(']') => self.set_look(4, self.renderer.contrast + LOOK_ROWS[4].3),
             KeyCode::Char('a') => {
                 self.store.autoplay = !self.store.autoplay;
                 self.store_changed();
@@ -2508,10 +2340,6 @@ impl App {
 
     pub fn draw(&mut self, f: &mut Frame) {
         self.draw_ui(f);
-        if self.look.is_some() {
-            let area = f.area();
-            self.draw_look(f.buffer_mut(), area);
-        }
     }
 
     fn draw_ui(&mut self, f: &mut Frame) {
@@ -2867,7 +2695,7 @@ impl App {
                 Prim::PlayerBar { x, y, w: bw, id } => {
                     if *y >= scroll && *y < scroll + vh as usize {
                         if let Some(p) = self.player.as_ref().filter(|p| &p.video.id == id) {
-                            let (seek, vol) = draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, self.renderer.mode, false);
+                            let (seek, vol) = draw_bar(buf, r.x + x, r.y + (y - scroll) as u16, (*bw).min(w.saturating_sub(*x)), p, false);
                             self.geo.seek.push(seek);
                             self.geo.vol.extend(vol);
                         }
@@ -2937,7 +2765,7 @@ impl App {
         let pb = Rect { x: r.x + mw - 5, y: r.y + vh, width: 4, height: 1 };
         buf.set_string(pb.x, pb.y, if p.paused || p.ended { " ▶ " } else { " ❚❚" }, Style::default().fg(Color::White).bg(page::BUTTON));
         self.geo.mini_btns.push((pb, MiniBtn::Pause));
-        let _ = draw_bar(buf, r.x, r.y + vh + 1, mw, p, self.renderer.mode, true);
+        let _ = draw_bar(buf, r.x, r.y + vh + 1, mw, p, true);
         self.geo.mini = Some(r);
         self.geo.mini_bar = Some(Rect { x: r.x, y: r.y + vh + 1, width: mw.saturating_sub(16), height: 1 });
     }
@@ -2960,7 +2788,7 @@ impl App {
         }
         let br = Rect { y: area.y + vh, height: 1, ..area };
         buf.set_style(br, Style::default().bg(Color::Rgb(40, 0, 0)));
-        let (seek, vol) = draw_bar(buf, br.x, br.y, br.width, p, self.renderer.mode, false);
+        let (seek, vol) = draw_bar(buf, br.x, br.y, br.width, p, false);
         self.geo.seek.push(seek);
         self.geo.vol.extend(vol);
         self.geo.fs_bar = Some(Rect { width: br.width.saturating_sub(18), ..br });
@@ -2990,7 +2818,7 @@ impl App {
         } else {
             format!("vol {:.0}%", self.store.volume * 100.0)
         };
-        let right = format!(" {} · {audio} │ / search  ↵ open  H back  f full  +- vol  C chat  ? help ", self.renderer.mode.name());
+        let right = format!(" {audio} │ / search  ↵ open  H back  f full  +- vol  C chat  ? help ");
         let rw = right.width() as u16;
         let lw = r.width.saturating_sub(rw + 1) as usize;
         buf.set_string(r.x + 1, r.y, page::trunc(&left, lw), style);
@@ -3027,6 +2855,9 @@ impl App {
         let mut last_save = Instant::now();
         let mut last_draw = Instant::now();
         let sync = std::env::var_os("YTUI_NO_SYNC").is_none();
+        // A new video frame (or spinner step) not yet drawn.
+        let mut owed = false;
+        let budget = std::env::var_os("YTUI_NO_BUDGET").is_none();
         while !self.quit {
             while let Ok(m) = rx.try_recv() {
                 self.on_msg(m);
@@ -3048,12 +2879,19 @@ impl App {
                     self.load_more();
                 }
             }
-            if self.dirty || fresh {
+            owed |= fresh;
+            // While the terminal is still working through the last frame,
+            // newer frames replace each other here instead of queueing.
+            if self.dirty || (owed && !out.busy()) {
+                owed = false;
                 last_draw = Instant::now();
                 let t0 = Instant::now();
                 if sync {
                     let _ = crossterm::queue!(terminal.backend_mut(), BeginSynchronizedUpdate);
                 }
+                // Size this frame's video to what the terminal can take.
+                let fps = self.player.as_ref().map_or(0.0, |p| p.frame_rate());
+                self.renderer.budget = (budget && fps > 0.0).then(|| (out.rate() * crate::out::BUDGET_SHARE / fps) as usize);
                 terminal.draw(|f| self.draw(f))?;
                 let t1 = Instant::now();
                 if sync {
@@ -3066,7 +2904,7 @@ impl App {
                 self.dirty = false;
                 if let Some(s) = &mut self.stats {
                     let p = self.player.as_ref();
-                    s.frame(t1 - t0, t1.elapsed(), p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
+                    s.frame(t1 - t0, t1.elapsed(), p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), format!("{} | tol {} rate {:.1}MB/s | {}", p.map(|p| p.debug()).unwrap_or_default(), self.renderer.tol, out.rate() / 1e6, crate::sys::console_state()));
                 }
             }
             if last_save.elapsed() > Duration::from_secs(20) {
@@ -3180,12 +3018,13 @@ fn center_text(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, te
 }
 
 /// Captions over the bottom of a w x h video box (top-left at column x,
-/// row sy of `clip`): centred lines, wrapped, white on black like YouTube's.
+/// row sy of `clip`): centred, wrapped lines in bold white on a solid black
+/// box with a blank row above and below, so they read over any picture.
 fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, text: &str) {
     if text.trim().is_empty() || w < 8 || h < 4 {
         return;
     }
-    let max = (w as usize * 9 / 10).max(8);
+    let max = (w as usize * 8 / 10).max(6);
     let mut lines: Vec<String> = Vec::new();
     for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let mut cur = String::new();
@@ -3203,18 +3042,26 @@ fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, 
         }
     }
     // Newest lines win when there are more than fit.
-    let keep = (h as usize / 3).clamp(1, 3);
+    let keep = (h as usize / 4).clamp(1, 3);
     let lines = &lines[lines.len().saturating_sub(keep)..];
-    let style = Style::default().fg(Color::White).bg(Color::Rgb(8, 8, 8)).add_modifier(Modifier::BOLD);
-    let bottom = sy + h as i64 - 1 - (h > 10) as i64;
-    for (i, l) in lines.iter().enumerate() {
-        let y = bottom - (lines.len() - 1 - i) as i64;
+    let pad = h >= 12;
+    let bw = (lines.iter().map(|l| l.width()).max().unwrap_or(0) + 4).min(w as usize) as u16;
+    let bx = x + w.saturating_sub(bw) / 2;
+    let rows = lines.len() as i64 + 2 * pad as i64;
+    let bottom = sy + h as i64 - 1 - (h >= 16) as i64;
+    let style = Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
+    for r in 0..rows {
+        let y = bottom - (rows - 1 - r);
         if y < 0 || y >= clip.height as i64 {
             continue;
         }
-        let s = format!(" {l} ");
-        let tx = x + w.saturating_sub(s.width() as u16) / 2;
-        buf.set_string(tx, clip.y + y as u16, &s, style);
+        let yy = clip.y + y as u16;
+        for xx in bx..bx + bw {
+            buf[(xx, yy)].set_char(' ').set_style(style);
+        }
+        if let Some(l) = usize::try_from(r - pad as i64).ok().and_then(|i| lines.get(i)) {
+            buf.set_string(x + w.saturating_sub(l.width() as u16) / 2, yy, l, style);
+        }
     }
 }
 
@@ -3222,27 +3069,14 @@ fn draw_captions(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, 
 enum Drag {
     Volume(Rect),
     Seek(Rect),
-    /// A look-panel slider (row index).
-    Look(Rect, usize),
 }
-
-/// Look panel rows: (label, min, max, step). Mode and auto-exposure are
-/// choices rather than sliders (min = max = 0).
-const LOOK_ROWS: [(&str, f32, f32, f32); 6] = [
-    ("Mode", 0.0, 0.0, 0.0),
-    ("Brightness", 0.5, 2.0, 0.05),
-    ("Saturation", 0.0, 2.0, 0.05),
-    ("Background", 0.0, 0.8, 0.05),
-    ("Contrast", 1.0, 4.0, 0.1),
-    ("Auto-exposure", 0.0, 0.0, 0.0),
-];
 
 /// Cells in the volume slider (0-150%).
 const VOL_CELLS: u16 = 12;
 
 /// The player bar: seek bar, time, and (full size) a volume slider.
 /// Returns where the seek bar and the volume slider were drawn.
-fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, compact: bool) -> (Rect, Option<Rect>) {
+fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, compact: bool) -> (Rect, Option<Rect>) {
     let d = p.duration();
     let icon = if p.loading() { "…" } else if p.ended { "■" } else if p.paused { "❚❚" } else { "▶" };
     let time = if p.stream.live { format!("{icon} LIVE {}", fmt_time(p.pos)) } else { format!("{icon} {} / {}", fmt_time(p.pos), fmt_time(d)) };
@@ -3250,9 +3084,9 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
     let ae = if p.exposure.on { " AE" } else { "" };
     let cc = if p.caption_track().is_some() { " CC" } else { "" };
     let rate = format!("{:.0}fps", p.fps);
-    // [time]  vol [slider] pct  [mode AE CC rate]
+    // [time]  vol [slider] pct  [AE CC rate]
     let head = format!(" {time}  vol ");
-    let rest = format!(" {pct}  {}{ae}{cc} {rate} ", mode.name());
+    let rest = format!(" {pct} {ae}{cc} {rate} ");
     let slider = !compact && w > head.width() as u16 + VOL_CELLS + rest.width() as u16 + 16;
     let tail = if compact || !slider { format!(" {time} ") } else { String::new() };
     let tw = if slider { head.width() as u16 + VOL_CELLS + rest.width() as u16 } else { tail.width() as u16 };
