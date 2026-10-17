@@ -1,5 +1,5 @@
 ---
-title: ytui docs
+title: ytui documentation
 description: How to install ytui, watch YouTube in your terminal, see how video is drawn, and set up sign-in and playback.
 ---
 
