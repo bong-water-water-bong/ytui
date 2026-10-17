@@ -1560,7 +1560,7 @@ impl App {
                     match crate::browser_login::Login::start() {
                         Ok(l) => {
                             self.login = Some(l);
-                            self.flash("sign in with Google in the window that opened, then close it");
+                            self.flash("sign in with Google in the browser that opened");
                         }
                         Err(e) => {
                             // No usable browser: fall back to a cookie extension.

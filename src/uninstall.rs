@@ -19,6 +19,7 @@ pub fn run(yes: bool) -> Result<()> {
         .filter(|d| d.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ytui-")))
         .map(Path::to_path_buf);
     let mut dirs = vec![crate::auth::config_dir(), crate::auth::data_dir(), crate::api::cache_dir()];
+    dirs.extend(crate::browser_login::firefox_profiles());
     dirs.dedup();
     dirs.retain(|d| d.exists());
     let packaged: Vec<PathBuf> = pkg.iter().flat_map(|d| PACKAGED.iter().map(move |n| d.join(n))).filter(|p| p.exists()).collect();

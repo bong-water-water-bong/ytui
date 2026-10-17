@@ -16,7 +16,8 @@ in the meantime, sign in:
 2. A browser window opens on Google's sign-in page. Sign in as you would on any website.
 3. ytui takes it from there and closes the window.
 
-The window uses a separate Chrome, Edge, Brave or Chromium profile that belongs to ytui, never your everyday one.
+The window uses a separate Chrome, Edge, Brave, Chromium or Firefox profile that belongs to ytui, never your everyday one.
+ytui picks a Chromium-family browser first. To sign in with Firefox when you have both, set `YTUI_BROWSER=firefox`.
 If none of those browsers is installed, set `YTUI_BROWSER` to one, or use a cookie extension instead.
 To do that, open youtube.com, click the extension and press Export or Copy while ytui is waiting. Or paste the export into
 ytui with `Ctrl-V`.

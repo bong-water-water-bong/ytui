@@ -53,6 +53,6 @@ description: All ytui command-line options and environment variables, for render
 | `YTUI_GFX` | Same as `--gfx` |
 | `YTUI_COLORS` | Same as `--colors` |
 | `YTUI_FONT` | A monospace `.ttf` whose character shapes the ASCII modes match against |
-| `YTUI_BROWSER` | The browser to sign in with |
+| `YTUI_BROWSER` | The browser to sign in with (a path, or a name like `firefox`) |
 | `YTUI_SIXEL_EXACT` | Set to `1` to resend every sixel row that changed |
 | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` | Where ytui keeps its data and settings |
