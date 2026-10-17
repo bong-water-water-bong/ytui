@@ -104,16 +104,18 @@ pub fn parse_sauce(data: &[u8]) -> Option<Sauce> {
         // SAUCE text is CP437 in practice; map the high half properly.
         raw[..end].iter().map(|&c| ch(c)).collect::<String>().trim_end().to_string()
     };
+    // Field offsets are the SAUCE spec's, and the four-byte FileSize at 90
+    // is why everything after the date sits where it does.
     Some(Sauce {
         title: f(7, 42),
         author: f(42, 62),
         group: f(62, 82),
         date: f(82, 90),
+        datatype: data[start + 94],
+        filetype: data[start + 95],
         width: u16::from_le_bytes([data[start + 96], data[start + 97]]) as usize,
-        font: data[start + 98],
-        flags: data[start + 99],
-        datatype: data[start + 90],
-        filetype: data[start + 91],
+        font: u16::from_le_bytes([data[start + 98], data[start + 99]]) as u8,
+        flags: data[start + 105],
     })
 }
 
@@ -369,10 +371,24 @@ fn apply_csi(
                 match v {
                     0 => pen.reset(),
                     1 => {
+                        // Bold brightens the colour *already set*, not just
+                        // the next one. Art leans on this: a bare `ESC[1m`
+                        // after `ESC[31m` is how bright red is written, and
+                        // treating it as only a font weight leaves the whole
+                        // picture a shade too dark.
                         pen.bold = true;
+                        if pen.fg < 8 {
+                            pen.fg += 8;
+                        }
                         pen.fg24 = None;
                     }
-                    22 => pen.bold = false,
+                    22 => {
+                        // Leaving bold dims the current colour back down.
+                        pen.bold = false;
+                        if pen.fg >= 8 {
+                            pen.fg -= 8;
+                        }
+                    }
                     5 => {
                         pen.blink = true;
                         pen.bg24 = None;
@@ -653,11 +669,11 @@ mod tests {
         rec[..7].copy_from_slice(SAUCE_MAGIC);
         rec[7..10].copy_from_slice(b"ART");
         rec[42..44].copy_from_slice(b"ME");
-        rec[90] = 1; // Character
-        rec[91] = 1; // ANSI
+        rec[94] = 1; // Character
+        rec[95] = 1; // ANSI
         rec[96..98].copy_from_slice(&80u16.to_le_bytes());
-        rec[98] = 1;
-        rec[99] = 1; // iCE, 8-dot
+        rec[98..100].copy_from_slice(&1u16.to_le_bytes()); // font 1 = 8x16
+        rec[105] = 1; // iCE, 8-dot
         file.extend_from_slice(&rec);
 
         let a = art(&file);
@@ -678,11 +694,11 @@ mod tests {
         file.push(0x1A);
         let mut rec = vec![0u8; SAUCE_LEN];
         rec[..7].copy_from_slice(SAUCE_MAGIC);
-        rec[90] = 1;
-        rec[91] = 1;
-        rec[97] = 0;
-        rec[98] = 1;
-        rec[99] = 0; // explicitly non-iCE
+        rec[94] = 1;
+        rec[95] = 1;
+        rec[96..98].copy_from_slice(&0u16.to_le_bytes()); // width unknown
+        rec[98..100].copy_from_slice(&1u16.to_le_bytes());
+        rec[105] = 0; // explicitly non-iCE
         file.extend_from_slice(&rec);
         let a = read_ansi(&file, ReadOpts { ice: Ice::On, use_sauce: true, ..Default::default() });
         assert_eq!(a.get(0, 0).bg, 4, "the file's own flag must beat the caller's default");
@@ -718,5 +734,150 @@ mod tests {
         assert_eq!(a.cols, 1);
         assert_eq!(a.get(0, 0).bg, 4);
         assert_eq!(a.get(0, 0).fg, 4, "flat cell: same colour both sides");
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/bs-alove.ans");
+
+    #[test]
+    fn reads_the_ansilove_fixture_sauce() {
+        let a = read_ansi(FIXTURE, ReadOpts::default());
+        let s = a.sauce.as_ref().expect("fixture carries SAUCE");
+        assert_eq!(s.title, "ansilove");
+        assert_eq!(s.author, "burps");
+        assert_eq!(s.group, "fuel");
+        assert_eq!(s.date, "20171019");
+        assert_eq!(s.width, 80);
+        assert_eq!(s.datatype, 1, "Character");
+        assert_eq!(s.filetype, 1, "ANSI");
+        assert_eq!(s.font, 59, "IBM VGA (the ';' font id)");
+        assert!(!s.ice(), "this file's flags say blink, not iCE");
+        assert_eq!(a.rows, 59, "TInfo2 doubles as the row count");
+    }
+
+    #[test]
+    fn fixture_grid_is_the_expected_geometry() {
+        let a = read_ansi(FIXTURE, ReadOpts::default());
+        assert_eq!(a.cols, 80);
+        assert_eq!(a.rows, 59);
+        assert_eq!(a.cells.len(), 80 * 59);
+    }
+
+    #[test]
+    fn fixture_survives_a_round_trip() {
+        let a = read_ansi(FIXTURE, ReadOpts::default());
+        let bytes = super::super::writer::write_ansi(
+            &a,
+            super::super::writer::WriteOpts { sauce: true, ..Default::default() },
+        );
+        let b = read_ansi(&bytes, ReadOpts::default());
+        assert_eq!((b.cols, b.rows), (a.cols, a.rows));
+        for y in 0..a.rows {
+            for x in 0..a.cols {
+                let (p, q) = (a.get(x, y), b.get(x, y));
+                assert_eq!((p.ch, p.fg & 7), (q.ch, q.fg & 7), "cell {x},{y}");
+            }
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod conformance {
+    use super::*;
+    use super::super::palette::rasterise;
+
+    const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/bs-alove.ans");
+    /// Rendered by AnsiLove/C 1.4.2 (`ansilove bs-alove.ans`), the reference
+    /// implementation of this format.
+    const REFERENCE: &[u8] = include_bytes!("../../tests/fixtures/bs-alove.reference.png");
+
+    /// Decode a non-interlaced 8-bit RGB PNG, enough for our own fixture.
+    fn read_png_rgb(data: &[u8]) -> (usize, usize, Vec<u8>) {
+        assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+        let mut at = 8;
+        let (mut w, mut h, mut bit_depth, mut colour) = (0, 0, 0, 0);
+        let mut idat = Vec::new();
+        while at + 8 <= data.len() {
+            let len = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let kind = &data[at + 4..at + 8];
+            let body = &data[at + 8..at + 8 + len];
+            match kind {
+                b"IHDR" => {
+                    w = u32::from_be_bytes(body[0..4].try_into().unwrap()) as usize;
+                    h = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
+                    bit_depth = body[8];
+                    colour = body[9];
+                }
+                b"IDAT" => idat.extend_from_slice(body),
+                b"IEND" => break,
+                _ => {}
+            }
+            at += 12 + len;
+        }
+        assert_eq!((bit_depth, colour), (8, 2), "expected 8-bit RGB");
+        let raw = {
+            let mut out = Vec::new();
+            let mut z = flate2::read::ZlibDecoder::new(&idat[..]);
+            std::io::Read::read_to_end(&mut z, &mut out).expect("inflate");
+            out
+        };
+        // Undo the per-scanline PNG filters.
+        let bpp = 3;
+        let stride = w * bpp;
+        let mut px = vec![0u8; stride * h];
+        for y in 0..h {
+            let ft = raw[y * (stride + 1)];
+            let line = &raw[y * (stride + 1) + 1..y * (stride + 1) + 1 + stride];
+            for x in 0..stride {
+                let a = if x >= bpp { px[y * stride + x - bpp] as i32 } else { 0 };
+                let b = if y > 0 { px[(y - 1) * stride + x] as i32 } else { 0 };
+                let c = if x >= bpp && y > 0 { px[(y - 1) * stride + x - bpp] as i32 } else { 0 };
+                let v = line[x] as i32;
+                let out = match ft {
+                    0 => v,
+                    1 => v + a,
+                    2 => v + b,
+                    3 => v + (a + b) / 2,
+                    4 => {
+                        let p = a + b - c;
+                        let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                        v + if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
+                    }
+                    _ => panic!("bad filter {ft}"),
+                };
+                px[y * stride + x] = (out & 0xff) as u8;
+            }
+        }
+        (w, h, px)
+    }
+
+    #[test]
+    fn matches_ansilove_pixel_for_pixel() {
+        let art = read_ansi(FIXTURE, ReadOpts::default());
+        let mine = rasterise(&art.cells, art.cols, art.rows, Rgb::Vga, 8);
+        let (w, h, theirs) = read_png_rgb(REFERENCE);
+        assert_eq!((w, h), (art.cols * 8, art.rows * 16), "geometry must match");
+        assert_eq!(mine.len(), theirs.len());
+
+        let mut differing = 0usize;
+        let mut first = None;
+        for (i, (a, b)) in mine.chunks_exact(3).zip(theirs.chunks_exact(3)).enumerate() {
+            if a != b {
+                differing += 1;
+                first.get_or_insert((i % w / 8, i / w / 16, [a[0], a[1], a[2]], [b[0], b[1], b[2]]));
+            }
+        }
+        assert_eq!(
+            differing, 0,
+            "{} of {} pixels differ; first at cell {:?}",
+            differing,
+            w * h,
+            first
+        );
     }
 }

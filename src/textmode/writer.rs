@@ -182,13 +182,13 @@ pub fn write_ansi(art: &Art, opts: WriteOpts) -> Vec<u8> {
     out.extend_from_slice(b"\x1b[0m");
     if opts.sauce {
         out.push(0x1A);
-        out.extend_from_slice(&sauce_record(art, opts));
+        out.extend_from_slice(&sauce_record(art, opts, out.len() - 1));
     }
     out
 }
 
 /// Build the 128-byte SAUCE record for an art grid.
-fn sauce_record(art: &Art, opts: WriteOpts) -> Vec<u8> {
+fn sauce_record(art: &Art, opts: WriteOpts, art_size: usize) -> Vec<u8> {
     let mut r = vec![0u8; 128];
     r[..7].copy_from_slice(b"SAUCE00");
     // Fields are space-padded CP437. Narrow them to bytes we can encode.
@@ -208,9 +208,16 @@ fn sauce_record(art: &Art, opts: WriteOpts) -> Vec<u8> {
     put(&mut r, 42, 20, author);
     put(&mut r, 62, 20, group);
     put(&mut r, 82, 8, "20260101");
+    // FileSize at 90 counts the bytes before the SAUCE record.
+    r[90..94].copy_from_slice(&(art_size as u32).to_le_bytes());
+    r[94] = 1; // Datatype: Character
+    r[95] = 1; // Filetype: ANSI
     let w = (art.cols.min(u16::MAX as usize)) as u16;
     r[96..98].copy_from_slice(&w.to_le_bytes());
-    r[98] = if opts.bits == 9 { 1 } else { 1 }; // font 1 = 8x16 VGA
+    // TInfo2 is the font ID: 1 = 8x16 VGA, 2 = 8x14 EGA, 3 = 8x8 CGA.
+    let font: u16 = if opts.bits == 9 { 1 } else { 1 };
+    r[98..100].copy_from_slice(&font.to_le_bytes());
+    r[104] = 0; // no comment block
     let mut flags = 0u8;
     if opts.ice == Ice::On {
         flags |= 1; // non-blink / iCE
@@ -218,11 +225,9 @@ fn sauce_record(art: &Art, opts: WriteOpts) -> Vec<u8> {
     if opts.bits == 9 {
         flags |= 2;
     }
-    r[99] = flags;
-    r[90] = 1; // Datatype: Character
-    r[91] = 1; // Filetype: ANSI
-    let rows = (art.rows.min(u16::MAX as usize)) as u16;
-    r[104..106].copy_from_slice(&rows.to_le_bytes());
+    r[105] = flags;
+    let font_name: &[u8] = if opts.bits == 9 { b"IBM VGA50" } else { b"IBM VGA" };
+    r[106..106 + font_name.len()].copy_from_slice(font_name);
     r
 }
 
