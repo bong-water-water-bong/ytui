@@ -2222,7 +2222,9 @@ impl App {
 
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
-        if let Some(&(_, c)) = self.geo.ctl.iter().find(|(r, _)| hit(r)) {
+        // Dialogs and address-bar suggestions draw over the video's controls.
+        let covered = self.dialog.is_some() || self.geo.sugg.iter().any(|(r, _)| hit(r));
+        if let Some(&(_, c)) = self.geo.ctl.iter().find(|(r, _)| hit(r)).filter(|_| !covered) {
             return self.control(c);
         }
         if self.geo.players.iter().any(hit) {
