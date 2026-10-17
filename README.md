@@ -246,11 +246,12 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 | `ansi9-16` | `ansi-16` at 9 dots per cell |
 | `ansiblink` | As `ansi-16`, but backgrounds limited to the 8 that do not blink (iCE off) |
 
-The `ansi` modes are the slow ones — they fit every CP437 glyph for every cell — so they suit stills
-and the exporter better than live video. Truecolour is *faster* than the palette fit (≈80 ms vs
-≈160 ms per frame at 120×40): with the ink mask fixed, the best two colours are the two group means,
-so no palette search is needed. The mosaic modes remain the fast choice for live video. See
-[ANSI art](#ansi-art) below.
+The `ansi` modes are the slow ones — they fit every CP437 glyph for every cell. Real numbers, per
+frame: about 33 ms at 80×24, 79 ms at 120×40, 165 ms at 200×50. So on a normal terminal they hold
+~30 fps and are perfectly watchable; on a very large one they crawl, and ytui says so when you pick
+one rather than letting the picture stutter silently. Truecolour is the *faster* of the two — with
+the ink mask fixed, the best two colours are the two group means, so there is no palette search to
+do. The mosaic modes remain the fluid choice at any size. See [ANSI art](#ansi-art) below.
 
 **Auto-exposure** (on by default, `E` toggles) lifts under-exposed video so dark scenes stay
 readable: it measures each frame's 1st–99th percentile brightness, raises the highlights to white

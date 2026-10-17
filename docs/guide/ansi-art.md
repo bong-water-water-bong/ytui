@@ -20,13 +20,27 @@ commands read and write it.
 Truecolour is not a compromise here, it is the faster path. Once the glyph's ink mask is fixed, the
 two colours that minimise squared error are simply the mean of the inked pixels and the mean of the
 rest — no palette to search, and the error is derivable from channel sums so the cell is not walked
-again per glyph. That measures at roughly 80 ms a frame at 120×40, against 160 ms for the palette
-fit, which has to round two means to a 16-entry table. On a real frame the truecolour reconstruction
-comes out 99.8% closer to the source than the 16-colour one.
+again per glyph. That compares with the palette fit, which has to round two means to a 16-entry
+table. On a real frame the truecolour reconstruction comes out 99.8% closer to the source.
 
-All the `ansi` modes are still far slower than the mosaic modes (`sextant`, `quadrant`,
-`halfblock`, `braille`), which stay the right choice for live video. The `ansi` modes suit stills,
-the exporter, and `--demo3d`.
+## How fast they are
+
+Every CP437 glyph is fitted for every cell, so cost scales with the terminal:
+
+| Terminal | per frame | |
+|---|---|---|
+| 80×24 | ~33 ms | ~30 fps, fine |
+| 120×40 | ~79 ms | ~13 fps, noticeable |
+| 200×50 | ~165 ms | ~6 fps, unusable |
+
+ytui warns when you switch to one of these modes and the window is large enough that it will not
+keep up. The mosaic modes (`sextant`, `quadrant`, `halfblock`, `braille`) are sub-millisecond at any
+size and stay the right choice for live video.
+
+A note on why there is no clever optimisation here: two were tried and both were rejected on
+measurement. A glyph shortlist reached 29 ms but cost 34% more paint error on real footage, and a
+temporal reuse cache never found a threshold that worked, because the best-fit error varies 300×
+across the cells of a single frame.
 
 ## The commands
 

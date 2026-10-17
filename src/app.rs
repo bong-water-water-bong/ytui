@@ -2045,6 +2045,18 @@ impl App {
                 self.renderer.mode = all[((at + dir as isize).rem_euclid(n)) as usize];
                 self.store.mode = Some(self.renderer.mode.name().into());
                 self.store.touch();
+                // The text-mode modes fit 256 glyphs per cell. Say so when the
+                // terminal is big enough that they will not keep up, rather
+                // than letting the picture crawl and look broken.
+                let (cols, rows) = (self.term.0 as usize, self.term.1 as usize);
+                if self.renderer.mode.too_slow(cols, rows) {
+                    let ms = self.renderer.mode.cost_ms(cols, rows);
+                    self.flash(format!(
+                        "{}: about {:.0} ms a frame at {cols}x{rows} — a smaller window or a mosaic mode will be fluid",
+                        self.renderer.mode.name(),
+                        ms
+                    ));
+                }
             }
             5 => {
                 self.store.exposure = !self.store.exposure;

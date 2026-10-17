@@ -94,6 +94,28 @@ impl Mode {
             .or_else(|| Mode::ALL.iter().copied().find(|m| m.name().starts_with(&want)))
     }
 
+    /// Rough per-frame cost in milliseconds at `cols` x `rows`, for warning
+    /// when a mode cannot keep up. Measured, not modelled: the ANSI modes fit
+    /// all 256 CP437 glyphs per cell, everything else is a handful of
+    /// operations per sub-pixel.
+    ///
+    /// At 80x24 the ANSI modes manage ~32 fps, which is fine; at 200x50 they
+    /// fall to ~6 fps and the player will feel broken, so the app warns.
+    pub fn cost_ms(self, cols: usize, rows: usize) -> f32 {
+        let cells = (cols * rows) as f32;
+        match self {
+            Mode::Ansi | Mode::Ansi9 => cells * 0.0165,
+            Mode::Ansi16 | Mode::Ansi9x16 | Mode::AnsiBlink => cells * 0.033,
+            // Mosaics are sub-millisecond at any sane size.
+            _ => cells * 0.0003,
+        }
+    }
+
+    /// True when this mode is unlikely to hold 30 fps at this size.
+    pub fn too_slow(self, cols: usize, rows: usize) -> bool {
+        self.cost_ms(cols, rows) > 33.0
+    }
+
     pub fn next(self) -> Mode {
         let i = Mode::ALL.iter().position(|&m| m == self).unwrap();
         Mode::ALL[(i + 1) % Mode::ALL.len()]
@@ -1400,3 +1422,36 @@ mod real_video_tests {
     }
 }
 
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    #[test]
+    fn the_cost_estimate_matches_the_measured_timings() {
+        // Measured: 33 ms at 80x25 for the 24-bit mode, and 158 ms at 120x40
+        // for the palette one — which scales to 66 ms at 80x25. The palette
+        // mode is 2x the 24-bit one because it rounds each mean through a
+        // 16-entry search instead of using the mean directly.
+        let (c, r) = (80, 25);
+        assert!((Mode::Ansi.cost_ms(c, r) - 33.0).abs() < 3.0, "ansi {}", Mode::Ansi.cost_ms(c, r));
+        assert!((Mode::Ansi16.cost_ms(c, r) - 66.0).abs() < 6.0, "ansi-16 {}", Mode::Ansi16.cost_ms(c, r));
+        assert!((Mode::Ansi16.cost_ms(120, 40) - 158.0).abs() < 15.0);
+        // Mosaics are far below a frame budget at any size.
+        for (c, r) in [(80, 25), (200, 50)] {
+            assert!(Mode::Braille.cost_ms(c, r) < 5.0);
+            assert!(Mode::Sextant.cost_ms(c, r) < 5.0);
+        }
+    }
+
+    #[test]
+    fn the_slow_threshold_lands_where_it_should() {
+        // 24-bit is fine on a normal terminal, too slow on a huge one.
+        assert!(!Mode::Ansi.too_slow(80, 24));
+        assert!(Mode::Ansi.too_slow(200, 50));
+        // The palette modes are too slow almost everywhere.
+        assert!(Mode::Ansi16.too_slow(80, 25));
+        // Mosaics never are.
+        assert!(!Mode::Braille.too_slow(400, 100));
+    }
+}
