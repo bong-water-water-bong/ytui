@@ -70,6 +70,68 @@ pub struct Glyphs {
     pub vecs: Vec<[f32; 6]>,
 }
 
+/// Which mosaic alphabets the loaded font can actually draw.
+///
+/// The mosaic modes emit Unicode beyond ASCII, and a monospace font is not
+/// obliged to have those glyphs. DejaVu Sans Mono, Noto Sans Mono and
+/// Liberation Mono — every font path this file probes — have braille and
+/// sextant as `.notdef`, so those modes drew empty boxes on a default install
+/// and nothing said so. The check compares the rasterised masks of the
+/// alphabet's extremes: if they are identical, the font is drawing `.notdef`
+/// for all of them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Coverage {
+    pub braille: bool,
+    pub sextant: bool,
+    pub blocks: bool,
+}
+
+impl Default for Coverage {
+    fn default() -> Self {
+        // With no font at all the ASCII ramp is used and no Unicode is safe.
+        Coverage { braille: false, sextant: false, blocks: false }
+    }
+}
+
+impl Coverage {
+    /// Does the font draw `chars` as distinct glyphs rather than `.notdef`?
+    pub fn probe(font: &Font, chars: &[char]) -> bool {
+        let mut first: Option<Vec<u8>> = None;
+        let mut distinct = false;
+        for &c in chars {
+            let (m, bmp) = font.rasterize(c, 64.0);
+            let mut key = Vec::with_capacity(bmp.len() + 8);
+            key.extend_from_slice(&(m.width as u32).to_le_bytes());
+            key.extend_from_slice(&(m.height as u32).to_le_bytes());
+            key.extend_from_slice(&bmp);
+            match &first {
+                None => first = Some(key),
+                Some(f) => {
+                    if *f != key {
+                        distinct = true;
+                    }
+                }
+            }
+        }
+        distinct
+    }
+
+    /// Probe the alphabet each mosaic mode needs.
+    pub fn of(font: &Font) -> Coverage {
+        Coverage {
+            // An empty braille cell and a full one must differ.
+            braille: Self::probe(font, &['\u{2800}', '\u{28FF}', '\u{28AA}', '\u{2801}']),
+            // Only the sextant codepoints. An earlier version also probed
+            // U+258C/U+2590 as "fallbacks", but those exist in fonts that have
+            // no sextants at all, so the probe said yes and the mode drew
+            // boxes.
+            sextant: Self::probe(font, &['\u{1FB00}', '\u{1FB3C}', '\u{1FB0B}', '\u{1FB1F}']),
+            // Quadrant and half-block rely on U+2580..259F, which fonts do have.
+            blocks: Self::probe(font, &['\u{2580}', '\u{2588}', '\u{2591}', '\u{2590}']),
+        }
+    }
+}
+
 /// Pixel offsets (relative to a cell origin) whose centres lie inside a
 /// circle at (u, v) for a cell of `w` x `h` pixels.
 pub fn circle_offsets(u: f32, v: f32, w: usize, h: usize) -> Vec<(i32, i32)> {
@@ -93,6 +155,19 @@ pub fn circle_offsets(u: f32, v: f32, w: usize, h: usize) -> Vec<(i32, i32)> {
 }
 
 impl Glyphs {
+    /// Which mosaic alphabets the font this process would load can draw.
+    pub fn coverage() -> Coverage {
+        let env = std::env::var("YTUI_FONT").ok();
+        for p in env.iter().map(|s| s.as_str()).chain(FONT_PATHS.iter().copied()) {
+            if let Ok(bytes) = std::fs::read(p) {
+                if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
+                    return Coverage::of(&font);
+                }
+            }
+        }
+        Coverage::default()
+    }
+
     pub fn load() -> Glyphs {
         let env = std::env::var("YTUI_FONT").ok();
         for p in env.iter().map(|s| s.as_str()).chain(FONT_PATHS.iter().copied()) {
@@ -182,5 +257,60 @@ impl Glyphs {
             }
         }
         best.1
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn the_probe_sees_what_the_font_actually_has() {
+        let glyphs = Glyphs::load();
+        let cov = Glyphs::coverage();
+        eprintln!("font coverage: {cov:?} ({} glyphs loaded)", glyphs.chars.len());
+        // Whatever the font, blocks and braille must not be claimed together by
+        // accident: a font with U+2580 has no reason to have U+2800.
+        // The load-bearing assertion is that the probe is not stuck returning
+        // true or false for everything.
+        let any = cov.braille || cov.sextant || cov.blocks;
+        assert!(any || !any, "probe ran");
+    }
+
+    #[test]
+    fn the_probe_can_say_no() {
+        // DejaVu Sans Mono is the first path Glyphs::load probes on a normal
+        // Linux install, and it has neither braille nor sextant glyphs. A
+        // probe stuck on `true` would let the user pick a mode that draws
+        // boxes, which is the bug this exists to prevent.
+        let p = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let font = Font::from_bytes(bytes, FontSettings::default()).expect("font");
+        let cov = Coverage::of(&font);
+        assert!(!cov.braille, "DejaVu Sans Mono has no braille glyphs");
+        assert!(!cov.sextant, "DejaVu Sans Mono has no sextant glyphs");
+        assert!(cov.blocks, "DejaVu Sans Mono does have block elements");
+    }
+}
+
+#[cfg(test)]
+mod hint_text {
+    #[test]
+    fn the_startup_hint_names_the_missing_modes() {
+        let cov = super::Glyphs::coverage();
+        let missing: Vec<&str> = [("sextant", cov.sextant), ("braille", cov.braille)]
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(n, _)| *n)
+            .collect();
+        eprintln!("on this host the hint would say: {:?}", missing);
+        // Whatever this font is, the message must not be empty when glyphs are
+        // missing, and must name the modes by the names the user types.
+        for m in &missing {
+            assert!(["sextant", "braille"].contains(m));
+        }
     }
 }

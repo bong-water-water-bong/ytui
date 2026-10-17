@@ -390,6 +390,29 @@ fn main() -> Result<()> {
     if !use_mpv && engine == "auto" {
         hints.insert(0, "libmpv not found: playing through ffmpeg (no captions); see README".into());
     }
+    // The mosaic modes emit Unicode that a monospace font is not obliged to
+    // have. Every font path we probe lacks braille and sextant, so say so
+    // rather than let the user pick a mode that draws nothing but boxes.
+    {
+        let cov = glyphs::Glyphs::coverage();
+        let missing: Vec<&str> = [
+            ("sextant", cov.sextant),
+            ("braille", cov.braille),
+        ]
+        .iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(name, _)| *name)
+        .collect();
+        if !missing.is_empty() {
+            hints.insert(
+                0,
+                format!(
+                    "your font has no {} glyphs: set YTUI_FONT to a font that does",
+                    missing.join(" or ")
+                ),
+            );
+        }
+    }
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, mode.is_some());
     #[cfg(not(windows))]
     {
