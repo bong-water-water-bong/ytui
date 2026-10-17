@@ -42,6 +42,10 @@ USAGE:
   ytui URL                      open a video, playlist or channel URL
   ytui --snapshot SRC [--at SECONDS] [--cols N --rows N]
                                 print one rendered frame (SRC = URL or file)
+  ytui --snapshot-ans SRC [-o FILE] [--at SECONDS] [--cols N --rows N]
+                                save a frame as ANSI art (.ANS with SAUCE)
+  ytui --convert-ans FILE [-o FILE]
+                                re-encode ANSI art (normalise, or fix iCE)
   ytui --import-subs FILE       import a Google Takeout subscriptions.csv
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
@@ -76,6 +80,14 @@ OPTIONS:
                  and Edge usually can't be read while running)
   --sixel-colors N  colours per sixel video frame, 2-255 (default 255; 64 is
                  ~40% faster to send but posterises soft shading)
+  -o, --out FILE  output path for --snapshot-ans / --convert-ans
+  --no-ice        write ANSI art with the background high bit as blink
+                  (8 backgrounds) instead of iCE colours (16)
+  --compact       write CR/LF-separated rows instead of absolute cursor
+                  moves: smaller files, but clients that wrap at column 80
+                  will band them
+  --bits N        8 or 9: cell width in dots when writing ANSI art. 9 repeats
+                  the last column of block characters, as real text mode does
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
@@ -115,6 +127,12 @@ fn main() -> Result<()> {
     let mut fullscreen = false;
     let mut max_h: Option<u32> = None;
     let mut snapshot: Option<String> = None;
+    let mut snapshot_ans: Option<String> = None;
+    let mut convert_ans: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut ans_ice = true;
+    let mut ans_compact = false;
+    let mut ans_bits: usize = 8;
     let mut bench: Option<String> = None;
     let mut bench_render: Option<String> = None;
     let mut secs = 8.0;
@@ -161,6 +179,17 @@ fn main() -> Result<()> {
             "--fullscreen" => fullscreen = true,
             "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),
+            "--snapshot-ans" => snapshot_ans = Some(val("--snapshot-ans")?),
+            "--convert-ans" => convert_ans = Some(val("--convert-ans")?),
+            "-o" | "--out" => out_path = Some(val("--out")?),
+            "--no-ice" => ans_ice = false,
+            "--compact" => ans_compact = true,
+            "--bits" => {
+                ans_bits = val("--bits")?.parse()?;
+                if ans_bits != 8 && ans_bits != 9 {
+                    bail!("--bits must be 8 or 9");
+                }
+            }
             "--bench" => bench = Some(val("--bench")?),
             "--bench-render" => {
                 let src = val("--bench-render")?;
@@ -261,6 +290,22 @@ fn main() -> Result<()> {
     if let Some(src) = bench {
         let use_mpv = engine != "ffmpeg" && mpv::available();
         return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
+    }
+
+    // ANSI art output. Both paths return, since neither opens the UI.
+    if convert_ans.is_some() || snapshot_ans.is_some() {
+        let opts = AnsOpts {
+            out: out_path.clone(),
+            ice: if ans_ice { textmode::Ice::On } else { textmode::Ice::Off },
+            ice_forced: !ans_ice,
+            style: if ans_compact { textmode::Style::Compact } else { textmode::Style::Portable },
+            bits: ans_bits,
+        };
+        if let Some(path) = convert_ans {
+            return write_ans_from_file(&path, &opts);
+        }
+        let src = snapshot_ans.expect("checked above");
+        return write_ans_from_video(&src, at, &opts, exposure, scols, srows, max_h.unwrap_or(480));
     }
 
     if let Some(src) = snapshot {
@@ -370,4 +415,126 @@ fn main() -> Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste, crossterm::event::DisableFocusChange);
     ratatui::restore();
     res
+}
+
+/// How to write ANSI art, from the command line.
+struct AnsOpts {
+    out: Option<String>,
+    ice: textmode::Ice,
+    /// Did the user actually pass --no-ice, or is `ice` just the default?
+    ice_forced: bool,
+    style: textmode::Style,
+    bits: usize,
+}
+
+impl AnsOpts {
+    fn write_opts(&self) -> textmode::WriteOpts {
+        textmode::WriteOpts {
+            style: self.style,
+            ice: self.ice,
+            sauce: true,
+            bits: self.bits,
+            skip_blank_bg: false,
+        }
+    }
+}
+
+/// Write bytes to `out`, or to stdout when there is no path.
+fn emit(bytes: &[u8], out: &Option<String>) -> Result<()> {
+    match out {
+        Some(p) => {
+            std::fs::write(p, bytes)?;
+            eprintln!("wrote {p} ({} bytes)", bytes.len());
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-encode an existing `.ANS`: parse it, then write it back out.
+///
+/// Useful for normalising a file (absolute row placement, a fresh SAUCE) and
+/// for re-reading art whose iCE bit the file got wrong, with `--no-ice`.
+fn write_ans_from_file(path: &str, opts: &AnsOpts) -> Result<()> {
+    let data = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("cannot read {path}: {e}"))?;
+    let mut art = textmode::read_ansi(
+        &data,
+        textmode::ReadOpts { ice: opts.ice, width: None, use_sauce: true },
+    );
+    // Re-encode with the file's own iCE answer unless the caller insisted.
+    // Otherwise `--convert-ans` would silently flip a file's background
+    // interpretation, which is exactly what it is often used to check.
+    let mut wo = opts.write_opts();
+    if let (false, Some(s)) = (opts.ice_forced, art.sauce.as_ref()) {
+        wo.ice = if s.ice() { textmode::Ice::On } else { textmode::Ice::Off };
+    }
+    if art.sauce.is_none() {
+        // Give the output a record even if the input had none, so the result
+        // is a well-formed art file.
+        art.sauce = Some(textmode::Sauce {
+            title: std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            ..Default::default()
+        });
+    }
+    let bytes = textmode::write_ansi(&art, wo);
+    if let Some(s) = &art.sauce {
+        eprintln!(
+            "{}x{} · {} · iCE {} · font {}",
+            art.cols,
+            art.rows,
+            if s.title.is_empty() { "(untitled)" } else { &s.title },
+            if s.ice() { "on" } else { "off" },
+            s.font
+        );
+    }
+    emit(&bytes, &opts.out)
+}
+
+/// Grab one frame of a video and save it as ANSI art.
+fn write_ans_from_video(
+    src: &str,
+    at: f64,
+    opts: &AnsOpts,
+    exposure: bool,
+    scols: Option<usize>,
+    srows: Option<usize>,
+    max_h: u32,
+) -> Result<()> {
+    let (tc, tr) = crossterm::terminal::size()
+        .map(|(c, r)| (c as usize, r as usize))
+        .unwrap_or((textmode::SCREEN_COLS, textmode::SCREEN_ROWS + 1));
+    let (input, aspect) = if std::path::Path::new(src).exists() {
+        (src.to_string(), 16.0 / 9.0)
+    } else {
+        let s = yt::resolve(src, max_h, false)?;
+        (s.video_url, s.aspect)
+    };
+    // Art was drawn to 80x25, and cells are 8x16 dots, so the picture is
+    // 640x400 unless the caller says otherwise.
+    let cols = scols.unwrap_or(textmode::SCREEN_COLS);
+    let rows = srows.unwrap_or(textmode::SCREEN_ROWS);
+    let mut px = player::grab_frame(&input, at, cols * 8, rows * textmode::GLYPH_H)
+        .ok_or_else(|| anyhow::anyhow!("could not decode a frame"))?;
+    let mut ae = render::Exposure::new(exposure);
+    ae.measure(&px, 1.0);
+    ae.apply(&mut px);
+
+    let art = textmode::from_image(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.ice, textmode::Rgb::Vga, opts.bits);
+    let bytes = textmode::write_ansi(&art, opts.write_opts());
+    eprintln!(
+        "{}x{} cells, {} bytes, iCE {}",
+        art.cols,
+        art.rows,
+        bytes.len(),
+        if opts.ice == textmode::Ice::On { "on" } else { "off" }
+    );
+    let _ = aspect;
+    emit(&bytes, &opts.out)
 }

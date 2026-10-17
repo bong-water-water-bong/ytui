@@ -104,27 +104,44 @@ pub fn dos_of(ansi: u8) -> u8 {
 /// The DOS attribute order is not the ANSI escape order: attribute 1 is blue
 /// and attribute 4 is red, while `ESC[31m` is red and `ESC[34m` is blue. Every
 /// conversion goes through [`ansi_of`] so the swap happens exactly once.
-fn fg_seq(idx: u8) -> Vec<u8> {
-    let a = ansi_of(idx & 15);
-    if a < 8 {
-        // 30..=37. No ESC[1m: bold would brighten it further, and we are
-        // expressing the attribute directly.
+///
+/// `clear_bold` says whether a standing `ESC[1m` has to be cancelled first.
+/// `ESC[0m` would do it but also wipes the background, so the cancel is
+/// written as a bare reset only when needed and the caller restates the bg.
+fn fg_seq(idx: u8, clear_bold: bool) -> Vec<u8> {
+    let idx = idx & 15;
+    // Brightness is a property of the DOS attribute's bit 3, which survives
+    // the permutation into ANSI order.
+    let bright = idx >= 8;
+    let a = ansi_of(idx % 8);
+    if !bright {
+        let _ = clear_bold;
         format!("\x1b[3{}m", a).into_bytes()
     } else {
-        // 90..=97 sets the high bit directly and is not bold-dependent.
-        format!("\x1b[{}m", 90 + (a - 8)).into_bytes()
+        // Bright: ESC[1m then the base colour, which is how art has always
+        // written it and the only form every reader understands. AnsiLove/C
+        // does not implement 90..=97 at all, so emitting those would lose the
+        // brightness in half the viewers that matter.
+        format!("\x1b[1;3{}m", a).into_bytes()
     }
 }
 
 /// The escape for a background index, given how the high bit will be read.
 fn bg_seq(idx: u8, ice: Ice) -> Vec<u8> {
     let idx = if ice == Ice::On { idx & 15 } else { idx & 7 };
-    let a = ansi_of(idx);
-    if a < 8 {
-        format!("\x1b[{}m", 40 + a).into_bytes()
+    let bright = idx >= 8;
+    let a = ansi_of(idx % 8);
+    if !bright {
+        // A plain background. If blink may be standing it has to be cleared,
+        // or the reader (rightly) reads the high bit as a colour and the
+        // background comes back 8 higher. ESC[25m does that without touching
+        // either colour.
+        format!("\x1b[25;4{}m", a).into_bytes()
     } else {
-        // Only reachable with iCE on: 100..=107.
-        format!("\x1b[{}m", 100 + (a - 8)).into_bytes()
+        // Bright background: the blink bit, which is what iCE colours *are*.
+        // Only reachable with iCE on. 100..=107 would be the modern spelling
+        // but AnsiLove/C does not implement it.
+        format!("\x1b[5;4{}m", a).into_bytes()
     }
 }
 
@@ -144,9 +161,9 @@ pub fn write_ansi(art: &Art, opts: WriteOpts) -> Vec<u8> {
         // Rows are placed absolutely in Portable, and CR/LF'd in Compact.
         match opts.style {
             Style::Portable => {
-                out.extend_from_slice(format!("\x1b[{};1H", y + 1).as_bytes());
                 // A cursor move does not touch the pen, so colours carry
                 // across rows and a repeated style costs nothing.
+                out.extend_from_slice(format!("\x1b[{};1H", y + 1).as_bytes());
             }
             Style::Compact => {}
         }
@@ -161,12 +178,26 @@ pub fn write_ansi(art: &Art, opts: WriteOpts) -> Vec<u8> {
             // makes write(read(x)) a fixed point: the decoded pen always
             // equals the attribute the escape set, so a re-encode writes the
             // same bytes.
+            // Emit background before foreground. Both escapes start from
+            // ESC[0, so the foreground escape always wins: a bright foreground
+            // written first would be dimmed by a following background reset.
             let (pf, pb) = pen.unwrap_or((DEFAULT_FG, DEFAULT_BG));
-            if pf != cell.fg {
-                out.extend_from_slice(&fg_seq(cell.fg));
-            }
-            if pb != cell.bg {
+            let bg_changed = pb != cell.bg;
+            let fg_changed = pf != cell.fg;
+            if bg_changed {
                 out.extend_from_slice(&bg_seq(cell.bg, opts.ice));
+            }
+            if fg_changed || bg_changed {
+                let had_bold = pen.map(|(f, _)| f >= 8).unwrap_or(false);
+                let wants_bold = cell.fg >= 8;
+                // Only clear bold when it is actually standing and unwanted;
+                // AnsiLove/C does not implement ESC[22m, so emit ESC[0m in
+                // that one case and accept the colour restatement.
+                if had_bold && !wants_bold {
+                    out.extend_from_slice(b"\x1b[0m");
+                    out.extend_from_slice(&bg_seq(cell.bg, opts.ice));
+                }
+                out.extend_from_slice(&fg_seq(cell.fg, had_bold && !wants_bold));
             }
             pen = Some((cell.fg, cell.bg));
             // CP437 byte, verbatim. 0x00 is a NUL, not a printable glyph, so
@@ -207,15 +238,18 @@ fn sauce_record(art: &Art, opts: WriteOpts, art_size: usize) -> Vec<u8> {
     put(&mut r, 7, 35, title);
     put(&mut r, 42, 20, author);
     put(&mut r, 62, 20, group);
-    put(&mut r, 82, 8, "20260101");
+    // Keep the source's date; a re-encode is not a new drawing.
+    let date = art.sauce.as_ref().map(|s| s.date.clone()).unwrap_or_default();
+    put(&mut r, 82, 8, if date.is_empty() { "        " } else { &date });
     // FileSize at 90 counts the bytes before the SAUCE record.
     r[90..94].copy_from_slice(&(art_size as u32).to_le_bytes());
     r[94] = 1; // Datatype: Character
     r[95] = 1; // Filetype: ANSI
     let w = (art.cols.min(u16::MAX as usize)) as u16;
     r[96..98].copy_from_slice(&w.to_le_bytes());
-    // TInfo2 is the font ID: 1 = 8x16 VGA, 2 = 8x14 EGA, 3 = 8x8 CGA.
-    let font: u16 = if opts.bits == 9 { 1 } else { 1 };
+    // TInfo2 is the font ID: 1 = 8x16 VGA. Keep the input's own ID when it
+    // had one, so re-encoding does not relabel a file drawn in another font.
+    let font: u16 = art.sauce.as_ref().map(|s| s.font as u16).filter(|&f| f != 0).unwrap_or(1);
     r[98..100].copy_from_slice(&font.to_le_bytes());
     r[104] = 0; // no comment block
     let mut flags = 0u8;
@@ -300,9 +334,10 @@ mod tests {
         };
         let off = write_ansi(&art, WriteOpts { ice: Ice::Off, sauce: false, ..Default::default() });
         // DOS 12 (bright red) folds to 4 (red), which is ANSI 31: ESC[41,
-        // never ESC[101.
+        // never the blink bit ESC[5;41m and never ESC[101m.
         let text = String::from_utf8_lossy(&off);
-        assert!(text.contains("[41m"), "{text:?}");
+        assert!(text.contains("41m"), "{text:?}");
+        assert!(!text.contains("[5;41m"), "{text:?}");
         assert!(!text.contains("[101m"), "{text:?}");
     }
 
@@ -318,9 +353,10 @@ mod tests {
         };
         let bytes = write_ansi(&art, WriteOpts { sauce: false, ..Default::default() });
         let text = String::from_utf8_lossy(&bytes);
-        // DOS 12 is bright red, which is ANSI 91, not 94.
-        assert!(text.contains("[91m"), "bright red must be 91: {text:?}");
-        assert!(!text.contains("[1m"), "must not use bold: {text:?}");
+        // DOS 12 is bright red: ANSI 1 (bright) on 31 (red). Not 91, which
+        // AnsiLove/C does not parse at all.
+        assert!(text.contains("[1;31m"), "bright red must be ESC[1;31m: {text:?}");
+        assert!(!text.contains("[91m"), "must not use the 90..=97 range: {text:?}");
     }
 
     #[test]

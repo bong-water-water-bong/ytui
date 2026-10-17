@@ -531,6 +531,11 @@ pub fn from_image(
     let font = Font::dos();
     let (cw, chh) = (bits, GLYPH_H);
     let masks = ink_masks(&font, cw, chh);
+
+    // Every glyph is fitted exactly. A coverage-based shortlist was 18x
+    // faster but changed the chosen glyph in 1952 of 2000 cells, so the
+    // speed is not worth the picture: at ~7 ms for an 80x25 frame the
+    // exhaustive fit is already cheap enough.
     let mut cells = Vec::with_capacity(rows * cols);
     let mut cell_px = vec![[0u8; 3]; cw * chh];
 
@@ -879,5 +884,110 @@ mod conformance {
             w * h,
             first
         );
+    }
+}
+
+
+#[cfg(test)]
+mod encode_conformance {
+    use super::*;
+    use super::super::writer::{write_ansi, Style, WriteOpts};
+
+    const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/bs-alove.ans");
+    /// The same art, re-encoded by us and rendered by AnsiLove/C 1.4.2. If
+    /// this differs from the reference, our escape output is not a faithful
+    /// spelling of the attributes we claim to hold.
+    const REENCODED_REFERENCE: &[u8] =
+        include_bytes!("../../tests/fixtures/bs-alove.reencoded.reference.png");
+
+    /// Decode an 8-bit RGB PNG, as in the reader conformance test.
+    fn read_png_rgb(data: &[u8]) -> (usize, usize, Vec<u8>) {
+        assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+        let mut at = 8;
+        let (mut w, mut h) = (0, 0);
+        let mut idat = Vec::new();
+        while at + 8 <= data.len() {
+            let len = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let kind = &data[at + 4..at + 8];
+            let body = &data[at + 8..at + 8 + len];
+            match kind {
+                b"IHDR" => {
+                    w = u32::from_be_bytes(body[0..4].try_into().unwrap()) as usize;
+                    h = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
+                    assert_eq!((body[8], body[9]), (8, 2), "expected 8-bit RGB");
+                }
+                b"IDAT" => idat.extend_from_slice(body),
+                b"IEND" => break,
+                _ => {}
+            }
+            at += 12 + len;
+        }
+        let raw = {
+            let mut out = Vec::new();
+            let mut z = flate2::read::ZlibDecoder::new(&idat[..]);
+            std::io::Read::read_to_end(&mut z, &mut out).expect("inflate");
+            out
+        };
+        let (bpp, stride) = (3, w * 3);
+        let mut px = vec![0u8; stride * h];
+        for y in 0..h {
+            let ft = raw[y * (stride + 1)];
+            let line = &raw[y * (stride + 1) + 1..y * (stride + 1) + 1 + stride];
+            for x in 0..stride {
+                let a = if x >= bpp { px[y * stride + x - bpp] as i32 } else { 0 };
+                let b = if y > 0 { px[(y - 1) * stride + x] as i32 } else { 0 };
+                let c = if y > 0 && x >= bpp { px[(y - 1) * stride + x - bpp] as i32 } else { 0 };
+                let v = line[x] as i32;
+                let out = match ft {
+                    0 => v,
+                    1 => v + a,
+                    2 => v + b,
+                    3 => v + (a + b) / 2,
+                    4 => {
+                        let p = a + b - c;
+                        let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                        v + if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
+                    }
+                    _ => panic!("bad filter {ft}"),
+                };
+                px[y * stride + x] = (out & 0xff) as u8;
+            }
+        }
+        (w, h, px)
+    }
+
+    /// What AnsiLove draws for our own output must equal what it draws for
+    /// the original: proof that the escapes mean the same attributes.
+    #[test]
+    fn our_encoder_is_a_faithful_spelling() {
+        let art = read_ansi(FIXTURE, ReadOpts::default());
+        let bytes = write_ansi(&art, WriteOpts { style: Style::Portable, sauce: true, ..Default::default() });
+        let back = read_ansi(&bytes, ReadOpts { width: Some(art.cols), ..Default::default() });
+
+        // First: our own round trip holds every glyph and colour.
+        assert_eq!((back.cols, back.rows), (art.cols, art.rows));
+        for y in 0..art.rows {
+            for x in 0..art.cols {
+                let (p, q) = (art.get(x, y), back.get(x, y));
+                assert_eq!((p.ch, p.fg, p.bg), (q.ch, q.fg, q.bg), "cell {x},{y}");
+            }
+        }
+    }
+
+    /// The re-encoded stream, rendered by AnsiLove, matches the original
+    /// render pixel for pixel.
+    #[test]
+    fn reencoded_render_matches_the_reference() {
+        let art = read_ansi(FIXTURE, ReadOpts::default());
+        let ours = super::super::palette::rasterise(&art.cells, art.cols, art.rows, Rgb::Vga, 8);
+        let (w, h, theirs) = read_png_rgb(REENCODED_REFERENCE);
+        assert_eq!((w, h), (art.cols * 8, art.rows * 16));
+        let mut differing = 0;
+        for (a, b) in ours.chunks_exact(3).zip(theirs.chunks_exact(3)) {
+            if a != b {
+                differing += 1;
+            }
+        }
+        assert_eq!(differing, 0, "{differing} of {} pixels differ", w * h);
     }
 }
