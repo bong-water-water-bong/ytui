@@ -12,6 +12,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600&family=Martian+Mono:wdth,wght@87.5,500;100,700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+<link rel="icon" href="{{ '/favicon.svg' | relative_url }}" type="image/svg+xml">
 {% assign i = 0 %}{% for item in site.data.nav %}{% if item.url == page.url %}{% assign i = forloop.index0 %}{% endif %}{% endfor %}
 <script type="application/ld+json">
 {
@@ -45,6 +46,7 @@
       {% endfor %}
       </ul>
     </details>
+    <script>if (matchMedia('(max-width: 860px)').matches) document.querySelector('.doc-nav details').removeAttribute('open')</script>
   </nav>
 
   <main class="doc">

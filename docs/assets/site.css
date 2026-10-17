@@ -156,7 +156,7 @@ footer p { margin: 6px 0; max-width: 80ch; }
 
 @media (max-width: 860px) {
   .doc-grid { grid-template-columns: 1fr; gap: 8px; }
-  .doc-nav details { position: static; border: 1px solid var(--rule); border-radius: 6px; padding: 10px 14px; }
+  .doc-nav details { position: static; border: 1px solid var(--rule); border-radius: 6px; padding: 10px 14px; margin-bottom: 20px; }
   .doc-nav summary { display: list-item; cursor: pointer; font-weight: 600; }
   .doc-nav ul { margin-top: 8px; }
   .docs .top nav { display: flex; gap: 14px; }
