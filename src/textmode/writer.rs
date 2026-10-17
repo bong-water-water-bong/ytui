@@ -51,9 +51,6 @@ pub struct WriteOpts {
     pub sauce: bool,
     /// Cell width in dots, recorded in SAUCE.
     pub bits: usize,
-    /// Emit `ESC[8m`+conceal for fully-blank cells instead of writing a space
-    /// with the background colour. Only helps when backgrounds are uniform.
-    pub skip_blank_bg: bool,
     /// Write PabloDraw `ESC[0|1;r;g;bt` sequences for 24-bit colours. Off by
     /// default: it costs bytes, and a reader that ignores the sequence still
     /// gets a correct palette picture.
@@ -62,7 +59,7 @@ pub struct WriteOpts {
 
 impl Default for WriteOpts {
     fn default() -> Self {
-        WriteOpts { style: Style::Portable, ice: Ice::On, sauce: true, bits: 8, skip_blank_bg: false, truecolor: false }
+        WriteOpts { style: Style::Portable, ice: Ice::On, sauce: true, bits: 8, truecolor: false }
     }
 }
 

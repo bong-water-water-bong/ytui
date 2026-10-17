@@ -473,7 +473,6 @@ impl AnsOpts {
             ice: self.ice,
             sauce: true,
             bits: self.bits,
-            skip_blank_bg: false,
             truecolor: self.truecolor,
         }
     }
@@ -623,7 +622,6 @@ fn view_ans_file(path: &str, ice_flag: bool) -> Result<()> {
             ice: if sweet_ice(&art, ice_flag) { textmode::Ice::On } else { textmode::Ice::Off },
             sauce: false,
             bits: 8,
-            skip_blank_bg: false,
             truecolor: false,
         },
     );

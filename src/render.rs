@@ -132,6 +132,10 @@ pub struct Renderer {
     pub glyphs: Glyphs,
     /// Text-mode render: (bits, cols, rows, prepared glyphs), rebuilt on resize.
     tm_cache: Option<(usize, usize, usize, Vec<crate::textmode::Candidate>)>,
+    /// Last frame's glyph per cell, and the geometry it was for. A cell whose
+    /// picture has barely moved keeps its glyph and only refits the two
+    /// colours, which skips the 256-glyph loop for most of the frame.
+
     inner: Vec<Vec<(i32, i32)>>,
     outer: Vec<Vec<(i32, i32)>>,
     cache: HashMap<u32, u8>,
@@ -242,6 +246,7 @@ impl Renderer {
             flat_lin: 0.0,
             glyphs,
             tm_cache: None,
+
             inner,
             outer,
             cache: HashMap::new(),

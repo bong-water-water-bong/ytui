@@ -245,6 +245,25 @@ pub fn read_ansi(data: &[u8], opts: ReadOpts) -> Art {
                     i = j + 1;
                     continue;
                 }
+                // Two-byte ESC sequences (no bracket). An art file may carry
+                // DEC save/restore (ESC 7 / ESC 8), reverse index (ESC M), or a
+                // charset select (ESC ( 0, three bytes). None of them were
+                // handled at all, so their trailing byte was drawn as a glyph:
+                // a file using ESC 7 printed a literal "7" into the picture.
+                if i + 1 < body.len() {
+                    let b1 = body[i + 1];
+                    let len = match b1 {
+                        // ESC 7 save, ESC 8 restore, ESC M reverse index,
+                        // ESC = / ESC > keypad mode, ESC c reset.
+                        b'7' | b'8' | b'M' | b'=' | b'>' | b'c' | b'D' | b'E' => 2,
+                        // ESC ( X, ESC ) X: charset designation, two payload
+                        // bytes (we ignore which charset; art assumes CP437).
+                        b'(' | b')' | b'*' | b'+' => 3,
+                        _ => 2,
+                    };
+                    i = (i + len).min(body.len());
+                    continue;
+                }
                 i += 1;
             }
             0x0A => {
@@ -1051,7 +1070,6 @@ mod viewer_tests {
                 ice: if ice { Ice::On } else { Ice::Off },
                 sauce: false,
                 bits: 8,
-                skip_blank_bg: false,
                 truecolor: true,
             },
         );
@@ -1062,5 +1080,84 @@ mod viewer_tests {
         let after = super::super::palette::rasterise(&back.cells, back.cols, back.rows, Rgb::Vga, 8);
         assert_eq!(before.len(), after.len(), "geometry changed");
         assert_eq!(before, after, "the normalised stream draws a different picture");
+    }
+}
+
+#[cfg(test)]
+mod csi_coverage {
+    use super::*;
+
+    fn at(bytes: &[u8]) -> (usize, usize, u8) {
+        let a = read_ansi(bytes, ReadOpts { ice: Ice::On, width: None, use_sauce: false });
+        // find the 'X' we placed
+        for y in 0..a.rows {
+            for x in 0..a.cols {
+                if a.get(x, y).ch == b'X' {
+                    return (x, y, 1);
+                }
+            }
+        }
+        (usize::MAX, usize::MAX, 0)
+    }
+
+    /// The cursor movements from the standard list that art actually uses.
+    #[test]
+    fn cursor_sequences_land_where_they_should() {
+        // ESC[H is home: the reference calls it (1,1).
+        assert_eq!(at(b"\x1b[HX"), (0, 0, 1), "ESC[H must home");
+        // Absolute: line;column, 1-based.
+        assert_eq!(at(b"\x1b[3;5HX"), (4, 2, 1), "ESC[3;5H");
+        assert_eq!(at(b"\x1b[3;5fX"), (4, 2, 1), "ESC[3;5f");
+        // Relative down/right from origin.
+        assert_eq!(at(b"\x1b[2BX"), (0, 2, 1), "ESC[2B");
+        assert_eq!(at(b"\x1b[4CX"), (4, 0, 1), "ESC[4C");
+        // Relative up/left must not underflow at the origin.
+        assert_eq!(at(b"\x1b[9AX"), (0, 0, 1), "ESC[9A at origin must clamp");
+        assert_eq!(at(b"\x1b[9DX"), (0, 0, 1), "ESC[9D at origin must clamp");
+        // Column only.
+        assert_eq!(at(b"\x1b[7GX"), (6, 0, 1), "ESC[7G");
+        // Bare (no number) means 1.
+        assert_eq!(at(b"\x1b[BX"), (0, 1, 1), "bare ESC[B is one line");
+        assert_eq!(at(b"\x1b[CX"), (1, 0, 1), "bare ESC[C is one column");
+    }
+
+    /// The two erases: ESC[2J clears and homes; the rest are no-ops on a grid
+    /// that starts blank, but must not move the cursor.
+    ///
+    /// Per the escape-code reference, ESC[K/ESC[0K erase to end of line,
+    /// ESC[1K to the start, ESC[2K the whole line, and none of them move the
+    /// cursor. This parser only tracks one character at a time, so they are
+    /// deliberately no-ops — the assertion is that they do not *move* things.
+    #[test]
+    fn erase_sequences_do_not_move_the_cursor() {
+        assert_eq!(at(b"\x1b[1;1H\x1b[KX"), (0, 0, 1), "ESC[K keeps position");
+        assert_eq!(at(b"\x1b[1;1H\x1b[2JX"), (0, 0, 1), "ESC[2J homes");
+        assert_eq!(at(b"\x1b[2;3H\x1b[0JX"), (2, 1, 1), "ESC[0J keeps position");
+        assert_eq!(at(b"\x1b[2;3H\x1b[1JX"), (2, 1, 1), "ESC[1J keeps position");
+    }
+
+    /// Non-CSI ESC sequences must not leak their payload into the picture.
+    ///
+    /// These were entirely unhandled: the ESC was consumed and the following
+    /// byte drawn as a glyph, so a file using DEC save/restore printed a
+    /// literal "7" into the artwork. Found by walking
+    /// <https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797> against
+    /// the parser rather than by bumping into the bug.
+    #[test]
+    fn dec_save_restore_is_understood_or_at_least_harmless() {
+        let a = read_ansi(b"\x1b7AB\x1b8C", ReadOpts::default());
+        // Whatever we do with the save, the letters must be glyphs and the
+        // digits must not be.
+        let mut found = String::new();
+        for y in 0..a.rows {
+            for x in 0..a.cols {
+                let c = a.get(x, y).ch;
+                if c.is_ascii_graphic() {
+                    found.push(c as char);
+                }
+            }
+        }
+        assert!(found.contains('A') && found.contains('B'), "AB lost: {found:?}");
+        assert!(!found.contains('7') && !found.contains('8'), "save/restore printed as text: {found:?}");
     }
 }
