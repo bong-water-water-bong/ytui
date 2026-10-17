@@ -11,20 +11,28 @@ commands read and write it.
 
 | Mode | What it looks like |
 |---|---|
-| `ansi` | CP437 glyphs from the IBM 8×16 ROM font on the DOS palette. With iCE colours on, the background may use the high bit, giving 8 foregrounds × 16 backgrounds. |
-| `ansiblink` | The same, with backgrounds limited to the 8 that do not blink. |
+| `ansi` | CP437 glyphs from the IBM 8×16 ROM font in 24-bit colour: two colours per cell, the best two for the picture. |
 | `ansi9` | The same at 9 dots per cell: the extra column repeats the last dot of block and box characters, so rules join without a seam. |
+| `ansi-16` | The period-correct version — the 16-colour DOS palette, with iCE colours giving 8 foregrounds × 16 backgrounds. |
+| `ansi9-16` | `ansi-16` at 9 dots per cell. |
+| `ansiblink` | `ansi-16` with backgrounds limited to the 8 that do not blink. |
 
-These are the slow modes. Every CP437 glyph is fitted for every cell — there is no font atlas and no
-shortlist — which is roughly 30 ms a frame at 120×40. They are best for stills, the exporter, and
-`--demo3d`, where the 3D engine's output goes through the same shape-matched path. For live video the
-mosaic modes (`sextant`, `quadrant`, `halfblock`, `braille`) are several hundred times faster.
+Truecolour is not a compromise here, it is the faster path. Once the glyph's ink mask is fixed, the
+two colours that minimise squared error are simply the mean of the inked pixels and the mean of the
+rest — no palette to search, and the error is derivable from channel sums so the cell is not walked
+again per glyph. That measures at roughly 80 ms a frame at 120×40, against 160 ms for the palette
+fit, which has to round two means to a 16-entry table. On a real frame the truecolour reconstruction
+comes out 99.8% closer to the source than the 16-colour one.
+
+All the `ansi` modes are still far slower than the mosaic modes (`sextant`, `quadrant`,
+`halfblock`, `braille`), which stay the right choice for live video. The `ansi` modes suit stills,
+the exporter, and `--demo3d`.
 
 ## The commands
 
 ```
 ytui --view-ans art.ans                  show art in the terminal
-ytui --snapshot-ans VIDEO -o art.ans     save one video frame as ANSI art
+ytui --snapshot-ans VIDEO -o art.ans     save one video frame as ANSI art (24-bit)
 ytui --convert-ans art.ans -o out.ans    re-encode existing art
 ```
 
@@ -38,6 +46,7 @@ Options for anything that writes a file:
 
 | Option | Effect |
 |---|---|
+| `--palette` | Write the 16-colour DOS version instead of 24-bit. Much smaller files. |
 | `--no-ice` | Read the background high bit as blink, so backgrounds are limited to 8. |
 | `--compact` | Separate rows with CR/LF instead of absolute moves. Smaller files, but a client that wraps at column 80 will put a blank line between every row. |
 | `--bits 9` | Apply the 9th-dot rule, and record it in the SAUCE record. |
@@ -59,6 +68,12 @@ and when it does, ytui follows it.
 **The DOS and ANSI colour orders disagree.** DOS orders an attribute byte so blue is bit 0 and red is
 bit 2, which makes attribute 1 blue and attribute 4 red. ANSI orders `ESC[31m` red and `ESC[34m` blue.
 Every conversion has to go through the permutation once.
+
+**Truecolour has to be written last.** 24-bit colour goes into the file as PabloDraw's
+`ESC[1;r;g;bt` (foreground) and `ESC[0;r;g;bt` (background) sequences, *after* the palette escape for
+the same cell. A viewer that understands them shows the exact colour; one that ignores them still
+draws the right 16-colour picture instead of nothing. AnsiLove does understand them, and switches its
+own renderer to RGB when it sees one.
 
 **Bright has one spelling that everyone reads.** `ESC[1;3Xm`, not the modern `ESC[9Xm`: AnsiLove, the
 reference implementation, does not implement 90–97 at all. And a foreground escape must not begin with

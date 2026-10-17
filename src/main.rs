@@ -62,7 +62,7 @@ USAGE:
 
 OPTIONS:
   --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock |
-                 braille | ansi | ansiblink | ansi9
+                 braille | ansi | ansi9 | ansi-16 | ansi9-16 | ansiblink
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
@@ -91,6 +91,7 @@ OPTIONS:
                   will band them
   --bits N        8 or 9: cell width in dots when writing ANSI art. 9 repeats
                   the last column of block characters, as real text mode does
+  --palette       write 16-colour ANSI art instead of 24-bit (much smaller)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
@@ -137,6 +138,7 @@ fn main() -> Result<()> {
     let mut ans_ice = true;
     let mut ans_compact = false;
     let mut ans_bits: usize = 8;
+    let mut ans_truecolor = true;
     let mut bench: Option<String> = None;
     let mut bench_render: Option<String> = None;
     let mut secs = 8.0;
@@ -189,6 +191,8 @@ fn main() -> Result<()> {
             "-o" | "--out" => out_path = Some(val("--out")?),
             "--no-ice" => ans_ice = false,
             "--compact" => ans_compact = true,
+            "--truecolor" | "--24bit" => ans_truecolor = true,
+            "--palette" | "--no-truecolor" => ans_truecolor = false,
             "--bits" => {
                 ans_bits = val("--bits")?.parse()?;
                 if ans_bits != 8 && ans_bits != 9 {
@@ -309,6 +313,7 @@ fn main() -> Result<()> {
             ice_forced: !ans_ice,
             style: if ans_compact { textmode::Style::Compact } else { textmode::Style::Portable },
             bits: ans_bits,
+            truecolor: ans_truecolor,
         };
         if let Some(path) = convert_ans {
             return write_ans_from_file(&path, &opts);
@@ -434,6 +439,8 @@ struct AnsOpts {
     ice_forced: bool,
     style: textmode::Style,
     bits: usize,
+    /// Write 24-bit colour into the file as PabloDraw sequences.
+    truecolor: bool,
 }
 
 impl AnsOpts {
@@ -444,6 +451,7 @@ impl AnsOpts {
             sauce: true,
             bits: self.bits,
             skip_blank_bg: false,
+            truecolor: self.truecolor,
         }
     }
 }
@@ -535,14 +543,22 @@ fn write_ans_from_video(
     ae.measure(&px, 1.0);
     ae.apply(&mut px);
 
-    let art = textmode::from_image(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.ice, textmode::Rgb::Vga, opts.bits);
+    let art = if opts.truecolor {
+        textmode::from_image_rgb(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.bits)
+    } else {
+        textmode::from_image(&px, cols * 8, rows * textmode::GLYPH_H, cols, rows, opts.ice, textmode::Rgb::Vga, opts.bits)
+    };
     let bytes = textmode::write_ansi(&art, opts.write_opts());
     eprintln!(
-        "{}x{} cells, {} bytes, iCE {}",
+        "{}x{} cells, {} bytes, {}",
         art.cols,
         art.rows,
         bytes.len(),
-        if opts.ice == textmode::Ice::On { "on" } else { "off" }
+        if opts.truecolor {
+            "24-bit colour".to_string()
+        } else {
+            format!("16 colours, iCE {}", if opts.ice == textmode::Ice::On { "on" } else { "off" })
+        }
     );
     let _ = aspect;
     emit(&bytes, &opts.out)
@@ -585,6 +601,7 @@ fn view_ans_file(path: &str, ice_flag: bool) -> Result<()> {
             sauce: false,
             bits: 8,
             skip_blank_bg: false,
+            truecolor: false,
         },
     );
     emit(&bytes, &None)

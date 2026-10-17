@@ -271,6 +271,8 @@ pub fn read_ansi(data: &[u8], opts: ReadOpts) -> Art {
                 cur.ch = b;
                 cur.fg = pen.fg;
                 cur.bg = pen.bg;
+                cur.fg24 = pen.fg24;
+                cur.bg24 = pen.bg24;
                 write_cell(&mut grid, &mut cols, &mut rows, x, y, cur, width_hint);
                 x += 1;
                 i += 1;
@@ -290,7 +292,7 @@ pub fn read_ansi(data: &[u8], opts: ReadOpts) -> Art {
             cells[r * width + c] = grid.get(r * stride + c).copied().unwrap_or_default();
         }
         for c in stride.min(width)..width {
-            cells[r * width + c] = TCell { ch: b' ', ..TCell::default() };
+            cells[r * width + c] = TCell::default();
         }
     }
 
@@ -430,6 +432,8 @@ fn apply_csi(
             }
             cur.fg = pen.fg;
             cur.bg = pen.bg;
+            cur.fg24 = pen.fg24;
+            cur.bg24 = pen.bg24;
         }
         // Cursor position: row ; col, both 1-based.
         b'H' | b'f' => {
@@ -506,8 +510,8 @@ pub fn to_cells(art: &Art, ice: Ice, set: Rgb) -> Vec<crate::render::Cell> {
             let bg_idx = if ice == Ice::On { t.bg } else { t.bg & 7 };
             out.push(crate::render::Cell {
                 ch: ch(t.ch),
-                fg: set.get(t.fg & 15),
-                bg: set.get(bg_idx & 15),
+                fg: t.fg_rgb(set),
+                bg: t.bg24.unwrap_or_else(|| set.get(bg_idx & 15)),
             });
         }
     }
@@ -562,6 +566,40 @@ pub fn from_image(
         }
     }
     Art { cols, rows, cells, sauce: None, truecolor: false, used_ice: ice == Ice::On }
+}
+
+/// Build an [`Art`] from an image with 24-bit colour: the same glyph fit as
+/// [`from_image`], but each cell takes the exact best two colours instead of
+/// rounding to the DOS palette.
+pub fn from_image_rgb(px: &[u8], w: usize, h: usize, cols: usize, rows: usize, bits: usize) -> Art {
+    let font = Font::dos();
+    let (cw, chh) = (bits, GLYPH_H);
+    let masks = ink_masks(&font, cw, chh);
+    let mut cells = Vec::with_capacity(rows * cols);
+    let mut cell_px = vec![[0u8; 3]; cw * chh];
+
+    for r in 0..rows {
+        for c in 0..cols {
+            for y in 0..chh {
+                for x in 0..cw {
+                    let sx = (c * cw + x) * w / (cols * cw);
+                    let sy = (r * chh + y) * h / (rows * chh);
+                    let at = (sy.min(h - 1) * w + sx.min(w - 1)) * 3;
+                    cell_px[y * cw + x] = [px[at], px[at + 1], px[at + 2]];
+                }
+            }
+            let mut best = (u64::MAX, TCell::default());
+            for (b, ink) in &masks {
+                let (mut cell, err) = super::palette::fit_cell_rgb(&cell_px, ink);
+                if err < best.0 {
+                    cell.ch = *b;
+                    best = (err, cell);
+                }
+            }
+            cells.push(best.1);
+        }
+    }
+    Art { cols, rows, cells, sauce: None, truecolor: true, used_ice: false }
 }
 
 #[cfg(test)]
@@ -1014,6 +1052,7 @@ mod viewer_tests {
                 sauce: false,
                 bits: 8,
                 skip_blank_bg: false,
+                truecolor: true,
             },
         );
         assert!(parse_sauce(&bytes).is_none(), "the viewer drops SAUCE");

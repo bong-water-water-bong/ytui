@@ -30,8 +30,9 @@ description: All ytui command-line options and environment variables, for render
 
 | Option | What it does |
 |---|---|
-| `--mode M` | Render mode: `glow`, `art`, `ascii`, `classic`, `sextant`, `quadrant`, `halfblock`, `braille`, `ansi`, `ansiblink` or `ansi9` |
+| `--mode M` | Render mode: `glow`, `art`, `ascii`, `classic`, `sextant`, `quadrant`, `halfblock`, `braille`, `ansi`, `ansi9`, `ansi-16`, `ansi9-16` or `ansiblink` |
 | `-o FILE`, `--out FILE` | Output path for `--snapshot-ans` and `--convert-ans` |
+| `--palette` | Write 16-colour ANSI art instead of 24-bit |
 | `--no-ice` | Write ANSI art with the background high bit as blink (8 backgrounds) instead of iCE colours (16) |
 | `--compact` | Write CR/LF-separated rows instead of absolute cursor moves: smaller files, but clients that wrap at column 80 will band them |
 | `--bits N` | Cell width in dots when writing ANSI art: `8` or `9` |

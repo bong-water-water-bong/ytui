@@ -156,11 +156,33 @@ pub struct TCell {
     pub ch: u8,
     pub fg: u8,
     pub bg: u8,
+    /// Truecolour overrides. When set they win over the palette indices, which
+    /// stay populated so a palette-only consumer (a 16-colour view, an `.ANS`
+    /// writer without PabloDraw sequences) still has something valid to draw.
+    pub fg24: Option<[u8; 3]>,
+    pub bg24: Option<[u8; 3]>,
 }
 
 impl Default for TCell {
     fn default() -> Self {
-        TCell { ch: b' ', fg: LIGHT_GREY, bg: BLACK }
+        TCell { ch: b' ', fg: LIGHT_GREY, bg: BLACK, fg24: None, bg24: None }
+    }
+}
+
+impl TCell {
+    /// A palette cell, with no truecolour override.
+    pub fn pal(ch: u8, fg: u8, bg: u8) -> TCell {
+        TCell { ch, fg, bg, fg24: None, bg24: None }
+    }
+
+    /// The foreground to draw, as RGB: the 24-bit value if there is one.
+    pub fn fg_rgb(&self, set: Rgb) -> [u8; 3] {
+        self.fg24.unwrap_or_else(|| set.get(self.fg))
+    }
+
+    /// The background to draw, as RGB.
+    pub fn bg_rgb(&self, set: Rgb) -> [u8; 3] {
+        self.bg24.unwrap_or_else(|| set.get(self.bg))
     }
 }
 
@@ -234,7 +256,173 @@ pub fn fit_cell(pixels: &[[u8; 3]], ink: &[bool], ice: Ice, set: Rgb) -> (TCell,
         let paints = if k { fg } else { bg };
         err += dist2(*p, set.get(paints)) as u64;
     }
-    (TCell { ch: b' ', fg, bg }, err)
+    (TCell { ch: b' ', fg, bg, fg24: None, bg24: None }, err)
+}
+
+/// The exact best two colours for a cell under a fixed ink mask, in 24-bit.
+///
+/// With the mask deciding which pixels are ink, the colours that minimise
+/// squared error are not a search at all: ink takes the mean of the inked
+/// pixels and paper the mean of the rest. That makes truecolour *cheaper* than
+/// the palette fit, which has to round each mean to a lookup table and can
+/// only be as good as its 16 entries.
+///
+/// The luma weight matters here: plain RGB averaging would let a saturated
+/// channel dominate, so the mean is taken in linear-ish weights that match
+/// [`dist2`], keeping the choice consistent with how cells are scored.
+pub fn fit_cell_rgb(px: &[[u8; 3]], ink: &[bool]) -> (TCell, u64) {
+    debug_assert_eq!(px.len(), ink.len());
+    let (mut fi, mut bi) = ([0u64; 3], [0u64; 3]);
+    let (mut ni, mut nb) = (0u64, 0u64);
+    for (p, &k) in px.iter().zip(ink) {
+        let acc = if k { &mut fi } else { &mut bi };
+        for d in 0..3 {
+            acc[d] += p[d] as u64;
+        }
+        if k {
+            ni += 1;
+        } else {
+            nb += 1;
+        }
+    }
+    // A side with no pixels takes the other side's colour, so a blank or
+    // fully-inked glyph is one flat colour and costs nothing.
+    let mean = |acc: [u64; 3], n: u64| -> Option<[u8; 3]> {
+        (n > 0).then(|| {
+            [
+                (acc[0] / n).min(255) as u8,
+                (acc[1] / n).min(255) as u8,
+                (acc[2] / n).min(255) as u8,
+            ]
+        })
+    };
+    let (im, pm) = (mean(fi, ni), mean(bi, nb));
+    let (fg, bg) = match (im, pm) {
+        (Some(f), Some(b)) => (f, b),
+        (Some(f), None) => (f, f),
+        (None, Some(b)) => (b, b),
+        (None, None) => ([0, 0, 0], [0, 0, 0]),
+    };
+
+    let mut err = 0u64;
+    for (p, &k) in px.iter().zip(ink) {
+        err += dist2(*p, if k { fg } else { bg }) as u64;
+    }
+    // Palette indices are still filled in, so a caller that cannot show 24-bit
+    // colour has something sane to fall back to.
+    let cell = TCell {
+        ch: b' ',
+        fg: nearest(fg, 16, Rgb::Vga),
+        bg: nearest(bg, 16, Rgb::Vga),
+        fg24: Some(fg),
+        bg24: Some(bg),
+    };
+    (cell, err)
+}
+
+/// As [`fit_cell_rgb`], for a prepared candidate: skips building the mask walk
+/// by using the glyph's own inked-pixel list.
+///
+/// The per-cell totals are not recomputed here; [`prepare_cell`] does them
+/// once, which is what makes trying all 256 glyphs affordable in truecolour.
+pub fn score_rgb(c: &Candidate, px: &[[u8; 3]]) -> (TCell, u64) {
+    score_rgb_pre(c, px, &CellSums::of(px))
+}
+
+/// Per-cell totals, computed once and reused for every glyph.
+#[derive(Clone, Copy)]
+pub struct CellSums {
+    total: [u64; 3],
+    sq: [u64; 3],
+}
+
+impl CellSums {
+    /// Sum every pixel's channels, once per cell.
+    pub fn of(px: &[[u8; 3]]) -> CellSums {
+        let mut total = [0u64; 3];
+        let mut sq = [0u64; 3];
+        for p in px {
+            for d in 0..3 {
+                let v = p[d] as u64;
+                total[d] += v;
+                sq[d] += v * v;
+            }
+        }
+        CellSums { total, sq }
+    }
+}
+
+/// [`score_rgb`] with the cell totals supplied.
+pub fn score_rgb_pre(c: &Candidate, px: &[[u8; 3]], sums: &CellSums) -> (TCell, u64) {
+    let n = px.len() as u64;
+    let (mut fi, mut fsq) = ([0u64; 3], [0u64; 3]);
+    for &i in &c.ink_at {
+        let p = px[i as usize];
+        for d in 0..3 {
+            let v = p[d] as u64;
+            fi[d] += v;
+            fsq[d] += v * v;
+        }
+    }
+    let total = sums.total;
+    let bsq = [sums.sq[0] - fsq[0], sums.sq[1] - fsq[1], sums.sq[2] - fsq[2]];
+    let ni = c.ink as u64;
+    let nb = n - ni;
+    let bi = [total[0] - fi[0], total[1] - fi[1], total[2] - fi[2]];
+    let mean = |acc: [u64; 3], k: u64| -> Option<[u8; 3]> {
+        (k > 0).then(|| {
+            [
+                (acc[0] / k).min(255) as u8,
+                (acc[1] / k).min(255) as u8,
+                (acc[2] / k).min(255) as u8,
+            ]
+        })
+    };
+    let (im, pm) = (mean(fi, ni), mean(bi, nb));
+    let (fg, bg) = match (im, pm) {
+        (Some(f), Some(b)) => (f, b),
+        (Some(f), None) => (f, f),
+        (None, Some(b)) => (b, b),
+        (None, None) => ([0, 0, 0], [0, 0, 0]),
+    };
+
+    // Error against a constant colour is derivable from sums, so this does not
+    // walk the cell again: sum((p-c)^2) = sum(p^2) - 2c.sum(p) + n.c^2, with
+    // the same channel weights `dist2` uses. That is what makes 256 glyphs per
+    // cell affordable.
+    let err = sq_err(fi, ni, fg, fsq) + sq_err(bi, nb, bg, bsq);
+    let cell = TCell {
+        ch: c.byte,
+        fg: nearest(fg, 16, Rgb::Vga),
+        bg: nearest(bg, 16, Rgb::Vga),
+        fg24: Some(fg),
+        bg24: Some(bg),
+    };
+    (cell, err)
+}
+
+/// Sum of squared error between a group of pixels and a constant colour,
+/// derived from that group's channel sums plus the cell's squared sums.
+///
+/// The cell's squared sums are shared by both groups, so a single per-cell
+/// pass is enough. `sq` is the sum of p^2 per channel over the whole cell; for
+/// the two groups it is split the same way the linear sums are, which is why
+/// this takes the group's linear sums and its own squared sums.
+fn sq_err(sum: [u64; 3], n: u64, c: [u8; 3], sq: [u64; 3]) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let w = [30u64, 59, 11];
+    let mut e = 0u64;
+    for d in 0..3 {
+        let s = sum[d];
+        let c = c[d] as u64;
+        // sum((p-c)^2) = sum(p^2) - 2c*sum(p) + n*c^2
+        let t = sq[d] + n * c * c;
+        let cross = 2 * c * s;
+        e += w[d] * t.saturating_sub(cross);
+    }
+    e
 }
 
 /// A glyph candidate, prepared once so a frame can score it cheaply.
@@ -345,7 +533,7 @@ pub fn score(c: &Candidate, px: &[[u8; 3]], ice: Ice, set: Rgb) -> (TCell, u64) 
         err += dist2(*p, if c.mask[i] { fc } else { bc }) as i64;
     }
     debug_assert!(err >= 0, "paint cost cannot be negative: {err}");
-    (TCell { ch: c.byte, fg, bg }, err.max(0) as u64)
+    (TCell { ch: c.byte, fg, bg, fg24: None, bg24: None }, err.max(0) as u64)
 }
 
 /// Every cell a glyph could legally fill, as `(byte, ink mask)` pairs, given
@@ -460,18 +648,18 @@ mod tests {
     #[test]
     fn rasterise_puts_the_right_colours_where_the_glyph_says() {
         // One full-block cell in bright green on black.
-        let cells = [TCell { ch: 0xDB, fg: 2, bg: 0 }];
+        let cells = [TCell::pal(0xDB, 2, 0)];
         let px = rasterise(&cells, 1, 1, Rgb::Vga, 8);
         assert_eq!(px.len(), 8 * 16 * 3);
         assert_eq!(&px[0..3], &VGA[GREEN as usize], "top-left inked");
         // A space is all background.
-        let blank = rasterise(&[TCell { ch: b' ', fg: 2, bg: 4 }], 1, 1, Rgb::Vga, 8);
+        let blank = rasterise(&[TCell::pal(b' ', 2, 4)], 1, 1, Rgb::Vga, 8);
         assert_eq!(&blank[0..3], &VGA[RED as usize]);
     }
 
     #[test]
     fn ninth_dot_widens_blocks_in_rasterised_output() {
-        let cells = [TCell { ch: 0xDB, fg: 15, bg: 0 }];
+        let cells = [TCell::pal(0xDB, 15, 0)];
         let narrow = rasterise(&cells, 1, 1, Rgb::Vga, 8);
         let wide = rasterise(&cells, 1, 1, Rgb::Vga, 9);
         assert_eq!(narrow.len(), 8 * 16 * 3);
@@ -541,5 +729,64 @@ mod fit_tests {
         }
         let (_, err) = fit_cell(&px, &ink, Ice::On, Rgb::Vga);
         assert_eq!(err, 0, "sameness makes any mask free");
+    }
+}
+
+#[cfg(test)]
+mod rgb_fit_tests {
+    use super::*;
+
+    fn cell(seed: u8) -> Vec<[u8; 3]> {
+        (0..72u8).map(|i| {
+            let v = i.wrapping_mul(7).wrapping_add(seed);
+            [v, v.wrapping_mul(3), 255 - v]
+        }).collect()
+    }
+
+    #[test]
+    fn derived_error_matches_a_direct_walk() {
+        let cands = candidates_bits(&Font::dos(), 6, 12, 8);
+        let px = cell(37);
+        let sums = CellSums::of(&px);
+        for c in cands.iter().take(40) {
+            let (cell, err) = score_rgb_pre(c, &px, &sums);
+            // Direct: walk every pixel against the colours we chose.
+            let (fg, bg) = (cell.fg24.unwrap(), cell.bg24.unwrap());
+            let mut direct = 0u64;
+            for (i, p) in px.iter().enumerate() {
+                direct += dist2(*p, if c.mask[i] { fg } else { bg }) as u64;
+            }
+            assert_eq!(err, direct, "glyph {} derived {err} vs walked {direct}", c.byte);
+        }
+    }
+
+    #[test]
+    fn truecolour_beats_the_16_colour_fit() {
+        // A colour that is not on the DOS palette at all.
+        let px: Vec<[u8; 3]> = (0..72).map(|i| if i % 2 == 0 { [123, 77, 200] } else { [10, 240, 90] }).collect();
+        let ink: Vec<bool> = (0..72).map(|i| i % 2 == 0).collect();
+        let (rgb, rgb_err) = fit_cell_rgb(&px, &ink);
+        let (_, pal_err) = fit_cell(&px, &ink, Ice::On, Rgb::Vga);
+        assert!(rgb_err < pal_err, "24-bit {rgb_err} should beat palette {pal_err}");
+        assert_eq!(rgb_err, 0, "exactly two colours must fit exactly");
+        assert_eq!(rgb.fg24, Some([123, 77, 200]));
+        assert_eq!(rgb.bg24, Some([10, 240, 90]));
+    }
+
+    #[test]
+    fn a_flat_cell_is_one_colour_both_sides() {
+        let px = vec![[40, 90, 160]; 72];
+        let (c, err) = fit_cell_rgb(&px, &[true; 72]);
+        assert_eq!(err, 0);
+        assert_eq!(c.fg24, Some([40, 90, 160]));
+        assert_eq!(c.bg24, Some([40, 90, 160]));
+    }
+
+    #[test]
+    fn palette_indices_stay_populated_as_a_fallback() {
+        let px = vec![[0xAA, 0x00, 0x00]; 72];
+        let (c, _) = fit_cell_rgb(&px, &[true; 72]);
+        assert_eq!(c.fg24, Some([0xAA, 0, 0]));
+        assert_eq!(c.fg, RED, "the palette fallback should be DOS red");
     }
 }

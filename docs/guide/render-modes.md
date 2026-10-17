@@ -17,9 +17,11 @@ Press `m` to cycle the character render modes, or start with `--mode`. Your choi
 | `quadrant` | A 2×2 two-colour mosaic. |
 | `halfblock` | Top and bottom half blocks. |
 | `braille` | A 2×4 dot mosaic. |
-| `ansi` | CP437 glyphs from the IBM 8×16 ROM font on the 16-colour DOS palette, with iCE colours. See [ANSI art](../ansi-art/). |
-| `ansiblink` | As `ansi`, with backgrounds limited to the 8 that do not blink. |
+| `ansi` | CP437 glyphs from the IBM 8×16 ROM font, in 24-bit colour. See [ANSI art](../ansi-art/). |
 | `ansi9` | As `ansi` at 9 dots per cell, so block characters and box rules join without a seam. |
+| `ansi-16` | The period-correct 16-colour DOS palette, with iCE colours. |
+| `ansi9-16` | `ansi-16` at 9 dots per cell. |
+| `ansiblink` | `ansi-16` with backgrounds limited to the 8 that do not blink. |
 
 For real pixels instead of characters, see [pixel graphics](../pixel-graphics/).
 

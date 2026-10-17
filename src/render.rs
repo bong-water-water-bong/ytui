@@ -44,10 +44,16 @@ pub enum Mode {
     /// dot of the block and line-drawing characters, so box rules join with
     /// no seam, exactly as an 80-column VGA screen drew them.
     Ansi9,
+    /// [`Mode::Ansi`] with 24-bit colour instead of the 16-entry DOS palette:
+    /// the same CP437 glyphs and the same two-colours-per-cell fit, but the
+    /// colours are the best two for the cell rather than the nearest of 16.
+    Ansi24,
+    /// [`Mode::Ansi9`] with 24-bit colour.
+    Ansi9x24,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 11] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille, Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9];
+    pub const ALL: [Mode; 13] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille, Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9, Mode::Ansi24, Mode::Ansi9x24];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -59,14 +65,23 @@ impl Mode {
             Mode::Quadrant => "quadrant",
             Mode::HalfBlock => "halfblock",
             Mode::Braille => "braille",
-            Mode::Ansi => "ansi",
+            Mode::Ansi => "ansi-16",
             Mode::AnsiBlink => "ansiblink",
-            Mode::Ansi9 => "ansi9",
+            Mode::Ansi9x24 => "ansi9",
+            Mode::Ansi24 => "ansi",
+            Mode::Ansi9 => "ansi9-16",
         }
     }
 
+    /// Parse a mode name. An exact match wins over a prefix, so `ansi` means
+    /// the 24-bit mode rather than the `ansi-16` it is a prefix of.
     pub fn parse(s: &str) -> Option<Mode> {
-        Mode::ALL.iter().copied().find(|m| m.name().starts_with(&s.to_ascii_lowercase()))
+        let want = s.to_ascii_lowercase();
+        Mode::ALL
+            .iter()
+            .copied()
+            .find(|m| m.name() == want)
+            .or_else(|| Mode::ALL.iter().copied().find(|m| m.name().starts_with(&want)))
     }
 
     pub fn next(self) -> Mode {
@@ -226,7 +241,7 @@ impl Renderer {
             }
             Mode::Quadrant => mosaic(img, cols, rows, out, 2, 2, |m| QUAD[m as usize], false),
             Mode::Sextant => mosaic(img, cols, rows, out, 2, 3, sextant, false),
-            Mode::Ansi | Mode::AnsiBlink | Mode::Ansi9 => {
+            Mode::Ansi | Mode::AnsiBlink | Mode::Ansi9 | Mode::Ansi24 | Mode::Ansi9x24 => {
                 self.text_art(img, cols, rows, out)
             }
             Mode::Braille => mosaic(img, cols, rows, out, 2, 4, |m| {
@@ -565,7 +580,10 @@ impl Renderer {
     /// watch and what `--snapshot-ans` writes come from the same code.
     fn text_art(&mut self, img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
         let binary = matches!(self.mode, Mode::AnsiBlink);
-        let bits = if matches!(self.mode, Mode::Ansi9) { 9 } else { 8 };
+        let bits = if matches!(self.mode, Mode::Ansi9 | Mode::Ansi9x24) { 9 } else { 8 };
+        // 24-bit modes pick the best two colours for the cell; the palette
+        // modes round to the nearest of 16.
+        let truecolor = matches!(self.mode, Mode::Ansi24 | Mode::Ansi9x24);
         // The cache is only valid for one geometry, and rebuilding the ink
         // masks is the expensive part of a frame.
         if self.tm_cache.as_ref().map(|(b, c, r, _)| (*b, *c, *r)) != Some((bits, cols, rows)) {
@@ -599,16 +617,31 @@ impl Renderer {
                 // quality drop, so the exact fit stays. These modes are for
                 // stills and export; live video remains the mosaic modes' job
                 // until a better shortlist metric exists.
+                //
+                // In truecolour the sums are hoisted out of the glyph loop and
+                // the error is derived from them instead of walking the cell
+                // again, which is what makes trying all 256 glyphs affordable.
+                let sums = crate::textmode::CellSums::of(&cell_px);
                 let mut best = (u64::MAX, crate::textmode::TCell::default());
                 for c in cands.iter() {
-                    let (cell, err) = crate::textmode::score(c, &cell_px, ice, crate::textmode::Rgb::Vga);
+                    let (cell, err) = if truecolor {
+                        crate::textmode::score_rgb_pre(c, &cell_px, &sums)
+                    } else {
+                        crate::textmode::score(c, &cell_px, ice, crate::textmode::Rgb::Vga)
+                    };
                     if err < best.0 {
                         best = (err, cell);
                     }
                 }
                 let cell = best.1;
-                let fg = crate::textmode::VGA[(cell.fg & 15) as usize];
-                let bg = crate::textmode::VGA[(cell.bg & 15) as usize];
+                let (fg, bg) = if truecolor {
+                    (cell.fg_rgb(crate::textmode::Rgb::Vga), cell.bg_rgb(crate::textmode::Rgb::Vga))
+                } else {
+                    (
+                        crate::textmode::VGA[(cell.fg & 15) as usize],
+                        crate::textmode::VGA[(cell.bg & 15) as usize],
+                    )
+                };
                 let (fg, bg) = if p256 {
                     // Map through the 256-colour palette, dithered, so the
                     // picture survives a terminal without truecolour.
@@ -943,7 +976,7 @@ mod tests {
 mod mode_parse_test {
     #[test]
     fn parse_ansi() {
-        for s in ["ansi", "ansi9", "ansiblink", "ascii"] {
+        for s in ["ansi", "ansi-16", "ansi9", "ansi9-16", "ansiblink", "ascii"] {
             eprintln!("{s:10} -> {:?}", super::Mode::parse(s).map(|m| m.name()));
         }
     }

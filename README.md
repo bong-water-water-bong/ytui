@@ -240,13 +240,17 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 | `quadrant` | 2×2 two-colour mosaic |
 | `halfblock` | Top/bottom half blocks |
 | `braille` | 2×4 dot mosaic |
-| `ansi` | Real text-mode art: CP437 glyphs from the IBM 8×16 ROM font on the 16-colour DOS palette, with iCE colours (8 foregrounds × 16 backgrounds) |
-| `ansiblink` | As `ansi`, but backgrounds limited to the 8 that do not blink (iCE off) |
+| `ansi` | Real text-mode art in 24-bit colour: CP437 glyphs from the IBM 8×16 ROM font, two colours per cell, the best two for the picture rather than the nearest of 16 |
 | `ansi9` | As `ansi` at 9 dots per cell: the extra column makes block characters and box rules join without a seam, as a VGA screen drew them |
+| `ansi-16` | The period-correct version: the 16-colour DOS palette with iCE colours (8 foregrounds × 16 backgrounds) |
+| `ansi9-16` | `ansi-16` at 9 dots per cell |
+| `ansiblink` | As `ansi-16`, but backgrounds limited to the 8 that do not blink (iCE off) |
 
-The three `ansi` modes are the slow ones — they fit every CP437 glyph for every cell (~30 ms per
-frame at 120×40), so they suit stills and the exporter better than live video. The mosaic modes
-remain the fast choice. See [ANSI art](#ansi-art) below.
+The `ansi` modes are the slow ones — they fit every CP437 glyph for every cell — so they suit stills
+and the exporter better than live video. Truecolour is *faster* than the palette fit (≈80 ms vs
+≈160 ms per frame at 120×40): with the ink mask fixed, the best two colours are the two group means,
+so no palette search is needed. The mosaic modes remain the fast choice for live video. See
+[ANSI art](#ansi-art) below.
 
 **Auto-exposure** (on by default, `E` toggles) lifts under-exposed video so dark scenes stay
 readable: it measures each frame's 1st–99th percentile brightness, raises the highlights to white
@@ -271,9 +275,11 @@ ytui --snapshot-ans VIDEO -o art.ans     save a video frame as ANSI art
 ytui --convert-ans art.ans -o out.ans    re-encode existing art
 ```
 
-Options for the writer: `--no-ice` (read the background high bit as blink, 8 backgrounds),
-`--compact` (CR/LF rows instead of absolute cursor moves — smaller, but clients that wrap at
-column 80 will band it), and `--bits 9` (the 9th-dot rule).
+Options for the writer: `--palette` (write the 16-colour DOS version instead of 24-bit),
+`--no-ice` (read the background high bit as blink, 8 backgrounds), `--compact` (CR/LF rows instead
+of absolute cursor moves — smaller, but clients that wrap at column 80 will band it), and `--bits 9`
+(the 9th-dot rule). 24-bit colour goes into the file as PabloDraw's `ESC[1;r;g;bt` sequences, written
+*after* the palette escape so a viewer that ignores them still draws the right 16-colour picture.
 
 The interesting details, all of which took a wrong turn first:
 

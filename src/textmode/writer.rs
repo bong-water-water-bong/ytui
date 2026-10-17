@@ -54,11 +54,15 @@ pub struct WriteOpts {
     /// Emit `ESC[8m`+conceal for fully-blank cells instead of writing a space
     /// with the background colour. Only helps when backgrounds are uniform.
     pub skip_blank_bg: bool,
+    /// Write PabloDraw `ESC[0|1;r;g;bt` sequences for 24-bit colours. Off by
+    /// default: it costs bytes, and a reader that ignores the sequence still
+    /// gets a correct palette picture.
+    pub truecolor: bool,
 }
 
 impl Default for WriteOpts {
     fn default() -> Self {
-        WriteOpts { style: Style::Portable, ice: Ice::On, sauce: true, bits: 8, skip_blank_bg: false }
+        WriteOpts { style: Style::Portable, ice: Ice::On, sauce: true, bits: 8, skip_blank_bg: false, truecolor: false }
     }
 }
 
@@ -199,6 +203,17 @@ pub fn write_ansi(art: &Art, opts: WriteOpts) -> Vec<u8> {
                 }
                 out.extend_from_slice(&fg_seq(cell.fg, had_bold && !wants_bold));
             }
+            // PabloDraw's truecolour extension, for anything the palette
+            // cannot express. Written after the palette escapes so a reader
+            // that ignores `t` still shows the right index.
+            if opts.truecolor {
+                if let Some(rgb) = cell.bg24 {
+                    out.extend_from_slice(format!("\x1b[0;{};{};{}t", rgb[0], rgb[1], rgb[2]).as_bytes());
+                }
+                if let Some(rgb) = cell.fg24 {
+                    out.extend_from_slice(format!("\x1b[1;{};{};{}t", rgb[0], rgb[1], rgb[2]).as_bytes());
+                }
+            }
             pen = Some((cell.fg, cell.bg));
             // CP437 byte, verbatim. 0x00 is a NUL, not a printable glyph, so
             // substitute a space rather than truncate the file.
@@ -279,7 +294,7 @@ mod tests {
     fn art_of(chars: &[u8], cols: usize, rows: usize) -> Art {
         let mut cells = Vec::new();
         for i in 0..cols * rows {
-            cells.push(TCell { ch: *chars.get(i).unwrap_or(&b' '), fg: 7, bg: 0 });
+            cells.push(TCell::pal(*chars.get(i).unwrap_or(&b' '), 7, 0));
         }
         Art { cols, rows, cells, sauce: None, truecolor: false, used_ice: false }
     }
@@ -288,7 +303,7 @@ mod tests {
     fn round_trip_preserves_glyphs_and_colours() {
         let mut cells = Vec::new();
         for i in 0..40u8 {
-            cells.push(TCell { ch: 0xB0 + (i % 16), fg: i % 16, bg: (i + 3) % 16 });
+            cells.push(TCell::pal(0xB0 + (i % 16), i % 16, (i + 3) % 16));
         }
         let art = Art { cols: 8, rows: 5, cells, sauce: None, truecolor: false, used_ice: true };
         for style in [Style::Portable, Style::Compact] {
@@ -327,7 +342,7 @@ mod tests {
         let art = Art {
             cols: 1,
             rows: 1,
-            cells: vec![TCell { ch: b'X', fg: 7, bg: 12 }],
+            cells: vec![TCell::pal(b'X', 7, 12)],
             sauce: None,
             truecolor: false,
             used_ice: true,
@@ -346,7 +361,7 @@ mod tests {
         let art = Art {
             cols: 1,
             rows: 1,
-            cells: vec![TCell { ch: b'X', fg: 12, bg: 0 }],
+            cells: vec![TCell::pal(b'X', 12, 0)],
             sauce: None,
             truecolor: false,
             used_ice: false,
@@ -381,7 +396,7 @@ mod tests {
         // decoded first must equal the first, byte for byte.
         let mut cells = Vec::new();
         for i in 0..64u8 {
-            cells.push(TCell { ch: b' ' + (i % 90), fg: (i % 8), bg: (i % 16) });
+            cells.push(TCell::pal(b' ' + (i % 90), (i % 8), (i % 16)));
         }
         let art = Art { cols: 16, rows: 4, cells, sauce: None, truecolor: false, used_ice: true };
         let opts = WriteOpts { sauce: true, ..Default::default() };
@@ -396,7 +411,7 @@ mod tests {
         let art = Art {
             cols: 2,
             rows: 1,
-            cells: vec![TCell { ch: 0, fg: 7, bg: 0 }, TCell { ch: b'X', fg: 7, bg: 0 }],
+            cells: vec![TCell::pal(0, 7, 0), TCell::pal(b'X', 7, 0)],
             sauce: None,
             truecolor: false,
             used_ice: false,
@@ -407,3 +422,47 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod truecolor_tests {
+    use super::super::palette::TCell;
+    use super::super::reader::{read_ansi, Art, ReadOpts};
+    use super::*;
+
+    fn art_with(cells: Vec<TCell>, cols: usize, rows: usize) -> Art {
+        Art { cols, rows, cells, sauce: None, truecolor: false, used_ice: false }
+    }
+
+    #[test]
+    fn truecolour_survives_a_round_trip() {
+        let cells = vec![
+            TCell { ch: b'A', fg: 7, bg: 0, fg24: Some([123, 77, 200]), bg24: Some([9, 240, 90]) },
+            TCell { ch: b'B', fg: 4, bg: 0, fg24: None, bg24: None },
+        ];
+        let art = art_with(cells, 2, 1);
+        let bytes = write_ansi(&art, WriteOpts { truecolor: true, sauce: false, ..Default::default() });
+        let back = read_ansi(&bytes, ReadOpts { use_sauce: false, width: Some(2), ..Default::default() });
+        assert_eq!(back.get(0, 0).fg24, Some([123, 77, 200]), "24-bit fg");
+        assert_eq!(back.get(0, 0).bg24, Some([9, 240, 90]), "24-bit bg");
+        // The cell without a 24-bit value must not inherit one.
+        assert_eq!(back.get(1, 0).fg24, None);
+        assert!(back.truecolor, "the file should be flagged truecolour");
+    }
+
+    #[test]
+    fn truecolour_off_writes_no_t_sequences() {
+        let art = art_with(vec![TCell { ch: b'A', fg: 7, bg: 0, fg24: Some([1, 2, 3]), bg24: None }], 1, 1);
+        let bytes = write_ansi(&art, WriteOpts { truecolor: false, sauce: false, ..Default::default() });
+        assert!(!bytes.contains(&b't'), "no PabloDraw sequence expected: {:?}", String::from_utf8_lossy(&bytes));
+    }
+
+    #[test]
+    fn a_palette_reader_still_sees_a_valid_picture() {
+        // The whole point of writing the palette escape first: a reader that
+        // ignores `t` must draw the DOS colours, not nothing.
+        let art = art_with(vec![TCell { ch: b'A', fg: 4, bg: 1, fg24: Some([1, 2, 3]), bg24: Some([4, 5, 6]) }], 1, 1);
+        let bytes = write_ansi(&art, WriteOpts { truecolor: true, sauce: false, ..Default::default() });
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("[31m") || text.contains("31m"), "DOS red must be written: {text:?}");
+    }
+}
