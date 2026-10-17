@@ -6,7 +6,7 @@
 use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
 use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
-use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
+use crate::page::{MRoute, MusicNow, self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Renderer};
 use crate::store::Store;
@@ -62,6 +62,8 @@ pub enum Msg {
     DlgToggled(String, String, String, R<Option<String>>),
     /// A playlist edit finished; flash this and refresh playlist pages.
     PlDone(R<String>),
+    /// A YouTube Music playlist's queue, to start playing it.
+    MusicStart(String, R<crate::music::Next>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -131,6 +133,11 @@ pub enum Load {
     Replies(usize, R<CommentBatch>),
     Playlists(R<Vec<MyPlaylist>>),
     MyPlaylist(R<(MyPlaylist, Vec<PlItem>)>),
+    Music(R<crate::music::MusicPage>),
+    MusicMore(R<crate::music::MusicPage>),
+    MusicNext(R<crate::music::Next>),
+    MusicLyrics(R<crate::music::Lyrics>),
+    MusicRelated(R<crate::music::MusicPage>),
 }
 
 struct Tab {
@@ -154,10 +161,6 @@ enum Btn {
     Addr,
     Help,
 }
-
-/// YouTube's Music channel: what the Music link in YouTube's own sidebar
-/// opens.
-const MUSIC_CHANNEL: &str = "UC-9-kyTW8ZkZNDHQJ6FgpwQ";
 
 #[derive(Clone)]
 enum Side {
@@ -217,6 +220,9 @@ pub struct App {
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
+    /// The YouTube Music queue playing (an album, playlist or radio), so
+    /// the music player keeps it as songs advance or it's reopened.
+    music_list: Vec<crate::music::Song>,
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
@@ -296,6 +302,7 @@ impl App {
             frame_out: Vec::new(),
             chat_src: None,
             up_next: (String::new(), Vec::new()),
+            music_list: Vec::new(),
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
@@ -464,7 +471,27 @@ impl App {
             }
             Kind::Watch(w) => {
                 let id = w.video.id.clone();
+                if let Some(m) = &w.music {
+                    let (api, pl, id, send) = (api.clone(), m.playlist.clone(), id.clone(), send.clone());
+                    std::thread::spawn(move || send(Load::MusicNext(s(api.music_next(Some(&id), pl.as_deref())))));
+                }
                 std::thread::spawn(move || send(Load::Watch(s(api.watch(&id)))));
+            }
+            Kind::Music { route, .. } => {
+                let route = route.clone();
+                let signed_in = api.signed_in();
+                std::thread::spawn(move || {
+                    let r = match route {
+                        MRoute::Home => api.music_browse(&crate::music::Browse::new("FEmusic_home")),
+                        MRoute::Explore => api.music_browse(&crate::music::Browse::new("FEmusic_explore")),
+                        MRoute::Library(_) if !signed_in => return send(Load::Music(Err("sign in to see your library".into()))),
+                        MRoute::Library(i) => api.music_browse(&crate::music::Browse::new(crate::music::LIBRARY[i].1)),
+                        MRoute::Search { q, filter: 0 } => api.music_search_all(&q),
+                        MRoute::Search { q, filter } => api.music_search(&q, crate::music::FILTERS[filter].1),
+                        MRoute::Browse(b) => api.music_browse(&b),
+                    };
+                    send(Load::Music(s(r)));
+                });
             }
             Kind::Subs { .. } => {
                 std::thread::spawn(move || {
@@ -532,6 +559,10 @@ impl App {
         match &mut p.kind {
             Kind::Home { .. } | Kind::Search { .. } => std::thread::spawn(move || send(Load::More(s(api.search_more(&tok))))),
             Kind::Channel { .. } | Kind::Playlist { .. } => std::thread::spawn(move || send(Load::More(s(api.browse_more(&tok))))),
+            Kind::Music { route, .. } => {
+                let search = matches!(route, MRoute::Search { .. });
+                std::thread::spawn(move || send(Load::MusicMore(s(api.music_more(&tok, search)))))
+            }
             Kind::Watch(w) => {
                 w.comments_loading = true;
                 std::thread::spawn(move || send(Load::Comments(s(api.comments(&tok)))))
@@ -546,6 +577,8 @@ impl App {
         let mut related = None;
         let player_id = self.player.as_ref().map(|p| p.video.id.clone()).or(self.pending.as_ref().map(|p| p.0.id.clone()));
         let mut err_flash = None;
+        let mut music_queue: Option<(String, Vec<VideoItem>, usize)> = None;
+        let mut music_songs: Option<Vec<crate::music::Song>> = None;
         let Some(p) = self.find(uid) else { return };
         p.loading = false;
         p.changed();
@@ -562,6 +595,82 @@ impl App {
                 }
             }
             (Load::Channel(Ok(c)), Kind::Channel { page, .. }) => *page = Some(c),
+            (Load::Music(Ok(mut m)), Kind::Music { page, route }) => {
+                // An album's tracks carry no art or album of their own.
+                if let (Some(h), MRoute::Browse(b)) = (&m.header, &*route) {
+                    let album = b.id.starts_with("MPRE").then(|| (h.title.clone(), b.id.clone()));
+                    let art = h.thumb.clone().filter(|_| !h.banner);
+                    for sec in &mut m.sections {
+                        for it in &mut sec.items {
+                            if let crate::music::MItem::Song(s) = it {
+                                if s.thumb.is_none() {
+                                    s.thumb = art.clone();
+                                }
+                                if s.album.is_none() {
+                                    s.album = album.clone();
+                                }
+                                if s.video.channel.is_empty() && album.is_some() {
+                                    if let Some((name, id)) = &h.artist {
+                                        s.video.channel = name.clone();
+                                        s.video.channel_id = Some(id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                *page = Some(m);
+            }
+            (Load::Music(Err(e)), _) => p.error = Some(e),
+            (Load::MusicMore(r), Kind::Music { page, .. }) => {
+                p.more_loading = false;
+                match (r, page) {
+                    (Ok(m), Some(pg)) => pg.extend(m),
+                    (Err(e), _) => err_flash = Some(e),
+                    _ => {}
+                }
+            }
+            (Load::MusicNext(r), Kind::Watch(w)) => {
+                if let Some(m) = &mut w.music {
+                    match r {
+                        Ok(mut n) => {
+                            // Played from a list: that list (with its own
+                            // titles) stays the queue; else the radio is.
+                            if m.list.len() > 1 {
+                                n.queue = m.list.clone();
+                            }
+                            let at = n.queue.iter().position(|q| q.video.id == w.video.id);
+                            if at.is_some() {
+                                music_songs = Some(n.queue.clone());
+                            }
+                            if m.album.is_none() {
+                                m.album = at.and_then(|i| n.queue[i].album.clone());
+                            }
+                            // The music queue becomes what plays next.
+                            if let Some(i) = at {
+                                music_queue = Some((w.video.id.clone(), n.queue.iter().map(|q| q.video.clone()).collect::<Vec<_>>(), i));
+                                w.queue = n.queue.iter().map(|q| q.video.clone()).collect();
+                                w.qpos = i;
+                            }
+                            m.next = Some(n);
+                        }
+                        Err(e) => {
+                            m.next = Some(Default::default());
+                            err_flash = Some(e);
+                        }
+                    }
+                }
+            }
+            (Load::MusicLyrics(r), Kind::Watch(w)) => {
+                if let Some(m) = &mut w.music {
+                    m.lyrics = Some(r);
+                }
+            }
+            (Load::MusicRelated(r), Kind::Watch(w)) => {
+                if let Some(m) = &mut w.music {
+                    m.related = Some(r);
+                }
+            }
             (Load::Playlists(Ok(l)), Kind::Playlists { list }) => *list = Some(l),
             (Load::MyPlaylist(Ok((i, it))), Kind::MyPlaylist { info, items, .. }) => {
                 *info = Some(i);
@@ -570,7 +679,7 @@ impl App {
             (Load::Playlists(Err(e)) | Load::MyPlaylist(Err(e)), _) => p.error = Some(e),
             (Load::Playlist(Ok(pl)), Kind::Playlist { page, .. }) => *page = Some(pl),
             (Load::Watch(Ok(info)), Kind::Watch(w)) => {
-                if let Some(t) = &info.comments_token {
+                if let Some(t) = info.comments_token.as_ref().filter(|_| w.music.is_none()) {
                     w.comments_loading = true;
                     want_comments = Some(t.clone());
                 }
@@ -621,6 +730,15 @@ impl App {
         }
         if let Some(e) = err_flash {
             self.flash(format!("⚠ {e}"));
+        }
+        if let Some((id, q, i)) = music_queue {
+            if self.player.as_ref().map(|p| &p.video.id).or(self.pending.as_ref().map(|p| &p.0.id)) == Some(&id) {
+                self.queue = q;
+                self.qpos = i;
+                if let Some(songs) = music_songs {
+                    self.music_list = songs;
+                }
+            }
         }
         if let (Some(id), Some(auth)) = (want_rating, self.auth.clone()) {
             let tx = self.tx.clone();
@@ -872,6 +990,17 @@ impl App {
                     c.apply(u);
                 }
             }
+            Msg::MusicStart(pl, r) => match r {
+                Ok(n) if !n.queue.is_empty() => {
+                    let mut q = n.queue;
+                    for x in &mut q {
+                        x.playlist = Some(pl.clone());
+                    }
+                    self.open_song(&q, 0);
+                }
+                Ok(_) => self.flash("this playlist is empty"),
+                Err(e) => self.flash(format!("⚠ {e}")),
+            },
             Msg::Open(r, new_tab) => match r {
                 Ok(Target::Video(id)) => {
                     let v = VideoItem { id, ..Default::default() };
@@ -912,6 +1041,7 @@ impl App {
             queue: queue.clone(),
             qpos,
             rating: None,
+            music: v.music.then(|| self.music_now(&v.id)),
         };
         self.navigate(Kind::Watch(Box::new(w)));
         self.play(v, queue, qpos, None);
@@ -1141,7 +1271,10 @@ impl App {
             let v = p.video.clone();
             self.store.record(&v, d, d);
             self.store_changed();
-            if self.store.autoplay {
+            // YouTube Music always plays on through its queue; autoplay
+            // decides for videos.
+            let in_queue = v.music && self.music_list.len() > 1 && self.music_list.iter().any(|x| x.video.id == v.id);
+            if self.store.autoplay || in_queue {
                 self.advance();
             }
             self.dirty = true;
@@ -1174,8 +1307,150 @@ impl App {
         }
     }
 
+    /// Music player state for a song: within the queue playing, it keeps
+    /// that queue (and the song's playlist and album).
+    fn music_now(&self, id: &str) -> MusicNow {
+        match self.music_list.iter().find(|s| s.video.id == id) {
+            Some(s) if self.music_list.len() > 1 => MusicNow { playlist: s.playlist.clone(), album: s.album.clone(), list: self.music_list.clone(), ..Default::default() },
+            _ => MusicNow::default(),
+        }
+    }
+
+    /// Play `songs[i]` in the music player, the list as its queue.
+    fn open_song(&mut self, songs: &[crate::music::Song], i: usize) {
+        let Some(s) = songs.get(i) else { return };
+        let queue: Vec<VideoItem> = songs.iter().map(|x| x.video.clone()).collect();
+        let mut v = s.video.clone();
+        v.music = true;
+        let w = Watch {
+            video: v.clone(),
+            info: None,
+            desc_open: false,
+            comments: Vec::new(),
+            comments_cont: None,
+            comment_count: None,
+            comments_loading: false,
+            queue: queue.clone(),
+            qpos: i,
+            rating: None,
+            music: Some(MusicNow { playlist: s.playlist.clone(), album: s.album.clone(), list: if songs.len() > 1 && s.playlist.as_deref().is_some_and(|p| !p.starts_with("RD")) { songs.to_vec() } else { Vec::new() }, ..Default::default() }),
+        };
+        self.navigate(Kind::Watch(Box::new(w)));
+        self.play(v, if songs.len() > 1 { queue } else { Vec::new() }, i, None);
+    }
+
+    /// Open a YouTube Music item: play a song in its list, open a card's
+    /// page, or play a card's video.
+    fn music_item(&mut self, page: &crate::music::MusicPage, sec: usize, i: usize) {
+        use crate::music::{CardKind, MItem};
+        let Some(item) = page.sections.get(sec).and_then(|s| s.items.get(i)) else { return };
+        match item.clone() {
+            MItem::Song(_) => {
+                // Album and playlist tracks play through the whole list;
+                // elsewhere the song's own shelf is its queue.
+                let tracks = page.header.as_ref().is_some_and(|h| !h.banner && h.thumb.is_some());
+                let list: Vec<crate::music::Song> = if tracks { page.songs() } else { page.sections[sec].items.iter().filter_map(|x| if let MItem::Song(s) = x { Some(s.clone()) } else { None }).collect() };
+                let MItem::Song(song) = item else { return };
+                let at = list.iter().position(|x| x.video.id == song.video.id).unwrap_or(0);
+                // A lone song gets a radio as its queue (from the next endpoint).
+                if list.len() <= 1 {
+                    self.open_song(&[song.clone()], 0);
+                } else {
+                    self.open_song(&list, at);
+                }
+            }
+            MItem::Card(c) => match c.kind {
+                CardKind::Open(b) => self.navigate(Kind::Music { route: MRoute::Browse(b), page: None }),
+                CardKind::Play { video, playlist } => {
+                    let song = crate::music::Song { video, playlist, thumb: c.thumb.clone(), ..Default::default() };
+                    self.open_song(&[song], 0);
+                }
+            },
+            MItem::Nav { to, .. } => self.navigate(Kind::Music { route: MRoute::Browse(to), page: None }),
+        }
+    }
+
     fn activate(&mut self, act: Act, click_x: Option<u16>, tgt_x: u16, tgt_w: u16) {
         match act {
+            Act::MusicGo(r) => self.navigate(Kind::Music { route: r, page: None }),
+            Act::MusicItem(sec, i) => {
+                if let Kind::Music { page: Some(p), .. } = &self.page().kind {
+                    let p = p.clone();
+                    self.music_item(&p, sec, i);
+                }
+            }
+            Act::MusicRelated(sec, i) => {
+                if let Kind::Watch(w) = &self.page().kind {
+                    if let Some(Ok(p)) = w.music.as_ref().and_then(|m| m.related.as_ref()) {
+                        let p = p.clone();
+                        self.music_item(&p, sec, i);
+                    }
+                }
+            }
+            Act::MusicQueue(i) => {
+                if let Kind::Watch(w) = &self.page().kind {
+                    if let Some(n) = w.music.as_ref().and_then(|m| m.next.as_ref()) {
+                        let q = n.queue.clone();
+                        self.open_song(&q, i);
+                    }
+                }
+            }
+            Act::MusicPlaylist(pl) => {
+                let (api, tx) = (self.api.clone(), self.tx.clone());
+                self.flash("loading…");
+                std::thread::spawn(move || {
+                    let r = s(api.music_next(None, Some(&pl)));
+                    let _ = tx.send(Msg::MusicStart(pl, r));
+                });
+            }
+            Act::MusicFilter(i) | Act::MusicLib(i) => {
+                let p = self.page_mut();
+                if let Kind::Music { route, page } = &mut p.kind {
+                    match route {
+                        MRoute::Search { filter, .. } => *filter = i,
+                        MRoute::Library(l) => *l = i,
+                        _ => return,
+                    }
+                    *page = None;
+                }
+                p.scroll = 0;
+                let uid = p.uid;
+                self.load(uid);
+            }
+            Act::MusicTab(t) => {
+                let (api, tx) = (self.api.clone(), self.tx.clone());
+                let p = self.page_mut();
+                let uid = p.uid;
+                if let Kind::Watch(w) = &mut p.kind {
+                    if let Some(m) = &mut w.music {
+                        m.tab = t;
+                        let next = m.next.clone().unwrap_or_default();
+                        if t == 1 && m.lyrics.is_none() {
+                            match next.lyrics {
+                                Some(id) => {
+                                    std::thread::spawn(move || {
+                                        let _ = tx.send(Msg::Load(uid, Load::MusicLyrics(s(api.music_lyrics(&id)))));
+                                    });
+                                }
+                                None if m.next.is_some() => m.lyrics = Some(Err("Lyrics aren't available for this song".into())),
+                                None => {}
+                            }
+                        } else if t == 2 && m.related.is_none() {
+                            match next.related {
+                                Some(id) => {
+                                    std::thread::spawn(move || {
+                                        let _ = tx.send(Msg::Load(uid, Load::MusicRelated(s(api.music_browse(&crate::music::Browse::new(&id))))));
+                                    });
+                                }
+                                None if m.next.is_some() => m.related = Some(Err("Nothing related for this song".into())),
+                                None => {}
+                            }
+                        }
+                    }
+                }
+                self.page_mut().changed();
+            }
+            Act::MusicSearch => self.start_edit(false),
             Act::Video(v) => self.open_video(v, Vec::new(), 0),
             Act::QueueVideo(list, i) => {
                 let v = list[i].clone();
@@ -1668,6 +1943,28 @@ impl App {
         if q.is_empty() {
             return;
         }
+        let music_page = matches!(&self.page().kind, Kind::Music { .. }) || matches!(&self.page().kind, Kind::Watch(w) if w.music.is_some());
+        if let Some(r) = crate::music::route(&q) {
+            if new_tab {
+                self.open_tab(Kind::Home { chip: self.default_chip(), feed: Feed::default() });
+            }
+            let route = match r {
+                crate::music::Route::Watch(v, list) => {
+                    let song = crate::music::Song { video: VideoItem { id: v, music: true, ..Default::default() }, playlist: list, ..Default::default() };
+                    return self.open_song(&[song], 0);
+                }
+                crate::music::Route::Home => MRoute::Home,
+                crate::music::Route::Explore => MRoute::Explore,
+                crate::music::Route::Library => MRoute::Library(0),
+                crate::music::Route::Search(q) => MRoute::Search { q, filter: 0 },
+                crate::music::Route::Browse(b) => MRoute::Browse(b),
+            };
+            return self.navigate(Kind::Music { route, page: None });
+        }
+        if music_page && !api::looks_like_url(&q) {
+            let kind = Kind::Music { route: MRoute::Search { q, filter: 0 }, page: None };
+            return if new_tab { self.open_tab(kind) } else { self.navigate(kind) };
+        }
         if api::looks_like_url(&q) {
             let url = if q.starts_with('@') { format!("https://www.youtube.com/{q}") } else if q.starts_with("http") { q } else { format!("https://{q}") };
             let (api, tx) = (self.api.clone(), self.tx.clone());
@@ -1691,6 +1988,7 @@ impl App {
             Kind::Home { feed, .. } | Kind::Search { feed, .. } | Kind::Subs { feed } => *feed = Feed::default(),
             Kind::Channel { page, .. } => *page = None,
             Kind::Playlist { page, .. } => *page = None,
+            Kind::Music { page, .. } => *page = None,
             Kind::Watch(w) => {
                 w.info = None;
                 w.comments.clear();
@@ -1731,7 +2029,7 @@ impl App {
         let kind = match item {
             Side::Home => Kind::Home { chip: self.default_chip(), feed: Feed::default() },
             Side::Subs => Kind::Subs { feed: Feed::default() },
-            Side::Music => Kind::Channel { id: MUSIC_CHANNEL.into(), params: None, page: None },
+            Side::Music => Kind::Music { route: MRoute::Home, page: None },
             Side::History => Kind::History,
             Side::Later => Kind::Later,
             Side::Playlists => Kind::Playlists { list: None },
@@ -2318,7 +2616,8 @@ impl App {
                 };
                 if let Some(v) = kind {
                     self.open_tab(Kind::Home { chip: self.default_chip(), feed: Feed::default() });
-                    let w = Watch { video: v, info: None, desc_open: false, comments: Vec::new(), comments_cont: None, comment_count: None, comments_loading: false, queue: Vec::new(), qpos: 0, rating: None };
+                    let music = v.music.then(|| self.music_now(&v.id));
+                    let w = Watch { video: v, info: None, desc_open: false, comments: Vec::new(), comments_cont: None, comment_count: None, comments_loading: false, queue: Vec::new(), qpos: 0, rating: None, music };
                     self.navigate(Kind::Watch(Box::new(w)));
                 }
             }
@@ -2497,7 +2796,8 @@ impl App {
         buf.set_style(ar, field);
         match &self.edit {
             Some(e) => {
-                let shown = if e.text.is_empty() { "Search YouTube or paste a URL".to_string() } else { e.text.clone() };
+                let music = matches!(&self.page().kind, Kind::Music { .. }) || matches!(&self.page().kind, Kind::Watch(w) if w.music.is_some());
+                let shown = if !e.text.is_empty() { e.text.clone() } else if music { "Search YouTube Music or paste a URL".to_string() } else { "Search YouTube or paste a URL".to_string() };
                 let st = if e.text.is_empty() { field.fg(DIM) } else { field.fg(Color::White) };
                 let tail = page::trunc(&shown, aw.saturating_sub(4) as usize);
                 buf.set_string(x + 2, r.y, &tail, st);
@@ -2536,7 +2836,8 @@ impl App {
         let cur_kind = match &self.page().kind {
             Kind::Home { .. } => 0,
             Kind::Subs { .. } => 1,
-            Kind::Channel { id, .. } if id == MUSIC_CHANNEL => 2,
+            Kind::Music { .. } => 2,
+            Kind::Watch(w) if w.music.is_some() => 2,
             Kind::History => 3,
             Kind::Later => 4,
             Kind::Playlists { .. } | Kind::MyPlaylist { .. } => 5,

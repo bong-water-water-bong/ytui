@@ -5,6 +5,7 @@ mod browser_login;
 mod bench;
 mod chat;
 mod cookies;
+mod music;
 mod out;
 mod page;
 mod player;
@@ -120,6 +121,7 @@ fn main() -> Result<()> {
             "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),
             "--bench" => bench = Some(val("--bench")?),
+            "--music-dump" => return music::dump(&val("--music-dump")?),
             "--bench-render" => {
                 let src = val("--bench-render")?;
                 bench_render = Some(src);

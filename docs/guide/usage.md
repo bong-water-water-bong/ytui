@@ -23,6 +23,8 @@ See [command-line options](../options/) for everything else.
 - **Tabs** with back and forward history. The **address bar** shows live search suggestions and also takes URLs.
 - **Home** shows "For you", which is built from your watch history and subscriptions. It also has chips for Trending, Music, Gaming, News, Live,
   Sports, Learning, Podcasts and Movies. When you're signed out and haven't watched anything yet, it opens on Trending.
+- **Music** in the sidebar opens [YouTube Music](../youtube-music/): its Home, Explore, charts,
+  search, artists, albums, playlists, your library, and a music player with a queue and lyrics.
 - **Search** has filters for videos, shorts, channels, playlists, live and newest, and keeps loading more as you scroll.
 - **Channel pages** show the banner and avatar, with Home, Videos, Shorts, Live and Playlists tabs.
 - **Subscriptions, history and watch later** are stored on your computer. History remembers where you stopped in each video.
