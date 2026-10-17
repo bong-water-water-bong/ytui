@@ -41,7 +41,7 @@ it are three tabs:
 - **Related:** songs and playlists like this one.
 
 When a song ends, the next one in the queue starts. The playback keys are the same as for videos
-(`space` pauses, `←` `→` seek, `+` `-` volume, `f` fullscreen).
+(`space` pauses, `,` `.` seek 10 s, `+` `-` volume, `f` fullscreen).
 
 ![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next]({{ '/screenshots/music-player.jpg' | relative_url }})
 

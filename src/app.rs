@@ -220,6 +220,9 @@ pub struct App {
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
+    /// The YouTube Music queue playing (an album, playlist or radio), so
+    /// the music player keeps it as songs advance or it's reopened.
+    music_list: Vec<crate::music::Song>,
     queue: Vec<VideoItem>,
     qpos: usize,
     fullscreen: bool,
@@ -299,6 +302,7 @@ impl App {
             frame_out: Vec::new(),
             chat_src: None,
             up_next: (String::new(), Vec::new()),
+            music_list: Vec::new(),
             queue: Vec::new(),
             qpos: 0,
             fullscreen: false,
@@ -574,6 +578,7 @@ impl App {
         let player_id = self.player.as_ref().map(|p| p.video.id.clone()).or(self.pending.as_ref().map(|p| p.0.id.clone()));
         let mut err_flash = None;
         let mut music_queue: Option<(String, Vec<VideoItem>, usize)> = None;
+        let mut music_songs: Option<Vec<crate::music::Song>> = None;
         let Some(p) = self.find(uid) else { return };
         p.loading = false;
         p.changed();
@@ -635,6 +640,9 @@ impl App {
                                 n.queue = m.list.clone();
                             }
                             let at = n.queue.iter().position(|q| q.video.id == w.video.id);
+                            if at.is_some() {
+                                music_songs = Some(n.queue.clone());
+                            }
                             if m.album.is_none() {
                                 m.album = at.and_then(|i| n.queue[i].album.clone());
                             }
@@ -727,6 +735,9 @@ impl App {
             if self.player.as_ref().map(|p| &p.video.id).or(self.pending.as_ref().map(|p| &p.0.id)) == Some(&id) {
                 self.queue = q;
                 self.qpos = i;
+                if let Some(songs) = music_songs {
+                    self.music_list = songs;
+                }
             }
         }
         if let (Some(id), Some(auth)) = (want_rating, self.auth.clone()) {
@@ -1030,7 +1041,7 @@ impl App {
             queue: queue.clone(),
             qpos,
             rating: None,
-            music: v.music.then(MusicNow::default),
+            music: v.music.then(|| self.music_now(&v.id)),
         };
         self.navigate(Kind::Watch(Box::new(w)));
         self.play(v, queue, qpos, None);
@@ -1260,7 +1271,10 @@ impl App {
             let v = p.video.clone();
             self.store.record(&v, d, d);
             self.store_changed();
-            if self.store.autoplay {
+            // YouTube Music always plays on through its queue; autoplay
+            // decides for videos.
+            let in_queue = v.music && self.music_list.len() > 1 && self.music_list.iter().any(|x| x.video.id == v.id);
+            if self.store.autoplay || in_queue {
                 self.advance();
             }
             self.dirty = true;
@@ -1290,6 +1304,15 @@ impl App {
         match &self.page().kind {
             Kind::Watch(w) => Some((w.video.clone(), w.queue.clone(), w.qpos)),
             _ => None,
+        }
+    }
+
+    /// Music player state for a song: within the queue playing, it keeps
+    /// that queue (and the song's playlist and album).
+    fn music_now(&self, id: &str) -> MusicNow {
+        match self.music_list.iter().find(|s| s.video.id == id) {
+            Some(s) if self.music_list.len() > 1 => MusicNow { playlist: s.playlist.clone(), album: s.album.clone(), list: self.music_list.clone(), ..Default::default() },
+            _ => MusicNow::default(),
         }
     }
 
@@ -2593,7 +2616,7 @@ impl App {
                 };
                 if let Some(v) = kind {
                     self.open_tab(Kind::Home { chip: self.default_chip(), feed: Feed::default() });
-                    let music = v.music.then(MusicNow::default);
+                    let music = v.music.then(|| self.music_now(&v.id));
                     let w = Watch { video: v, info: None, desc_open: false, comments: Vec::new(), comments_cont: None, comment_count: None, comments_loading: false, queue: Vec::new(), qpos: 0, rating: None, music };
                     self.navigate(Kind::Watch(Box::new(w)));
                 }
