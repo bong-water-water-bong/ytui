@@ -1,6 +1,10 @@
-# ytui
+# ytui: YouTube in the terminal
 
-YouTube in the terminal: search, browse, and watch videos rendered as truecolour ASCII / Unicode mosaics.
+**ytui** is a terminal YouTube client (TUI) for Windows, Linux and macOS. Search YouTube, browse
+Home and Trending, and watch videos right in your terminal. Video plays as colour ASCII art, as
+Unicode mosaics, or as real pixels with sixel and kitty graphics. On Windows Terminal it can also
+play through a native GPU window. You don't need a browser or a YouTube API key. It's one small
+Rust binary, with yt-dlp and libmpv doing the heavy lifting.
 
 **[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS.
 
@@ -20,6 +24,36 @@ YouTube in the terminal: search, browse, and watch videos rendered as truecolour
 *The look panel (`o`): mode, brightness, saturation, background, contrast and auto-exposure, kept between runs.*
 
 <sub>Video screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
+
+## Features
+
+- **Watch YouTube in the terminal:** play videos as ASCII art, as Unicode mosaics (sextant, quadrant, half-block or braille), or in glow mode.
+- **Real pixels:** sixel and the kitty graphics protocol (Windows Terminal, kitty, Ghostty, WezTerm, foot), also inside tmux.
+- **Native video window on Windows Terminal:** GPU-decoded video up to 1080p60, kept over the player area.
+- **60 fps playback through libmpv:** hardware decoding, instant seek and pause, and A/V sync. Without libmpv it falls back to ffmpeg.
+- **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more. Also search, channels, playlists, comments and live chat.
+- **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
+- **Captions, volume slider, autoplay, tabs and watch later.** Mouse and keyboard both work.
+- **Runs over SSH:** a character render mode works in any truecolour terminal.
+
+## Install
+
+Download the package for your platform from the
+**[latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)**:
+
+| Platform | Package |
+|---|---|
+| Windows 10/11 (x64) | `ytui-<version>-windows-x86_64.zip` (includes libmpv); run `ytui.exe` in Windows Terminal |
+| Linux (x86_64) | `ytui-<version>-linux-x86_64.tar.gz` |
+| macOS (Apple Silicon) | `ytui-<version>-macos-arm64.tar.gz` |
+
+Then install the tools ytui uses:
+
+- **Windows:** `winget install yt-dlp.yt-dlp Gyan.FFmpeg DenoLand.Deno`
+- **macOS:** `brew install yt-dlp ffmpeg deno mpv`
+- **Linux:** install `yt-dlp`, `ffmpeg`, Node.js 22+ or Deno, and `libmpv` (package `libmpv2` or `mpv-libs`) with your package manager.
+
+Or build from source with `cargo build --release` (see [Build](#build)).
 
 ## Requirements
 
@@ -196,6 +230,7 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 
 | Mode | Description |
 |---|---|
+| `glow` | Shape-matched ASCII in boosted colour over a dimmed copy of the picture; tune it in the look panel (`o`) |
 | `art` | Clean ASCII art (default): stroke characters (`_ - | / \`) along edges, a short density ramp for tone, symbols where there is fine detail, coloured ink on black; characters hold steady between video frames instead of flickering |
 | `ascii` | Two-tone shape-matched ASCII: flat areas are clean colour, glyphs only where there is edge detail |
 | `classic` | Shape-matched ASCII, colour ink on a dark ground |

@@ -4,7 +4,11 @@ version = "2026.10.16"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/bong-water-water-bong/ytui"
-description = "YouTube in the terminal: search, browse, and watch videos rendered as colour ASCII / Unicode mosaics"
+description = "YouTube in the terminal: a TUI YouTube client that plays video as ASCII art, Unicode mosaics, sixel or kitty graphics"
+keywords = ["youtube", "tui", "terminal", "ascii", "sixel"]
+categories = ["command-line-utilities", "multimedia::video"]
+homepage = "https://github.com/bong-water-water-bong/ytui"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
