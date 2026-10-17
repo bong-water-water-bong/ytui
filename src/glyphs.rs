@@ -1,15 +1,15 @@
-//! Shape vectors for the glow mode's characters.
+//! The glow mode's characters and their shape vectors.
 //!
-//! Ported from react-video-ascii by Lucas Jin (MIT, see NOTICE):
-//! `computeShapeVectors` in src/lib/ascii-utils.ts. Each character is
-//! rasterised from a real monospace font and described by how much ink falls
-//! inside six circles in a 2x3 grid (centres at 1/4 and 3/4 of the width,
-//! 1/4, 1/2 and 3/4 of the height, radius a fifth of the width). Each
-//! dimension is then normalised by its maximum over the whole set. Picture
-//! cells are sampled with the same circles, so the nearest vector matches
-//! shape (edges, slants, top or bottom weight), not just brightness.
-
-use fontdue::{Font, FontSettings};
+//! From react-video-ascii by Lucas Jin (MIT, see NOTICE). Its
+//! `computeShapeVectors` (src/lib/ascii-utils.ts) draws each character of
+//! its default set in a 10x17-pixel cell (`${charH}px monospace`, baseline
+//! `top`), measures the ink inside six circles in a 2x3 grid (centres at 1/4
+//! and 3/4 of the width and 1/4, 1/2 and 3/4 of the height, radius a fifth of
+//! the width) and normalises each dimension over the set. The table below is
+//! that function's output at the demo's default size
+//! (https://video-ascii-demo.vercel.app/, 155 columns), computed by the page
+//! itself in Firefox with DejaVu Sans Mono, so ytui picks exactly the
+//! characters the demo does, on every system and without a font file.
 
 /// Decoded pixels per terminal cell. 6x12 keeps the 1:2 cell aspect and
 /// splits evenly into braille's 2x4 dots (3x3 pixels each).
@@ -23,133 +23,93 @@ pub const CIRCLES: [(f32, f32); 6] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.50), 
 /// Circle radius in cell widths.
 pub const RADIUS: f32 = 0.2;
 
-/// The reference's default character set, darkest to brightest.
-pub const CHARS: &str = " `.',-_:!;|\"~+^lr[](\\/L)>t<v=Tz?icf1{sIxY*jJno}CZyVwmSXRqM$O%#9&NW0Q@";
-
-const FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-    "C:\\Windows\\Fonts\\CascadiaMono.ttf",
-    "C:\\Windows\\Fonts\\consola.ttf",
+/// Shape vector and character, darkest to brightest.
+pub const SHAPES: [([f32; 6], char); 69] = [
+    ([0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000], ' '),
+    ([0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000], '`'),
+    ([0.000000, 0.000000, 0.000000, 0.000000, 0.169611, 0.023557], '.'),
+    ([0.120134, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000], '\''),
+    ([0.000000, 0.000000, 0.013212, 0.004267, 0.669965, 0.001178], ','),
+    ([0.000000, 0.000000, 0.327107, 0.207681, 0.000000, 0.000000], '-'),
+    ([0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000], '_'),
+    ([0.200921, 0.036647, 0.000000, 0.000000, 0.169611, 0.023557], ':'),
+    ([0.230640, 0.000000, 0.054670, 0.000000, 0.130035, 0.000000], '!'),
+    ([0.264964, 0.048099, 0.013212, 0.004267, 0.669965, 0.001178], ';'),
+    ([0.190875, 0.000000, 0.138497, 0.000000, 0.322261, 0.000000], '|'),
+    ([0.283382, 0.306917, 0.000000, 0.000000, 0.000000, 0.000000], '"'),
+    ([0.222269, 0.084746, 0.094761, 0.292082, 0.000000, 0.000000], '~'),
+    ([0.215990, 0.032982, 0.497950, 0.381223, 0.000000, 0.000000], '+'),
+    ([0.325659, 0.371049, 0.000000, 0.000000, 0.000000, 0.000000], '^'),
+    ([0.413981, 0.000000, 0.314806, 0.000000, 0.020495, 0.467020], 'l'),
+    ([0.672248, 0.564819, 0.592255, 0.000000, 0.459364, 0.000000], 'r'),
+    ([0.387191, 0.000000, 0.305239, 0.000000, 0.653710, 0.210247], '['),
+    ([0.045207, 0.137426, 0.032802, 0.094832, 0.444523, 0.176678], ']'),
+    ([0.420260, 0.000000, 0.347153, 0.000000, 0.044523, 0.293875], '('),
+    ([0.532022, 0.000000, 0.039636, 0.135135, 0.000000, 0.683746], '\\'),
+    ([0.012558, 0.325240, 0.516173, 0.000000, 1.000000, 0.000000], '/'),
+    ([0.698200, 0.000000, 0.734396, 0.000000, 0.891166, 0.664900], 'L'),
+    ([0.059021, 0.138342, 0.022323, 0.121385, 0.665724, 0.000000], ')'),
+    ([0.644621, 0.289052, 0.517540, 0.572783, 0.012014, 0.000000], '>'),
+    ([0.837589, 0.374714, 0.429157, 0.000000, 0.093286, 0.446996], 't'),
+    ([0.360820, 0.632616, 0.601367, 0.453770, 0.000000, 0.056537], '<'),
+    ([0.661365, 0.699496, 0.615034, 0.446657, 0.249470, 0.038869], 'v'),
+    ([0.557555, 0.543747, 0.697950, 0.635846, 0.000000, 0.000000], '='),
+    ([0.231059, 0.000000, 0.167654, 0.000000, 0.130035, 0.000000], 'T'),
+    ([0.425283, 0.762254, 0.502506, 0.000000, 0.901767, 0.474087], 'z'),
+    ([0.000419, 0.571690, 0.161276, 0.000000, 0.172438, 0.000000], '?'),
+    ([0.478024, 0.010994, 0.116629, 0.007587, 0.724382, 0.535336], 'i'),
+    ([0.681038, 0.467247, 0.739408, 0.010431, 0.401413, 0.522968], 'c'),
+    ([0.620762, 0.413651, 0.211390, 0.000000, 0.163958, 0.000000], 'f'),
+    ([0.050230, 0.181402, 0.036446, 0.125178, 0.653004, 0.608363], '1'),
+    ([0.240268, 0.000000, 0.515718, 0.000000, 0.205654, 0.426384], '{'),
+    ([0.756802, 0.346770, 0.254214, 0.645804, 0.722968, 0.307420], 's'),
+    ([0.236082, 0.000000, 0.171298, 0.000000, 0.775265, 0.495289], 'I'),
+    ([0.600251, 0.577187, 0.526651, 0.298246, 0.556184, 0.495289], 'x'),
+    ([0.542068, 0.468621, 0.171298, 0.000000, 0.132862, 0.000000], 'Y'),
+    ([0.565509, 0.430142, 0.006378, 0.000000, 0.000000, 0.000000], '*'),
+    ([0.357890, 0.181402, 0.003645, 0.125178, 0.042403, 0.206125], 'j'),
+    ([0.000000, 0.698122, 0.000000, 0.608819, 0.790813, 0.121319], 'J'),
+    ([0.866053, 0.738891, 0.618223, 0.743480, 0.479152, 0.461720], 'n'),
+    ([0.731268, 0.754466, 0.622779, 0.788525, 0.651590, 0.335689], 'o'),
+    ([0.222687, 0.010536, 0.115718, 0.284495, 0.910247, 0.000000], '}'),
+    ([0.658434, 0.000000, 0.725740, 0.021337, 0.414134, 0.571260], 'C'),
+    ([0.003349, 0.488319, 0.594077, 0.000000, 0.954770, 0.702591], 'Z'),
+    ([0.680201, 0.715987, 0.586788, 0.455192, 0.479152, 0.031802], 'y'),
+    ([0.683131, 0.677966, 0.584510, 0.384542, 0.246643, 0.041814], 'V'),
+    ([0.289242, 0.622996, 0.825057, 0.790896, 0.666431, 0.465842], 'w'),
+    ([0.943072, 0.807146, 0.498405, 0.572783, 0.386572, 0.355713], 'm'),
+    ([0.767267, 0.085662, 0.004100, 0.805121, 0.759011, 0.387515], 'S'),
+    ([0.468397, 0.365552, 0.631891, 0.577051, 0.374558, 0.497055], 'X'),
+    ([0.784847, 0.714155, 0.638724, 0.639640, 0.463604, 0.442874], 'R'),
+    ([0.735036, 0.965186, 0.609112, 0.800379, 0.669965, 1.000000], 'q'),
+    ([0.827543, 1.000000, 0.381777, 0.627786, 0.276325, 0.389870], 'M'),
+    ([0.754290, 0.147962, 0.097039, 0.709341, 0.715901, 0.483510], '$'),
+    ([0.632482, 0.779661, 0.647836, 0.797060, 0.638869, 0.315077], 'O'),
+    ([0.717874, 0.310124, 0.252847, 0.612613, 0.000000, 0.521201], '%'),
+    ([0.932189, 0.949153, 1.000000, 0.616880, 0.451590, 0.014723], '#'),
+    ([0.711595, 0.866697, 0.224146, 0.738739, 0.723675, 0.185512], '9'),
+    ([0.691921, 0.026111, 0.327107, 0.918445, 0.728622, 0.651355], '&'),
+    ([1.000000, 0.743930, 0.553986, 1.000000, 0.429682, 0.648999], 'N'),
+    ([0.788614, 0.760880, 0.946241, 0.962541, 0.633216, 0.506478], 'W'),
+    ([0.697363, 0.771874, 0.656036, 0.775723, 0.603534, 0.277974], '0'),
+    ([0.632482, 0.779661, 0.647380, 0.790896, 0.638163, 0.835689], 'Q'),
+    ([0.436166, 0.858910, 0.475171, 0.519678, 0.907420, 0.328622], '@'),
 ];
 
-pub struct Glyphs {
-    pub chars: Vec<char>,
-    pub vecs: Vec<[f32; 6]>,
-}
-
-/// Pixel offsets (relative to a cell origin) whose centres lie inside the
-/// circle at (u, v) for a cell of `w` x `h` pixels. Never empty: a circle
-/// smaller than a pixel keeps the pixel under its centre.
-pub fn circle_offsets(u: f32, v: f32, w: usize, h: usize) -> Vec<(i32, i32)> {
-    let (cx, cy, r) = (u * w as f32, v * h as f32, RADIUS * w as f32);
-    let mut pts = Vec::new();
-    let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
-    let (y0, y1) = ((cy - r).floor() as i32, (cy + r).ceil() as i32);
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            if dx * dx + dy * dy <= r * r {
-                pts.push((x, y));
-            }
+/// Index of the character whose shape vector is nearest to `s`.
+pub fn nearest(s: &[f32; 6]) -> usize {
+    let mut best = (f32::MAX, 0);
+    for (i, (v, _)) in SHAPES.iter().enumerate() {
+        let mut d = 0.0;
+        for k in 0..6 {
+            let t = s[k] - v[k];
+            d += t * t;
+        }
+        if d < best.0 {
+            best = (d, i);
         }
     }
-    if pts.is_empty() {
-        pts.push((cx as i32, cy as i32));
-    }
-    pts
-}
-
-impl Glyphs {
-    pub fn load() -> Glyphs {
-        let env = std::env::var("YTUI_FONT").ok();
-        for p in env.iter().map(|s| s.as_str()).chain(FONT_PATHS.iter().copied()) {
-            if let Ok(bytes) = std::fs::read(p) {
-                if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                    return Self::from_font(&font);
-                }
-            }
-        }
-        Self::ramp()
-    }
-
-    /// Brightness-ramp fallback when no font file is available.
-    fn ramp() -> Glyphs {
-        let chars: Vec<char> = " .:-=+*#%@".chars().collect();
-        let n = chars.len() as f32 - 1.0;
-        let vecs = (0..chars.len()).map(|i| [i as f32 / n; 6]).collect();
-        Glyphs { chars, vecs }
-    }
-
-    fn from_font(font: &Font) -> Glyphs {
-        // Rasterise well above cell size so the small circles see real ink.
-        const S: usize = 8;
-        let (w, h) = (CW * S, CH * S);
-        let adv = font.metrics('M', 100.0).advance_width / 100.0;
-        let px = w as f32 / adv;
-        let (ascent, descent) = font.horizontal_line_metrics(px).map(|m| (m.ascent, m.descent)).unwrap_or((px * 0.8, -px * 0.2));
-        let baseline = ((h as f32 - (ascent - descent)) / 2.0 + ascent).round() as i32;
-        let circles: Vec<Vec<(i32, i32)>> = CIRCLES.iter().map(|&(u, v)| circle_offsets(u, v, w, h)).collect();
-
-        let mut chars = Vec::new();
-        let mut vecs = Vec::new();
-        let mut cov = vec![0f32; w * h];
-        for c in CHARS.chars() {
-            cov.iter_mut().for_each(|x| *x = 0.0);
-            let (m, bmp) = font.rasterize(c, px);
-            let x0 = m.xmin;
-            let y0 = baseline - (m.height as i32 + m.ymin);
-            for gy in 0..m.height {
-                for gx in 0..m.width {
-                    let (x, y) = (x0 + gx as i32, y0 + gy as i32);
-                    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                        cov[y as usize * w + x as usize] = bmp[gy * m.width + gx] as f32 / 255.0;
-                    }
-                }
-            }
-            let mut v = [0f32; 6];
-            for (i, pts) in circles.iter().enumerate() {
-                let mut s = 0.0;
-                for &(x, y) in pts {
-                    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                        s += cov[y as usize * w + x as usize];
-                    }
-                }
-                v[i] = s / pts.len() as f32;
-            }
-            chars.push(c);
-            vecs.push(v);
-        }
-        // Normalise each dimension by its maximum over the set.
-        for d in 0..6 {
-            let mx = vecs.iter().map(|v| v[d]).fold(0f32, f32::max);
-            if mx > 0.0 {
-                vecs.iter_mut().for_each(|v| v[d] /= mx);
-            }
-        }
-        Glyphs { chars, vecs }
-    }
-
-    /// Index of the character whose shape vector is nearest to `s`.
-    pub fn nearest(&self, s: &[f32; 6]) -> usize {
-        let mut best = (f32::MAX, 0);
-        for (i, v) in self.vecs.iter().enumerate() {
-            let mut d = 0.0;
-            for k in 0..6 {
-                let t = s[k] - v[k];
-                d += t * t;
-            }
-            if d < best.0 {
-                best = (d, i);
-            }
-        }
-        best.1
-    }
+    best.1
 }
 
 #[cfg(test)]
@@ -157,15 +117,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn space_is_empty_and_full_glyphs_are_dense() {
-        let g = Glyphs::load();
-        assert_eq!(g.chars[0], ' ');
-        assert_eq!(g.nearest(&[0.0; 6]), 0, "no ink matches the space");
-        // Whatever the font: the match for all ink is among the densest
-        // quarter of the set.
-        let ink = |i: usize| g.vecs[i].iter().sum::<f32>();
-        let full = g.nearest(&[1.0; 6]);
-        let denser = (0..g.chars.len()).filter(|&i| ink(i) > ink(full)).count();
-        assert!(denser < g.chars.len() / 4, "all ink matched {:?}, {denser} glyphs are denser", g.chars[full]);
+    fn the_table_is_the_reference_set_in_order() {
+        let set: String = SHAPES.iter().map(|s| s.1).collect();
+        assert_eq!(set, " `.',-_:!;|\"~+^lr[](\\/L)>t<v=Tz?icf1{sIxY*jJno}CZyVwmSXRqM$O%#9&NW0Q@");
+        // Normalised per dimension: every dimension peaks at 1.
+        for d in 0..6 {
+            let mx = SHAPES.iter().map(|s| s.0[d]).fold(0f32, f32::max);
+            assert!((mx - 1.0).abs() < 1e-5, "dimension {d} peaks at {mx}");
+        }
+    }
+
+    #[test]
+    fn no_ink_is_a_space() {
+        assert_eq!(SHAPES[nearest(&[0.0; 6])].1, ' ');
     }
 }

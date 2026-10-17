@@ -26,7 +26,7 @@ use render::{Img, Mode, Renderer};
 
 const HELP: &str = "\
 ytui - YouTube in the terminal: a full browser-style client with videos
-rendered as 24-bit colour braille or glow ASCII
+rendered as 24-bit colour glow ASCII or braille
 
 USAGE:
   ytui                          open Home
@@ -46,7 +46,7 @@ USAGE:
   ytui --uninstall [--yes]      sign out and remove ytui, its settings and data
 
 OPTIONS:
-  --mode M       braille | glow (default braille)
+  --mode M       glow | braille (default glow)
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --fullscreen   start the player fullscreen
@@ -60,7 +60,7 @@ OPTIONS:
                  and Edge usually can't be read while running)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
-ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
+ENV: YTUI_YTDLP (yt-dlp path)
 
 Glow and braille follow react-video-ascii by Lucas Jin (MIT); see NOTICE.
 ";
@@ -199,7 +199,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Braille));
+    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Glow));
 
     if let Some(src) = bench_render {
         return bench::render(&src, if at > 0.0 { at } else { 60.0 }, scols.unwrap_or(184), srows.unwrap_or(39), max_h.unwrap_or(480));

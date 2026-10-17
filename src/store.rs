@@ -66,13 +66,13 @@ fn one() -> f32 {
     1.0
 }
 
-// The look defaults are react-video-ascii's.
+// The look defaults are the react-video-ascii demo's.
 fn look_bright() -> f32 {
-    1.0
+    1.25
 }
 
 fn look_sat() -> f32 {
-    1.0
+    1.25
 }
 
 fn look_bg() -> f32 {

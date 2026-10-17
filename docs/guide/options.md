@@ -26,7 +26,7 @@ description: All ytui command-line options and environment variables, for render
 
 | Option | What it does |
 |---|---|
-| `--mode M` | Render mode: `braille` (the default) or `glow` |
+| `--mode M` | Render mode: `glow` (the default) or `braille` |
 | `--audio A` | Audio output: `auto`, `pulse`, `alsa`, `ffplay` or `none`. `auto` uses PulseAudio when it's there and `ffplay` on Windows. Off by default over SSH. |
 | `--fullscreen` | Start the player fullscreen |
 | `--fps N` | Maximum frame rate (default 60) |
@@ -40,6 +40,5 @@ description: All ytui command-line options and environment variables, for render
 | Variable | What it does |
 |---|---|
 | `YTUI_YTDLP` | Path to yt-dlp |
-| `YTUI_FONT` | A monospace `.ttf` whose character shapes glow mode matches against |
 | `YTUI_BROWSER` | The browser to sign in with (a path, or a name like `firefox`) |
 | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` | Where ytui keeps its data and settings |

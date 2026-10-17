@@ -14,8 +14,10 @@ vectors (src/glyphs.rs) are translated from react-video-ascii's two WebGL
 passes (src/shaders/fragment_pass1.glsl, src/shaders/fragment.glsl) and
 src/lib/ascii-utils.ts: the six-circle shape sampling, the shape exponent,
 the default character set, the HSL brightness and saturation grade and the
-background-opacity blend, with the same defaults. The braille mode is ytui's
-own extension of that look.
+background-opacity blend, with the demo's settings. The shape table in
+src/glyphs.rs is the output of its computeShapeVectors, as run by the demo
+page (https://video-ascii-demo.vercel.app/) at its default size. The braille
+mode is ytui's own extension of that look.
 
 react-video-ascii is released under the MIT License, as declared in its
 package.json ("license": "MIT"):
