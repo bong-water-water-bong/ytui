@@ -921,7 +921,7 @@ fn lockup(x: &Value) -> Option<Item> {
                 short: false,
             }))
         }
-        "LOCKUP_CONTENT_TYPE_PLAYLIST" | "LOCKUP_CONTENT_TYPE_ALBUM" | "LOCKUP_CONTENT_TYPE_PODCAST" => {
+        "LOCKUP_CONTENT_TYPE_PLAYLIST" | "LOCKUP_CONTENT_TYPE_ALBUM" | "LOCKUP_CONTENT_TYPE_PODCAST" | "LOCKUP_CONTENT_TYPE_STATION" => {
             let first = find(&x["rendererContext"], "watchEndpoint").and_then(|w| w["videoId"].as_str()).map(String::from);
             Some(Item::Playlist(PlaylistItem {
                 id,

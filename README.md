@@ -25,7 +25,7 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 
 - **Watch YouTube in the terminal:** two render modes, braille and glow, both in 24-bit colour.
 - **60 fps playback through ffmpeg:** streams up to 720p, the lowest height YouTube serves at 60 fps.
-- **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more. Also search, channels, playlists, comments and live chat.
+- **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more, and a Music link in the sidebar for YouTube's Music channel. Also search, channels, playlists, comments and live chat.
 - **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
 - **Captions, volume slider, autoplay, tabs and watch later.** Mouse and keyboard both work.
 - **Runs over SSH:** it works in any truecolour terminal.

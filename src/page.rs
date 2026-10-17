@@ -1172,6 +1172,7 @@ Render modes (24-bit colour, after react-video-ascii by Lucas Jin)
 Pages
   Home         For you (from your history and subscriptions) and topic chips
   Subscriptions  latest uploads from channels you subscribed to (kept locally)
+  Music        YouTube's Music channel: new and trending songs, top hits
   History      everything you watched, with resume positions
   Watch later  your saved videos
 ";
