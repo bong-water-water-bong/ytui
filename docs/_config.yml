@@ -4,6 +4,7 @@ url: https://bong-water-water-bong.github.io
 baseurl: /ytui
 lang: en
 logo: /social-preview.jpg
+permalink: pretty
 markdown: kramdown
 kramdown:
   input: GFM
