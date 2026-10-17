@@ -283,6 +283,11 @@ pub fn read_ansi(data: &[u8], opts: ReadOpts) -> Art {
                 x = (x / 8 + 1) * 8;
                 i += 1;
             }
+            // SUB, the DOS end-of-file marker. Text files were padded with it
+            // and everything after it is not content: this is what stops the
+            // SAUCE record and any trailing filler from being drawn as art.
+            // AnsiLove does the same (STATE_END on 0x1A).
+            0x1A => break,
             0x00 => {
                 i += 1;
             }
@@ -1161,3 +1166,51 @@ mod csi_coverage {
         assert!(!found.contains('7') && !found.contains('8'), "save/restore printed as text: {found:?}");
     }
 }
+
+#[cfg(test)]
+mod sauce_leak {
+    use super::*;
+
+    /// The record's *own* bytes must not be parsed as art.
+    ///
+    /// Note the distinction: this fixture deliberately spells "SAUCE00" and
+    /// its font name *inside* the artwork, in black on black, as a signature
+    /// card — AnsiLove draws those too, which is why the pixel comparison
+    /// passes while a text search finds them. What must never happen is the
+    /// trailing 128-byte record itself being read as content.
+    #[test]
+    fn the_record_bytes_are_not_art() {
+        let mut data = std::fs::read("tests/fixtures/bs-alove.ans").unwrap();
+        // Mark the real record with a byte that is unambiguously not art.
+        let at = data.len() - SAUCE_LEN;
+        assert_eq!(&data[at..at + 7], SAUCE_MAGIC, "fixture layout changed");
+        data[at + 8] = b'Z';
+        data[at + 9] = b'Z';
+        let art = read_ansi(&data, ReadOpts::default());
+        for y in 0..art.rows {
+            let mut line = String::new();
+            for x in 0..art.cols {
+                line.push(ch(art.get(x, y).ch));
+            }
+            assert!(!line.contains("ZZ"), "the record was parsed as art, row {y}: {line:?}");
+        }
+    }
+}
+#[cfg(test)]
+mod dim_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn dims() {
+        let d = std::fs::read("tests/fixtures/bs-alove.ans").unwrap();
+        let a = read_ansi(&d, ReadOpts::default());
+        eprintln!("cols {} rows {} cells {}", a.cols, a.rows, a.cells.len());
+        // Where does "SAUCE00" land?
+        for y in 0..a.rows {
+            let mut line = String::new();
+            for x in 0..a.cols.min(20) { line.push(ch(a.get(x,y).ch)); }
+            if line.starts_with("SAUCE") { eprintln!("row {y}: {line}"); }
+        }
+    }
+}
+

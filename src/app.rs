@@ -486,6 +486,20 @@ impl App {
         Page::new(self.next_uid, kind)
     }
 
+    /// Open an ANSI art file as the current tab's page.
+    ///
+    /// Art is not fetched from anywhere and has nothing to load, so unlike the
+    /// YouTube pages this is synchronous: parse, convert to cells, show it.
+    pub fn open_art(&mut self, path: &str) -> Result<(), String> {
+        let art = page::ArtPage::load(path)?;
+        let page = self.mk(Kind::Art(Box::new(art)));
+        let t = &mut self.tabs[self.cur];
+        t.pages.push(page);
+        t.idx = t.pages.len() - 1;
+        self.dirty = true;
+        Ok(())
+    }
+
     fn tab(&self) -> &Tab {
         &self.tabs[self.cur]
     }
@@ -3236,6 +3250,18 @@ impl App {
                 let on = (i as usize) >= ty && (i as usize) < ty + th;
                 buf[(r.x + w - 1, r.y + i)].set_char(if on { '┃' } else { '│' }).set_fg(if on { Color::Rgb(140, 140, 150) } else { Color::Rgb(40, 40, 48) });
             }
+        }
+        // ANSI art is a cell grid, so it is drawn straight into the buffer
+        // instead of going through the span-based doc layout. Scrolled by the
+        // same `page.scroll` the doc reports.
+        if std::env::var_os("YTUI_ART_DEBUG").is_some() {
+            eprintln!("draw_page: kind={:?} rect=({},{},{}x{})", std::mem::discriminant(&page.kind), r.x, r.y, r.width, r.height);
+        }
+        if let Kind::Art(a) = &page.kind {
+            // `blit` takes `sy` relative to the clip's top, not a screen row.
+            // One row is left for the path line the doc draws.
+            let top = 1 - scroll as i64;
+            blit(buf, r, r.x, top, &a.cells, a.cols, a.rows);
         }
         player_visible
     }

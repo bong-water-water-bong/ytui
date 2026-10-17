@@ -73,6 +73,47 @@ pub enum Kind {
     Playlists { list: Option<Vec<MyPlaylist>> },
     /// One of your playlists, managed through the Data API.
     MyPlaylist { id: String, info: Option<MyPlaylist>, items: Vec<PlItem> },
+    /// An ANSI art file opened from disk. Text-mode art is a grid of cells,
+    /// not text, so it is drawn straight into the buffer rather than laid out
+    /// as spans.
+    Art(Box<ArtPage>),
+}
+
+/// Load an ANSI art file into a drawable page.
+impl ArtPage {
+    /// Reach the file, parse it, and convert to the same `Cell` grid the
+    /// video path uses, so one blitter draws both.
+    pub fn load(path: &str) -> Result<ArtPage, String> {
+        let data = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let art = crate::textmode::read_ansi(&data, crate::textmode::ReadOpts::default());
+        if art.cols == 0 || art.rows == 0 {
+            return Err(format!("{path} has no art in it"));
+        }
+        // The file's own iCE answer, else on.
+        let ice = art
+            .sauce
+            .as_ref()
+            .filter(|s| s.datatype == 1)
+            .map(|s| if s.ice() { crate::textmode::Ice::On } else { crate::textmode::Ice::Off })
+            .unwrap_or(crate::textmode::Ice::On);
+        let cells = crate::textmode::to_cells(&art, ice, crate::textmode::Rgb::Xterm);
+        let (title, author) = match &art.sauce {
+            Some(s) => (s.title.clone(), s.author.clone()),
+            None => (String::new(), String::new()),
+        };
+        Ok(ArtPage { path: path.to_string(), title, author, cols: art.cols, rows: art.rows, cells })
+    }
+}
+
+/// A parsed `.ANS` file, ready to draw.
+pub struct ArtPage {
+    pub path: String,
+    /// SAUCE title, if the file carried one.
+    pub title: String,
+    pub author: String,
+    pub cols: usize,
+    pub rows: usize,
+    pub cells: Vec<crate::render::Cell>,
 }
 
 /// Per-draw context that isn't part of the page itself.
@@ -126,6 +167,16 @@ impl Page {
             Kind::Account => "Account".into(),
             Kind::Playlists { .. } => "Playlists".into(),
             Kind::MyPlaylist { info, .. } => info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| "Playlist".into()),
+            Kind::Art(a) => {
+                if a.title.is_empty() {
+                    std::path::Path::new(&a.path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "ANSI art".into())
+                } else {
+                    a.title.clone()
+                }
+            }
         }
     }
 
@@ -143,6 +194,7 @@ impl Page {
             Kind::Account => "ytui://account".into(),
             Kind::Playlists { .. } => "ytui://playlists".into(),
             Kind::MyPlaylist { id, .. } => format!("youtube.com/playlist?list={id}"),
+            Kind::Art(a) => format!("file://{}", a.path),
         }
     }
 
@@ -908,6 +960,17 @@ pub fn layout(page: &Page, store: &Store, w: u16, vh: u16, ctx: &Ctx) -> Doc {
                 }
             }
         }
+        Kind::Art(a) => {
+            // The art itself is blitted by the app (it is a cell grid, not
+            // text). The doc just reserves the space so scrolling and the
+            // footer behave.
+            let by = if a.author.is_empty() { String::new() } else { format!(" · by {}", a.author) };
+            b.line(1, y, vec![Span::styled(
+                format!("{} · {}x{}{by}", a.path, a.cols, a.rows),
+                st(META),
+            )]);
+            y += 1;
+        }
         Kind::Help => {
             for (i, l) in HELP_TEXT.lines().enumerate() {
                 let style = if !l.starts_with(' ') && !l.is_empty() { bold } else { st(META) };
@@ -1182,3 +1245,36 @@ Pages
   History      everything you watched, with resume positions
   Watch later  your saved videos
 ";
+
+#[cfg(test)]
+mod art_page_tests {
+    use super::*;
+
+    #[test]
+    fn fixture_loads_into_drawable_cells() {
+        let a = ArtPage::load("tests/fixtures/bs-alove.ans").expect("load");
+        assert_eq!((a.cols, a.rows), (80, 59));
+        assert_eq!(a.cells.len(), 80 * 59);
+        assert_eq!(a.title, "ansilove");
+        // Every cell must be a real glyph with real colour.
+        for c in &a.cells {
+            assert!(!c.ch.is_control(), "control char in art: {:?}", c.ch);
+        }
+        // At least some cells carry non-black colour, or nothing drew.
+        let lit = a.cells.iter().filter(|c| c.fg != [0, 0, 0]).count();
+        assert!(lit > 100, "only {lit} lit cells");
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_not_a_panic() {
+        assert!(ArtPage::load("/nope/nothere.ans").is_err());
+    }
+
+    #[test]
+    fn the_page_title_falls_back_to_the_filename() {
+        let a = ArtPage::load("tests/fixtures/bs-alove.ans").unwrap();
+        let p = Page::new(1, Kind::Art(Box::new(a)));
+        assert_eq!(p.title(), "ansilove", "SAUCE title wins");
+        assert!(p.address().starts_with("file://"));
+    }
+}

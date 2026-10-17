@@ -26,7 +26,7 @@ pub mod writer;
 
 pub use glyph::{ch, Font, GLYPH_H};
 pub use palette::{candidates, candidates_bits, fit_cell, fit_cell_rgb, rasterise, score, score_rgb, score_rgb_pre, CellSums, Candidate, Ice, Rgb, TCell, VGA, XTERM16};
-pub use reader::{from_image, from_image_rgb, read_ansi, Art, ReadOpts, Sauce};
+pub use reader::{from_image, from_image_rgb, read_ansi, to_cells, Art, ReadOpts, Sauce};
 pub use writer::{write_ansi, Style, WriteOpts};
 
 /// The standard text-mode screen: 80 columns by 25 rows, the geometry every

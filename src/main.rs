@@ -445,7 +445,15 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(buf))?;
     app.set_fullscreen(fullscreen);
     if let Some(q) = start {
-        app.open_query(&q);
+        // `ytui art.ans` shows the art; anything else goes through search and
+        // URL resolution as before.
+        if q.to_ascii_lowercase().ends_with(".ans") && std::path::Path::new(&q).is_file() {
+            if let Err(e) = app.open_art(&q) {
+                bail!("{e}");
+            }
+        } else {
+            app.open_query(&q);
+        }
     }
     let res = app.run(&mut terminal, &out, rx);
     out.drain();
