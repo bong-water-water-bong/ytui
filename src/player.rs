@@ -95,14 +95,28 @@ struct Shared {
 pub use crate::sys::die_with_parent;
 use crate::sys::on_path;
 
+/// pw-cat that takes raw samples on stdin. Without `--raw`, pw-cat 1.x
+/// opens `-` as a sound file and exits ("Format not recognised"), so a
+/// pw-cat that doesn't know the flag is skipped for pacat / aplay.
+fn pw_cat_raw() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        on_path("pw-cat")
+            && Command::new("pw-cat")
+                .arg("--help")
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--raw") || String::from_utf8_lossy(&o.stderr).contains("--raw"))
+    })
+}
+
 /// Player for raw s16le 48 kHz stereo on stdin, so we can apply volume
 /// ourselves. None means fall back to ffmpeg's own audio output.
 fn sink_cmd(audio: Audio) -> Option<Command> {
     let mut c;
     match audio {
-        Audio::Pulse if on_path("pw-cat") => {
+        Audio::Pulse if pw_cat_raw() => {
             c = Command::new("pw-cat");
-            c.args(["--playback", "--format", "s16", "--rate", "48000", "--channels", "2", "--latency", "80ms", "-"]);
+            c.args(["--playback", "--raw", "--format", "s16", "--rate", "48000", "--channels", "2", "--latency", "80ms", "-"]);
         }
         Audio::Pulse if on_path("pacat") => {
             c = Command::new("pacat");
