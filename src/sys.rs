@@ -74,12 +74,6 @@ pub fn open_url(url: &str) {
 pub fn init() {
     #[cfg(windows)]
     unsafe {
-        // Physical pixels everywhere, so the video window lines up with the
-        // terminal's cells on scaled displays.
-        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
-    #[cfg(windows)]
-    unsafe {
         use windows_sys::Win32::System::JobObjects::*;
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());

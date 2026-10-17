@@ -194,19 +194,13 @@ file like a password: it signs in to your Google account.
 
 /// Resolve direct media URLs for playback: the highest resolution up to
 /// `max_h` lines, then the highest frame rate (YouTube only has 60 fps at
-/// 720p and up), then the preferred codec. `av1` allows AV1, which looks
-/// better per bit but is only worth it with mpv (hardware decoding, or
-/// dav1d); otherwise VP9 / H.264.
-pub fn resolve(url: &str, max_h: u32, av1: bool) -> Result<Stream> {
+/// 720p and up), then VP9 / H.264 (AV1 decodes slowly in software).
+pub fn resolve(url: &str, max_h: u32) -> Result<Stream> {
     if std::path::Path::new(url).is_file() {
         return local(url);
     }
-    let (fmt, sort) = if av1 {
-        ("bv*+ba/b".to_string(), format!("res:{max_h},fps,vcodec:av01"))
-    } else {
-        ("bv*[vcodec!^=av01]+ba/bv*+ba/b".to_string(), format!("res:{max_h},fps,vcodec:vp9"))
-    };
-    let v = run_json(&["--no-playlist", "-f", &fmt, "-S", &sort, url])?;
+    let sort = format!("res:{max_h},fps,vcodec:vp9");
+    let v = run_json(&["--no-playlist", "-f", "bv*[vcodec!^=av01]+ba/bv*+ba/b", "-S", &sort, url])?;
     let (mut video, mut audio) = (None, None);
     if let Some(fs) = v["requested_formats"].as_array() {
         for f in fs {

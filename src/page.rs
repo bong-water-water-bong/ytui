@@ -1226,8 +1226,6 @@ Keys — player (anywhere while something is playing)
   o                look panel: render mode, brightness, saturation, background,
                    contrast (glow mode is the coloured ASCII with the picture behind)
   S                captions: cycle off / each track (remembered across videos)
-  N                native GPU video window on / off (libmpv; over the terminal on
-                   Windows, its own window on Linux and macOS)
   G                pixel graphics (kitty / sixel) on / off, when the terminal supports them
   m                cycle render mode
   [ ] { }          ascii contrast / edges

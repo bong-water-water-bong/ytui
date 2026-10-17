@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 pub fn run(src: &str, secs: f64, opts: Opts, max_h: u32, mut r: Renderer, cols: usize, rows: usize) -> Result<()> {
     let t0 = Instant::now();
-    let s = crate::yt::resolve(src, max_h, opts.mpv)?;
-    println!("resolved in {:.2}s: {:?} ({} caption tracks, engine {})", t0.elapsed().as_secs_f64(), s.title, s.subs.len(), if opts.mpv { "mpv" } else { "ffmpeg" });
+    let s = crate::yt::resolve(src, max_h)?;
+    println!("resolved in {:.2}s: {:?} ({} caption tracks)", t0.elapsed().as_secs_f64(), s.title, s.subs.len());
     for t in &s.subs {
         println!("  cc {} {}{}", t.lang, t.name, if t.auto { " [auto]" } else { "" });
     }
@@ -137,7 +137,7 @@ pub fn render(src: &str, at: f64, cols: usize, rows: usize, max_h: u32) -> Resul
     use crate::render::{Img, Mode, Renderer};
     const N: usize = 60;
     let (w, h) = (cols * CW, rows * CH);
-    let input = if std::path::Path::new(src).exists() { src.to_string() } else { crate::yt::resolve(src, max_h, false)?.video_url };
+    let input = if std::path::Path::new(src).exists() { src.to_string() } else { crate::yt::resolve(src, max_h)?.video_url };
     let fr = frames(&input, at, N, w, h)?;
     println!("{} frames at {cols}x{rows} cells ({w}x{h} px)", fr.len());
     for mode in Mode::ALL {
@@ -232,7 +232,7 @@ pub fn render(src: &str, at: f64, cols: usize, rows: usize, max_h: u32) -> Resul
     Ok(())
 }
 
-/// `--color-test [detect] [mpv] [focus]`: an RGB gradient through ratatui,
+/// `--color-test [detect] [focus]`: an RGB gradient through ratatui,
 /// optionally after ytui's startup steps, to bisect colour problems.
 pub fn color_test(steps: &[String]) -> Result<()> {
     use ratatui::style::{Color, Style};
@@ -247,7 +247,6 @@ pub fn color_test(steps: &[String]) -> Result<()> {
     if has("focus") {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste, crossterm::event::EnableFocusChange);
     }
-    let _engine = if has("mpv") { crate::mpv::Engine::new("null", None) } else { None };
     let label = format!("steps {steps:?} | {}", crate::sys::console_state());
     for _ in 0..40 {
         terminal.draw(|f| {

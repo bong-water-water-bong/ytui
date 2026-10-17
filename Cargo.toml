@@ -17,7 +17,6 @@ crossterm = "0.28"
 flate2 = "1"
 fontdue = "0.9"
 getrandom = "0.2"
-libloading = "0.8"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 ratatui = "0.29"
@@ -33,8 +32,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_DataExchange", "Win32_System_Memory"] }
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_Accessibility"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
 [profile.release]
 opt-level = 3

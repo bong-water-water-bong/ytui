@@ -52,11 +52,6 @@ impl Audio {
 pub struct Opts {
     pub audio: Audio,
     pub fps: u32,
-    /// Play through libmpv instead of an ffmpeg pipe.
-    pub mpv: bool,
-    /// With mpv: render natively into this window (the overlay) instead of
-    /// through the terminal.
-    pub wid: Option<i64>,
 }
 
 /// Fit an aspect ratio into a cols x rows cell box; returns (w, h, x0, y0).
@@ -100,9 +95,6 @@ struct Shared {
 }
 
 const PCM_KEEP: usize = 4096;
-
-/// No new frame or position change for this long while playing = stalled.
-const STALL_SECS: f64 = 10.0;
 
 pub use crate::sys::die_with_parent;
 use crate::sys::on_path;
@@ -410,27 +402,12 @@ pub struct Player {
     pix: Vec<u8>,
     fps_win: (Instant, u32),
     pub fps: f64,
-    mpv: Option<crate::mpv::Engine>,
-    /// mpv has loaded the current file (seeks and tracks work).
-    mpv_loaded: bool,
-    /// mpv has started playing it (frames are real video).
-    mpv_ready: bool,
-    /// A seek asked for before the file loaded.
-    mpv_seek: bool,
-    /// Last time playback visibly advanced (frame or position), for the
-    /// stall watchdog.
-    progress: (Instant, f64),
     /// Selected caption track (index into stream.subs).
     cc: Option<usize>,
-    /// mpv's track id for each caption track once added.
-    cc_ids: Vec<Option<i64>>,
-    /// Language to switch captions on in when the file loads.
+    /// Cues of the selected track, filled in by a fetch thread.
+    cues: Arc<Mutex<Vec<Cue>>>,
+    /// Language to switch captions on in when the stream starts.
     cc_pref: Option<String>,
-    /// Captions drawn into the picture by mpv (pixel graphics) rather than
-    /// as text by us.
-    cc_burn: bool,
-    /// The user closed mpv's own window (see `mpv::OWN_WINDOW`).
-    pub window_closed: bool,
     cc_text: String,
 }
 
@@ -462,19 +439,13 @@ impl Player {
             pix: Vec::new(),
             fps_win: (Instant::now(), 0),
             fps: 0.0,
-            mpv: None,
-            mpv_loaded: false,
-            mpv_ready: false,
-            mpv_seek: false,
-            progress: (Instant::now(), -1.0),
             cc: None,
-            cc_ids: Vec::new(),
+            cues: Arc::new(Mutex::new(Vec::new())),
             cc_pref: None,
-            cc_burn: false,
-            window_closed: false,
             cc_text: String::new(),
         };
         p.restart();
+        p.apply_cc_pref();
         p
     }
 
@@ -484,13 +455,13 @@ impl Player {
 
     /// A decoder exists but has produced no frame yet.
     pub fn loading(&self) -> bool {
-        (self.dec.is_some() || self.mpv.is_some()) && self.seen == 0 && !self.ended
+        self.dec.is_some() && self.seen == 0 && !self.ended
     }
 
     /// Actively advancing, i.e. worth polling the terminal at full rate.
     /// False while paused even though the decoder is still alive.
     pub fn playing(&self) -> bool {
-        (self.dec.is_some() || self.mpv.is_some()) && !self.paused && !self.ended
+        self.dec.is_some() && !self.paused && !self.ended
     }
 
     /// Decode size in pixels for the current terminal and cell size.
@@ -499,63 +470,7 @@ impl Player {
         (((w as f32 * self.px_cell.0) as usize).max(2) & !1, ((h as f32 * self.px_cell.1) as usize).max(2) & !1)
     }
 
-    /// (Re)load the stream into mpv at self.pos.
-    fn mpv_load(&mut self) {
-        if self.mpv.is_none() {
-            let ao = match self.opts.audio {
-                Audio::None => "null",
-                Audio::Pulse => "pulse,",
-                Audio::Alsa => "alsa,",
-                Audio::Ffplay => "",
-            };
-            self.mpv = crate::mpv::Engine::new(ao, self.opts.wid);
-            if self.native() {
-                // mpv draws captions at full resolution in its own window.
-                self.cc_burn = true;
-            }
-        }
-        let Some(m) = &self.mpv else {
-            self.note = "libmpv failed to start; using ffmpeg".into();
-            self.opts.mpv = false;
-            return self.restart();
-        };
-        self.seen = 0;
-        self.exposure.reset();
-        self.exp_seen = u64::MAX;
-        self.ended = false;
-        self.mpv_loaded = false;
-        self.mpv_ready = false;
-        self.mpv_seek = false;
-        self.progress = (Instant::now(), -1.0);
-        self.cc = None;
-        self.cc_ids = vec![None; self.stream.subs.len()];
-        let (pw, ph) = self.decode_size();
-        if self.fw != pw || self.fh != ph {
-            self.frame.clear();
-        }
-        (self.fw, self.fh) = (pw, ph);
-        // %N% quoting: URLs may contain commas.
-        let q = |v: &str| format!("%{}%{v}", v.len());
-        let mut o = Vec::new();
-        if !self.stream.live && self.pos > 0.25 {
-            o.push(format!("start={:.3}", self.pos));
-        }
-        if let Some(a) = &self.stream.audio_url {
-            o.push(format!("audio-files={}", q(&crate::proxy::wrap(a))));
-        }
-        o.push(format!("pause={}", if self.paused { "yes" } else { "no" }));
-        let g = if self.muted { 0.0 } else { self.level };
-        m.set_f64("volume", g as f64 * 100.0);
-        if let Err(e) = m.command(&["loadfile", &crate::proxy::wrap(&self.stream.video_url), "replace", "-1", &o.join(",")]) {
-            self.note = format!("mpv: {e}");
-            self.failed = true;
-        }
-    }
-
     fn restart(&mut self) {
-        if self.opts.mpv {
-            return self.mpv_load();
-        }
         self.dec = None;
         self.seen = 0;
         // A seek is a hard cut: measure the next frame afresh.
@@ -586,27 +501,6 @@ impl Player {
     /// A seek always needs a fresh ffmpeg (an HTTP stream can't be scrubbed),
     /// so the new one comes up already frozen when the old one was paused.
     fn respawn(&mut self) {
-        if let Some(m) = &self.mpv {
-            // mpv seeks in place and renders at any size: no reload.
-            self.ended = false;
-            let (pw, ph) = self.decode_size();
-            if (pw, ph) != (self.fw, self.fh) {
-                (self.fw, self.fh) = (pw, ph);
-                self.frame.clear();
-                self.seen = 0;
-            }
-            if self.stream.live {
-                return;
-            }
-            if self.mpv_loaded {
-                let _ = m.command(&["seek", &format!("{:.3}", self.pos), "absolute"]);
-                self.exposure.reset();
-                self.exp_seen = u64::MAX;
-            } else {
-                self.mpv_seek = true;
-            }
-            return;
-        }
         let was_paused = self.paused;
         self.paused = false;
         self.restart();
@@ -631,9 +525,6 @@ impl Player {
     fn apply_volume(&mut self) {
         let g = if self.muted { 0.0 } else { self.level };
         self.vol.store(g.to_bits(), Ordering::Relaxed);
-        if let Some(m) = &self.mpv {
-            return m.set_f64("volume", g as f64 * 100.0);
-        }
         // Without our own audio pump the gain is baked into ffmpeg's filter.
         if self.dec.as_ref().is_some_and(|d| d.fifo.is_none() && d.audio != Audio::None) {
             self.restart();
@@ -677,7 +568,6 @@ impl Player {
 
     /// Newest mono samples for the visualiser (empty when there's no audio).
     pub fn samples(&self) -> Vec<f32> {
-        // (mpv doesn't hand out PCM, so under mpv the visualiser idles.)
         self.dec.as_ref().map(|d| d.sh.pcm.lock().unwrap().iter().copied().collect()).unwrap_or_default()
     }
 
@@ -690,17 +580,6 @@ impl Player {
 
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
-        self.progress = (Instant::now(), self.pos);
-        if let Some(m) = &self.mpv {
-            if !self.paused && self.ended {
-                self.pos = 0.0;
-                self.ended = false;
-                if self.mpv_loaded {
-                    let _ = m.command(&["seek", "0", "absolute"]);
-                }
-            }
-            return m.set_flag("pause", self.paused);
-        }
         match self.dec.as_ref() {
             // Freeze in place; resuming is instant and the position is exact.
             Some(d) => d.set_paused(self.paused),
@@ -730,9 +609,6 @@ impl Player {
 
     /// Advance; returns true when something visible changed.
     pub fn tick(&mut self) -> bool {
-        if self.mpv.is_some() {
-            return self.tick_mpv();
-        }
         let Some(d) = &self.dec else { return false };
         let n = d.sh.count.load(Ordering::Acquire);
         self.pos = d.start + n as f64 / d.fps;
@@ -747,6 +623,13 @@ impl Player {
         if el >= 1.0 {
             self.fps = self.fps_win.1 as f64 / el;
             self.fps_win = (Instant::now(), 0);
+        }
+        if self.cc.is_some() {
+            let t = cue_at(&self.cues.lock().unwrap(), self.pos);
+            if t != self.cc_text {
+                self.cc_text = t;
+                fresh = true;
+            }
         }
         if d.sh.audio_failed.swap(false, Ordering::Relaxed) {
             self.note = "audio output failed; playing muted".into();
@@ -774,133 +657,9 @@ impl Player {
         fresh
     }
 
-    fn tick_mpv(&mut self) -> bool {
-        let Some(m) = self.mpv.as_ref() else { return false };
-        let ev = m.poll();
-        let mut fresh = false;
-        if ev.closed {
-            self.window_closed = true;
-        }
-        if ev.loaded && !self.mpv_loaded {
-            self.mpv_loaded = true;
-            if std::mem::take(&mut self.mpv_seek) {
-                let _ = m.command(&["seek", &format!("{:.3}", self.pos), "absolute"]);
-            }
-            self.apply_cc_pref();
-        }
-        if ev.restarted {
-            self.mpv_ready = true;
-            if self.native() && self.seen == 0 {
-                // No frames come back to us; the picture is up.
-                self.seen = 1;
-                fresh = true;
-            }
-        }
-        let Some(m) = self.mpv.as_mut() else { return false };
-        if self.mpv_ready {
-            if let Some(t) = m.get_f64("time-pos") {
-                // Native: no frames come back, so redraw for the clock.
-                if self.opts.wid.is_some() && (t.floor() != self.pos.floor() || (t - self.pos).abs() > 1.0) {
-                    fresh = true;
-                }
-                self.pos = t;
-            }
-        }
-        if m.frame(self.fw, self.fh, self.seen == 0 && self.mpv_ready, &mut self.frame) && self.mpv_ready {
-            self.seen += 1;
-            self.fps_win.1 += 1;
-            fresh = true;
-        }
-        let el = self.fps_win.0.elapsed().as_secs_f64();
-        if el >= 1.0 {
-            self.fps = self.fps_win.1 as f64 / el;
-            self.fps_win = (Instant::now(), 0);
-        }
-        if self.cc.is_some() && !self.cc_burn {
-            let t = m.get_str("sub-text").unwrap_or_default();
-            if t != self.cc_text {
-                self.cc_text = t;
-                fresh = true;
-            }
-        }
-        // keep-open: at the end mpv holds the last frame and sets eof-reached.
-        let eof = ev.eof || m.get_str("eof-reached").is_some_and(|v| v == "yes");
-        if eof && !self.ended && self.mpv_loaded {
-            self.ended = true;
-            self.paused = true;
-            fresh = true;
-        }
-        if let Some(e) = ev.error {
-            self.note = format!("mpv: {e}");
-            self.failed = true;
-            self.paused = true;
-            fresh = true;
-        }
-        // Watchdog: a network read that never returns leaves mpv waiting
-        // forever. If nothing has moved for a while, report a failure so the
-        // app reconnects with a fresh stream at the same position.
-        if fresh || (self.pos - self.progress.1).abs() > 0.01 {
-            self.progress = (Instant::now(), self.pos);
-        } else if !self.paused && !self.ended && !self.failed && self.progress.0.elapsed().as_secs_f64() > STALL_SECS {
-            self.note = "stream stalled".into();
-            self.failed = true;
-            self.paused = true;
-            fresh = true;
-        }
-        fresh
-    }
-
     /// One-line internal state for YTUI_STATS.
     pub fn debug(&self) -> String {
-        let mpv = self.mpv.as_ref().map(|m| {
-            let g = |k: &str| m.get_str(k).unwrap_or_else(|| "-".into());
-            format!(
-                " | {} {}x{} @{} hw {} | drops vo {} dec {} delayed {}",
-                g("video-codec-name"),
-                g("width"),
-                g("height"),
-                g("container-fps"),
-                g("hwdec-current"),
-                g("frame-drop-count"),
-                g("decoder-frame-drop-count"),
-                g("vo-delayed-frame-count")
-            )
-        });
-        format!("seen {} fw {}x{} ready {} paused {}{}", self.seen, self.fw, self.fh, self.mpv_ready, self.paused, mpv.unwrap_or_default())
-    }
-
-    /// Video is drawn by mpv in the native overlay window, not by us.
-    pub fn native(&self) -> bool {
-        self.mpv.is_some() && self.opts.wid.is_some()
-    }
-
-    /// Video is in mpv's own window (not glued over the terminal).
-    pub fn own_window(&self) -> bool {
-        self.native() && self.opts.wid == Some(crate::mpv::OWN_WINDOW)
-    }
-
-    /// Full screen on / off for mpv's own window.
-    pub fn toggle_window_fullscreen(&self) {
-        if let Some(m) = self.mpv.as_ref().filter(|_| self.own_window()) {
-            let _ = m.command(&["cycle", "fullscreen"]);
-        }
-    }
-
-    /// Switch between the native window (Some) and terminal rendering,
-    /// keeping the position and pause state.
-    pub fn set_native(&mut self, wid: Option<i64>) {
-        if self.opts.wid == wid || !self.opts.mpv {
-            return;
-        }
-        let pref = self.caption_track().map(|_| self.cc.and_then(|i| self.stream.subs.get(i)).map(|t| t.lang.clone())).flatten();
-        self.opts.wid = wid;
-        self.mpv = None;
-        self.cc_burn = false;
-        if pref.is_some() {
-            self.cc_pref = pref;
-        }
-        self.frame.clear();
-        self.restart();
+        format!("seen {} fw {}x{} paused {}", self.seen, self.fw, self.fh, self.paused)
     }
 
     /// Name of the selected caption track, if captions are on.
@@ -908,34 +667,19 @@ impl Player {
         self.cc.and_then(|i| self.stream.subs.get(i)).map(|t| t.name.as_str())
     }
 
-    /// Caption text to draw over the video right now (empty when off, or
-    /// when mpv draws them into the picture).
+    /// Caption text to draw over the video right now (empty when off).
     pub fn caption_text(&self) -> &str {
-        if self.cc.is_some() && !self.cc_burn {
+        if self.cc.is_some() {
             &self.cc_text
         } else {
             ""
         }
     }
 
-    /// Have mpv draw captions into the picture (pixel graphics, where text
-    /// can't sit on top of the image) or leave them to `caption_text`.
-    pub fn set_caption_burn(&mut self, burn: bool) {
-        let burn = burn || self.native();
-        if self.cc_burn != burn {
-            self.cc_burn = burn;
-            if let Some(m) = &self.mpv {
-                m.set_flag("sub-visibility", burn && self.cc.is_some());
-            }
-        }
-    }
-
     /// Turn captions on in this language when the video loads (None: off).
     pub fn set_caption_pref(&mut self, lang: Option<String>) {
         self.cc_pref = lang;
-        if self.mpv_loaded {
-            self.apply_cc_pref();
-        }
+        self.apply_cc_pref();
     }
 
     fn apply_cc_pref(&mut self) {
@@ -954,47 +698,31 @@ impl Player {
     }
 
     /// Switch to caption track `i` (None: off). Returns an error message.
+    /// The track's WebVTT file is fetched in the background; captions show
+    /// as soon as it arrives.
     fn select_caption(&mut self, i: Option<usize>) -> Option<String> {
-        let m = self.mpv.as_ref()?;
         self.cc_text.clear();
-        match i {
-            None => {
-                m.set("sid", "no");
-                m.set_flag("sub-visibility", false);
-                self.cc = None;
+        self.cues = Arc::new(Mutex::new(Vec::new()));
+        let Some(i) = i else {
+            self.cc = None;
+            return None;
+        };
+        let t = self.stream.subs.get(i)?;
+        let (url, cues) = (t.url.clone(), self.cues.clone());
+        std::thread::spawn(move || {
+            if let Ok(body) = crate::api::agent().get(&url).call().and_then(|r| r.into_string().map_err(Into::into)) {
+                *cues.lock().unwrap() = parse_vtt(&body);
             }
-            Some(i) => {
-                let t = self.stream.subs.get(i)?;
-                match self.cc_ids.get(i).copied().flatten() {
-                    Some(id) => m.set("sid", &id.to_string()),
-                    None => {
-                        if let Err(e) = m.command(&["sub-add", &t.url, "select", &t.name, &t.lang]) {
-                            return Some(format!("captions: {e}"));
-                        }
-                        let id = m.get_i64("sid");
-                        if let Some(slot) = self.cc_ids.get_mut(i) {
-                            *slot = id;
-                        }
-                    }
-                }
-                m.set_flag("sub-visibility", self.cc_burn);
-                self.cc = Some(i);
-            }
-        }
+        });
+        self.cc = Some(i);
         None
     }
 
     /// Next caption track (off -> each track -> off). Returns a message for
     /// the status line and the language now preferred (None: off).
     pub fn cycle_captions(&mut self) -> (String, Option<String>) {
-        if self.mpv.is_none() {
-            return ("captions need libmpv (see README)".into(), self.cc_pref.clone());
-        }
         if self.stream.subs.is_empty() {
             return ("no captions for this video".into(), self.cc_pref.clone());
-        }
-        if !self.mpv_loaded {
-            return ("captions: video still loading".into(), self.cc_pref.clone());
         }
         let next = match self.cc {
             None => Some(0),
@@ -1040,6 +768,52 @@ impl Player {
     }
 }
 
+/// One caption: start and end in seconds, and its text.
+type Cue = (f64, f64, String);
+
+/// The cue showing at `t`, joined into one line per cue line.
+fn cue_at(cues: &[Cue], t: f64) -> String {
+    cues.iter().filter(|c| c.0 <= t && t < c.1).map(|c| c.2.as_str()).collect::<Vec<_>>().join("\n")
+}
+
+/// Parse a WebVTT file into cues. YouTube's auto captions repeat the
+/// previous line above the new one and carry inline timing tags; tags are
+/// stripped and a cue's lines kept as they are.
+fn parse_vtt(s: &str) -> Vec<Cue> {
+    fn ts(t: &str) -> Option<f64> {
+        let t = t.trim().split(' ').next()?;
+        let mut secs = 0.0;
+        for p in t.split(':') {
+            secs = secs * 60.0 + p.replace(',', ".").parse::<f64>().ok()?;
+        }
+        Some(secs)
+    }
+    fn strip(l: &str) -> String {
+        let mut out = String::new();
+        let mut tag = false;
+        for c in l.chars() {
+            match c {
+                '<' => tag = true,
+                '>' => tag = false,
+                _ if !tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+    }
+    let mut cues = Vec::new();
+    let mut lines = s.lines();
+    while let Some(l) = lines.next() {
+        let Some((a, b)) = l.split_once("-->") else { continue };
+        let (Some(a), Some(b)) = (ts(a), ts(b)) else { continue };
+        let text: Vec<String> = lines.by_ref().take_while(|l| !l.trim().is_empty()).map(strip).filter(|l| !l.trim().is_empty()).collect();
+        if !text.is_empty() {
+            cues.push((a, b, text.join("\n")));
+        }
+    }
+    cues
+}
+
 /// Area-average resample (nearest source pixel when upscaling).
 pub fn downsample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut Vec<u8>) {
     out.clear();
@@ -1069,5 +843,21 @@ pub fn downsample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &
             o[1] = (s[1] / n) as u8;
             o[2] = (s[2] / n) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vtt_cues_parse_and_strip_tags() {
+        let vtt = "WEBVTT\nKind: captions\n\n00:00:01.000 --> 00:00:02.500 align:start position:0%\nhello <c>there</c>\n&amp; you\n\n1\n00:01:00,250 --> 00:01:02.000\nsecond\n";
+        let c = parse_vtt(vtt);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0], (1.0, 2.5, "hello there\n& you".to_string()));
+        assert_eq!(c[1].0, 60.25);
+        assert_eq!(cue_at(&c, 1.5), "hello there\n& you");
+        assert_eq!(cue_at(&c, 3.0), "");
     }
 }

@@ -54,12 +54,6 @@ pub struct Store {
     pub look_bg: f32,
     #[serde(default = "look_contrast")]
     pub look_contrast: f32,
-    /// Native GPU video window over the terminal (where available).
-    #[serde(default = "yes")]
-    pub native: bool,
-    /// Linux / macOS: video in mpv's own window (N) instead of the terminal.
-    #[serde(default)]
-    pub mpv_window: bool,
     /// Caption language to switch on for every video (None: captions off).
     #[serde(default)]
     pub captions: Option<String>,
@@ -109,7 +103,6 @@ impl Store {
                 show_chat: true,
                 exposure: true,
                 gfx: true,
-                native: true,
                 look_bright: look_bright(),
                 look_sat: look_sat(),
                 look_bg: look_bg(),

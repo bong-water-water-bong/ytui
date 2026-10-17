@@ -10,9 +10,7 @@ mod diacritics;
 mod engine3d;
 mod gfx;
 mod glyphs;
-mod mpv;
 mod out;
-mod overlay;
 mod page;
 mod player;
 mod proxy;
@@ -65,13 +63,10 @@ OPTIONS:
                  braille | ansi | ansi9 | ansi-16 | ansi9-16 | ansiblink
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
-  --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
-  --no-native    never use the native GPU video window (N toggles it; on Linux
-                 and macOS it's a separate mpv window)
   --fullscreen   start the player fullscreen
-  --fps N        max frame rate for the ffmpeg engine (default 60)
-  --height N     max stream height to fetch (default: 720 in the terminal, so
-                 60 fps streams are picked; the window's height for native video)
+  --fps N        max frame rate (default 60)
+  --height N     max stream height to fetch (default 720, the lowest height
+                 YouTube serves at 60 fps)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
   --gfx X        auto | kitty | sixel | off: pixel graphics backend (default auto)
   --colors C     auto | 256 | true: colour depth (auto: 256 when tmux lacks RGB)
@@ -94,8 +89,7 @@ OPTIONS:
   --palette       write 16-colour ANSI art instead of 24-bit (much smaller)
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
-ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes),
-     YTUI_LIBMPV (path to libmpv), YTUI_ENGINE (as --engine)
+ENV: YTUI_YTDLP (yt-dlp path), YTUI_FONT (monospace .ttf used for glyph shapes)
 ";
 
 fn main() -> Result<()> {
@@ -107,7 +101,7 @@ fn main() -> Result<()> {
     }
     sys::init();
     // In a tmux started outside the desktop, the desktop's Wayland display
-    // is missing: find it, so mpv's window and the sign-in browser open.
+    // is missing: find it, so the sign-in browser opens.
     #[cfg(all(unix, not(target_os = "macos")))]
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -116,18 +110,10 @@ fn main() -> Result<()> {
             }
         }
     }
-    // mpv's window renders with Vulkan; Mesa's RADV prints a warning on
-    // newer AMD GPUs straight onto ytui's screen otherwise.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if std::env::var_os("MESA_VK_IGNORE_CONFORMANCE_WARNING").is_none() {
-        std::env::set_var("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1");
-    }
     let mut args = std::env::args().skip(1);
     let mut mode = None;
     let mut audio = Audio::auto();
     let mut fps = 60;
-    let mut engine = std::env::var("YTUI_ENGINE").unwrap_or_else(|_| "auto".into());
-    let mut native = true;
     let mut fullscreen = false;
     let mut max_h: Option<u32> = None;
     let mut snapshot: Option<String> = None;
@@ -180,8 +166,6 @@ fn main() -> Result<()> {
                 }
             }
             "--fps" => fps = val("--fps")?.parse()?,
-            "--engine" => engine = val("--engine")?,
-            "--no-native" => native = false,
             "--fullscreen" => fullscreen = true,
             "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),
@@ -204,7 +188,6 @@ fn main() -> Result<()> {
                 let src = val("--bench-render")?;
                 bench_render = Some(src);
             }
-            "--probe-term" => return overlay::probe(&val("--probe-term")?),
             "--seconds" => secs = val("--seconds")?.parse()?,
             "--import-subs" => import = Some(val("--import-subs")?),
             "--login" => login = true,
@@ -297,8 +280,7 @@ fn main() -> Result<()> {
     }
 
     if let Some(src) = bench {
-        let use_mpv = engine != "ffmpeg" && mpv::available();
-        return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
+        return bench::run(&src, secs, Opts { audio, fps }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
     }
 
     if let Some(path) = view_ans {
@@ -327,7 +309,7 @@ fn main() -> Result<()> {
         let (input, aspect) = if std::path::Path::new(&src).exists() {
             (src.clone(), 16.0 / 9.0)
         } else {
-            let s = yt::resolve(&src, max_h.unwrap_or(480), false)?;
+            let s = yt::resolve(&src, max_h.unwrap_or(480))?;
             (s.video_url, s.aspect)
         };
         let (w, h, _, _) = player::fit(aspect, scols.unwrap_or(tc), srows.unwrap_or(tr.saturating_sub(1)));
@@ -382,14 +364,6 @@ fn main() -> Result<()> {
     if p256 && colors == "auto" {
         hints.insert(0, "tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
     }
-    let use_mpv = match engine.as_str() {
-        "ffmpeg" => false,
-        "mpv" if !mpv::available() => bail!("--engine mpv: libmpv not found (install it or set YTUI_LIBMPV)"),
-        _ => mpv::available(),
-    };
-    if !use_mpv && engine == "auto" {
-        hints.insert(0, "libmpv not found: playing through ffmpeg (no captions); see README".into());
-    }
     // The mosaic modes emit Unicode that a monospace font is not obliged to
     // have. Every font path we probe lacks braille and sextant, so say so
     // rather than let the user pick a mode that draws nothing but boxes.
@@ -413,18 +387,7 @@ fn main() -> Result<()> {
             );
         }
     }
-    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, mode.is_some());
-    #[cfg(not(windows))]
-    {
-        let desktop = cfg!(target_os = "macos") || std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
-        app.set_mpv_window(use_mpv && native && desktop && std::env::var("SSH_CONNECTION").is_err());
-    }
-    #[cfg(windows)]
-    if use_mpv && native && std::env::var("SSH_CONNECTION").is_err() {
-        if let Some(o) = overlay::Overlay::new() {
-            app.set_overlay(o);
-        }
-    }
+    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
     app.set_gfx(gfx);
     if let Some(h) = hints.last() {
         app.hint(h.clone());
@@ -440,7 +403,7 @@ fn main() -> Result<()> {
     // Raw mode, alternate screen and the panic hook; drawing goes through
     // our own output thread instead of straight to stdout.
     drop(ratatui::init());
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste, crossterm::event::EnableFocusChange);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture, crossterm::event::EnableBracketedPaste);
     let (out, buf) = out::Out::new();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(buf))?;
     app.set_fullscreen(fullscreen);
@@ -457,7 +420,7 @@ fn main() -> Result<()> {
     }
     let res = app.run(&mut terminal, &out, rx);
     out.drain();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste, crossterm::event::DisableFocusChange);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture, crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     res
 }
@@ -560,7 +523,7 @@ fn write_ans_from_video(
     let (input, aspect) = if std::path::Path::new(src).exists() {
         (src.to_string(), 16.0 / 9.0)
     } else {
-        let s = yt::resolve(src, max_h, false)?;
+        let s = yt::resolve(src, max_h)?;
         (s.video_url, s.aspect)
     };
     // Art was drawn to 80x25, and cells are 8x16 dots, so the picture is
