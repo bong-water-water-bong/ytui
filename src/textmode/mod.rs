@@ -1,6 +1,7 @@
-// The engine is public API for the binary: some entry points (rasterise,
-// ink_masks) are used by the exporter and tests, not by the live renderer.
-#![allow(dead_code)]
+// The engine is a small library inside the binary: several entry points
+// (rasterise, fit_cell, Art) are used by the exporter and by tests but not by
+// the live renderer, and the re-exports below are its public surface.
+#![allow(dead_code, unused_imports)]
 
 //! A text-mode (ANSI / CP437) art engine.
 //!
@@ -23,9 +24,9 @@ pub mod palette;
 pub mod reader;
 pub mod writer;
 
-pub use glyph::{ch, Font, GLYPH_H, GLYPH_W};
-pub use palette::{fit_cell, ink_masks, rasterise, Ice, Rgb, TCell, VGA, XTERM16, XTERM256};
-pub use reader::{from_image, read_ansi, to_cells, Art, ReadOpts, Sauce};
+pub use glyph::{ch, Font, GLYPH_H};
+pub use palette::{candidates, candidates_bits, fit_cell, rasterise, score, Candidate, Ice, Rgb, TCell, VGA, XTERM16};
+pub use reader::{from_image, read_ansi, Art, ReadOpts, Sauce};
 pub use writer::{write_ansi, Style, WriteOpts};
 
 /// The standard text-mode screen: 80 columns by 25 rows, the geometry every

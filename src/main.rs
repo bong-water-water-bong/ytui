@@ -507,7 +507,7 @@ fn write_ans_from_video(
     srows: Option<usize>,
     max_h: u32,
 ) -> Result<()> {
-    let (tc, tr) = crossterm::terminal::size()
+    let (_tc, _tr) = crossterm::terminal::size()
         .map(|(c, r)| (c as usize, r as usize))
         .unwrap_or((textmode::SCREEN_COLS, textmode::SCREEN_ROWS + 1));
     let (input, aspect) = if std::path::Path::new(src).exists() {

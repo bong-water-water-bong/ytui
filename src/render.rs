@@ -33,10 +33,21 @@ pub enum Mode {
     Quadrant,
     HalfBlock,
     Braille,
+    /// Real text-mode art: CP437 glyphs from the IBM 8x16 ROM font, fitted to
+    /// the frame and coloured from the 16-colour DOS palette. With iCE on the
+    /// background may use the high bit, giving 8 foregrounds x 16 backgrounds.
+    Ansi,
+    /// As [`Mode::Ansi`], but each cell claims only 8 backgrounds, so the art
+    /// stays true to a display that really did blink.
+    AnsiBlink,
+    /// Text-mode art at 9 dots per cell: the extra column repeats the last
+    /// dot of the block and line-drawing characters, so box rules join with
+    /// no seam, exactly as an 80-column VGA screen drew them.
+    Ansi9,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 8] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille];
+    pub const ALL: [Mode; 11] = [Mode::Glow, Mode::Art, Mode::Ascii, Mode::Classic, Mode::Sextant, Mode::Quadrant, Mode::HalfBlock, Mode::Braille, Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -48,6 +59,9 @@ impl Mode {
             Mode::Quadrant => "quadrant",
             Mode::HalfBlock => "halfblock",
             Mode::Braille => "braille",
+            Mode::Ansi => "ansi",
+            Mode::AnsiBlink => "ansiblink",
+            Mode::Ansi9 => "ansi9",
         }
     }
 
@@ -87,6 +101,8 @@ pub struct Renderer {
     /// luminance, so saturated colours (a red object) still get solid glyphs.
     pub value_density: bool,
     pub glyphs: Glyphs,
+    /// Text-mode render: (bits, cols, rows, prepared glyphs), rebuilt on resize.
+    tm_cache: Option<(usize, usize, usize, Vec<crate::textmode::Candidate>)>,
     inner: Vec<Vec<(i32, i32)>>,
     outer: Vec<Vec<(i32, i32)>>,
     cache: HashMap<u32, u8>,
@@ -171,6 +187,7 @@ impl Renderer {
             black: 0.0,
             value_density: false,
             glyphs,
+            tm_cache: None,
             inner,
             outer,
             cache: HashMap::new(),
@@ -209,6 +226,9 @@ impl Renderer {
             }
             Mode::Quadrant => mosaic(img, cols, rows, out, 2, 2, |m| QUAD[m as usize], false),
             Mode::Sextant => mosaic(img, cols, rows, out, 2, 3, sextant, false),
+            Mode::Ansi | Mode::AnsiBlink | Mode::Ansi9 => {
+                self.text_art(img, cols, rows, out)
+            }
             Mode::Braille => mosaic(img, cols, rows, out, 2, 4, |m| {
                 let mut b = 0;
                 for i in 0..8 {
@@ -539,6 +559,89 @@ impl Renderer {
             }
         }
     }
+
+    /// Text-mode art: fit CP437 glyphs from the DOS font and quantise to the
+    /// 16-colour palette. Shares the engine with the exporter, so what you
+    /// watch and what `--snapshot-ans` writes come from the same code.
+    fn text_art(&mut self, img: &Img, cols: usize, rows: usize, out: &mut Vec<Cell>) {
+        let binary = matches!(self.mode, Mode::AnsiBlink);
+        let bits = if matches!(self.mode, Mode::Ansi9) { 9 } else { 8 };
+        // The cache is only valid for one geometry, and rebuilding the ink
+        // masks is the expensive part of a frame.
+        if self.tm_cache.as_ref().map(|(b, c, r, _)| (*b, *c, *r)) != Some((bits, cols, rows)) {
+            // Prepared once per geometry: ink counts and pixel lists are
+            // fixed for a font and cell size, and this is the difference
+            // between ~190 ms and a few ms a frame.
+            // Build at the renderer's own cell size: the mask and the image
+            // must have the same number of pixels, and the ink indices index
+            // into that same space.
+            let hs = crate::textmode::candidates_bits(&crate::textmode::Font::dos(), CW, CH, bits);
+            self.tm_cache = Some((bits, cols, rows, hs));
+        }
+        let cands = &self.tm_cache.as_ref().unwrap().3;
+        let ice = if binary { crate::textmode::Ice::Off } else { crate::textmode::Ice::On };
+        let p256 = PALETTE_256.load(std::sync::atomic::Ordering::Relaxed);
+
+        out.clear();
+        out.reserve(cols * rows);
+        let mut cell_px = vec![[0u8; 3]; CW * CH];
+        for cy in 0..rows {
+            for cx in 0..cols {
+                // The image is already exactly cols*CW x rows*CH pixels.
+                for y in 0..CH {
+                    for x in 0..CW {
+                        let at = ((cy * CH + y) * img.w + cx * CW + x) * 3;
+                        cell_px[y * CW + x] = [img.px[at], img.px[at + 1], img.px[at + 2]];
+                    }
+                }
+                // Every glyph is fitted. A coverage shortlist reached ~29 ms a
+                // frame but cost 34% more paint error on real video, a visible
+                // quality drop, so the exact fit stays. These modes are for
+                // stills and export; live video remains the mosaic modes' job
+                // until a better shortlist metric exists.
+                let mut best = (u64::MAX, crate::textmode::TCell::default());
+                for c in cands.iter() {
+                    let (cell, err) = crate::textmode::score(c, &cell_px, ice, crate::textmode::Rgb::Vga);
+                    if err < best.0 {
+                        best = (err, cell);
+                    }
+                }
+                let cell = best.1;
+                let fg = crate::textmode::VGA[(cell.fg & 15) as usize];
+                let bg = crate::textmode::VGA[(cell.bg & 15) as usize];
+                let (fg, bg) = if p256 {
+                    // Map through the 256-colour palette, dithered, so the
+                    // picture survives a terminal without truecolour.
+                    let e = |c: [u8; 3]| {
+                        let i = xterm256(c, cx, cy);
+                        xterm_rgb(i)
+                    };
+                    (e(fg), e(bg))
+                } else {
+                    (fg, bg)
+                };
+                out.push(Cell { ch: crate::textmode::ch(cell.ch), fg, bg });
+            }
+        }
+    }
+}
+
+/// The RGB an xterm-256 index stands for, so a palette-mapped cell can still
+/// go through the truecolour path (sixel, kitty) unchanged.
+fn xterm_rgb(i: u8) -> [u8; 3] {
+    match i {
+        0..=15 => crate::textmode::XTERM16[i as usize],
+        16..=231 => {
+            let n = i as usize - 16;
+            let (r, g, b) = (n / 36, (n % 36) / 6, n % 6);
+            let lv = |v: usize| if v == 0 { 0 } else { 55 + v as u8 * 40 } as u8;
+            [lv(r), lv(g), lv(b)]
+        }
+        _ => {
+            let v = 8 + (i as u16 - 232) as u8 * 10;
+            [v, v, v]
+        }
+    }
 }
 
 fn box_avg(img: &Img, x: usize, y: usize, w: usize, h: usize) -> [f32; 3] {
@@ -834,5 +937,103 @@ mod tests {
         let (loose, steady) = (changed(false), changed(true));
         eprintln!("cells whose character changed between two noisy frames: {loose} without hysteresis, {steady} with");
         assert!(steady * 3 <= loose.max(1), "hysteresis should remove most flicker");
+    }
+}
+#[cfg(test)]
+mod mode_parse_test {
+    #[test]
+    fn parse_ansi() {
+        for s in ["ansi", "ansi9", "ansiblink", "ascii"] {
+            eprintln!("{s:10} -> {:?}", super::Mode::parse(s).map(|m| m.name()));
+        }
+    }
+}
+#[cfg(test)]
+mod textmode_mode_tests {
+    use super::*;
+
+    fn frame(cols: usize, rows: usize) -> Vec<u8> {
+        let (w, h) = (cols * CW, rows * CH);
+        let mut px = vec![0u8; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * w + x) * 3;
+                px[at] = (x * 255 / w) as u8;
+                px[at + 1] = (y * 255 / h) as u8;
+                px[at + 2] = 128;
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn ansi_modes_produce_cp437_from_the_dos_palette() {
+        let (cols, rows) = (40, 12);
+        let px = frame(cols, rows);
+        for mode in [Mode::Ansi, Mode::AnsiBlink, Mode::Ansi9] {
+            let mut r = Renderer::new(mode);
+            let mut out = Vec::new();
+            r.render(&Img { w: cols * CW, h: rows * CH, px: &px }, cols, rows, &mut out);
+            assert_eq!(out.len(), cols * rows, "{mode:?} cell count");
+            // Every cell must be a real CP437 glyph, and every colour must
+            // come from the DOS palette.
+            for c in &out {
+                assert!(!c.ch.is_control(), "{mode:?} control char");
+                assert!(
+                    crate::textmode::VGA.iter().any(|p| *p == c.fg),
+                    "{mode:?} fg {:?} is not a DOS colour",
+                    c.fg
+                );
+                assert!(
+                    crate::textmode::VGA.iter().any(|p| *p == c.bg),
+                    "{mode:?} bg {:?} is not a DOS colour",
+                    c.bg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ansi_blink_never_uses_a_bright_background() {
+        let (cols, rows) = (24, 8);
+        let px = frame(cols, rows);
+        let mut r = Renderer::new(Mode::AnsiBlink);
+        let mut out = Vec::new();
+        r.render(&Img { w: cols * CW, h: rows * CH, px: &px }, cols, rows, &mut out);
+        // The dark half of the VGA palette is the first 8 entries.
+        let dark = &crate::textmode::VGA[..8];
+        for c in &out {
+            assert!(
+                dark.iter().any(|p| *p == c.bg),
+                "iCE off must not produce a bright background: {:?}",
+                c.bg
+            );
+        }
+    }
+
+    #[test]
+    fn ansi_modes_are_steady_on_a_still_picture() {
+        // Two identical frames must render identically, or video shimmers.
+        let (cols, rows) = (24, 8);
+        let px = frame(cols, rows);
+        let mut r = Renderer::new(Mode::Ansi);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let img = Img { w: cols * CW, h: rows * CH, px: &px };
+        r.render(&img, cols, rows, &mut a);
+        r.render(&img, cols, rows, &mut b);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ansi_resize_rebuilds_the_mask_cache() {
+        let mut r = Renderer::new(Mode::Ansi);
+        let p1 = frame(16, 6);
+        let mut out = Vec::new();
+        r.render(&Img { w: 16 * CW, h: 6 * CH, px: &p1 }, 16, 6, &mut out);
+        assert_eq!(out.len(), 16 * 6);
+        let p2 = frame(20, 9);
+        out.clear();
+        r.render(&Img { w: 20 * CW, h: 9 * CH, px: &p2 }, 20, 9, &mut out);
+        assert_eq!(out.len(), 20 * 9, "a resize must not reuse a stale cache");
     }
 }

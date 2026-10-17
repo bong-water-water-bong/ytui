@@ -237,6 +237,117 @@ pub fn fit_cell(pixels: &[[u8; 3]], ink: &[bool], ice: Ice, set: Rgb) -> (TCell,
     (TCell { ch: b' ', fg, bg }, err)
 }
 
+/// A glyph candidate, prepared once so a frame can score it cheaply.
+///
+/// Fitting every glyph in full is ~256x too slow for video: each one
+/// re-derives two colour means over the whole cell. What a glyph actually
+/// needs is its ink count and where its ink sits, and both are fixed for a
+/// given font and cell size, so they are computed once here.
+pub struct Candidate {
+    pub byte: u8,
+    pub mask: Vec<bool>,
+    /// How many pixels the glyph inks, and so how many get the foreground.
+    pub ink: u32,
+    /// Left-to-right, top-to-bottom order of the inked pixel indices, so
+    /// scoring walks only the pixels that matter.
+    pub ink_at: Vec<u32>,
+    /// Signed luma weight per pixel (+1 inked, -1 paper). The dot product of
+    /// this with a cell's luma says which glyph best splits it light from
+    /// dark, and it is one multiply-add per pixel.
+    pub signed: Vec<i8>,
+}
+
+/// Prepare all 256 glyphs once per (font, cell size).
+///
+/// `w x h` is the cell size the caller will score at, which need not be the
+/// font's own 8x16: the renderer decodes cells at 6x12, and a candidate whose
+/// ink indices were built for a different size would index out of bounds.
+pub fn candidates(font: &Font, w: usize, h: usize) -> Vec<Candidate> {
+    candidates_bits(font, w, h, GLYPH_W)
+}
+
+/// As [`candidates`], but sampling the font at `bits` dots wide, so the
+/// 9th-dot line-drawing rule can be applied at the source resolution and then
+/// scaled down to the caller's cell size.
+pub fn candidates_bits(font: &Font, w: usize, h: usize, bits: usize) -> Vec<Candidate> {
+    (0..=255u8)
+        .map(|b| {
+            let mut mask = Vec::with_capacity(w * h);
+            for y in 0..h {
+                let gy = y * GLYPH_H / h;
+                for x in 0..w {
+                    let gx = x * bits / w;
+                    mask.push(font.plot(b, gx.min(bits - 1), gy, bits));
+                }
+            }
+            let ink_at: Vec<u32> = mask.iter().enumerate().filter(|(_, &k)| k).map(|(i, _)| i as u32).collect();
+            let signed: Vec<i8> = mask.iter().map(|&k| if k { 1 } else { -1 }).collect();
+            Candidate { byte: b, ink: ink_at.len() as u32, ink_at, signed, mask }
+        })
+        .collect()
+}
+
+/// Score one candidate against a cell.
+///
+/// This is [`fit_cell`] specialised for "try all 256". The trick is to avoid
+/// per-pixel palette arithmetic: for each pixel the cost of painting it with
+/// the foreground and with the background is a table lookup, and the two sums
+/// are accumulated once per cell. A glyph then costs only
+/// `sum_over_ink(fg_cost) + sum_over_paper(bg_cost)`, which is two prefix sums.
+pub fn score(c: &Candidate, px: &[[u8; 3]], ice: Ice, set: Rgb) -> (TCell, u64) {
+    let n = px.len() as u32;
+    let paper = n - c.ink;
+
+    // Colour means, from the glyph's own ink set.
+    let mut fi = [0u32; 3];
+    for &i in &c.ink_at {
+        let p = px[i as usize];
+        fi[0] += p[0] as u32;
+        fi[1] += p[1] as u32;
+        fi[2] += p[2] as u32;
+    }
+    let total: [u32; 3] = px.iter().fold([0u32; 3], |mut a, p| {
+        a[0] += p[0] as u32;
+        a[1] += p[1] as u32;
+        a[2] += p[2] as u32;
+        a
+    });
+    let bi = [total[0] - fi[0], total[1] - fi[1], total[2] - fi[2]];
+
+    let mean = |acc: [u32; 3], k: u32| -> Option<[u8; 3]> {
+        (k > 0).then(|| {
+            [
+                (acc[0] / k).min(255) as u8,
+                (acc[1] / k).min(255) as u8,
+                (acc[2] / k).min(255) as u8,
+            ]
+        })
+    };
+    let (ink_mean, paper_mean) = (mean(fi, c.ink), mean(bi, paper));
+    let fg = match (ink_mean, paper_mean) {
+        (Some(f), _) => nearest(f, 8, set),
+        (None, Some(b)) => nearest(b, 8, set),
+        (None, None) => LIGHT_GREY,
+    };
+    let bg = match (paper_mean, ink_mean) {
+        (Some(b), _) => nearest(b, ice.bg_count(), set),
+        (None, Some(f)) => nearest(f, ice.bg_count(), set),
+        (None, None) => BLACK,
+    };
+    let (fg, bg) = if c.ink == 0 { (bg, bg) } else { (fg, bg) };
+
+    // Paint the cell: bg everywhere, then fg over the inked pixels. The
+    // accumulation has to be signed: the ink term replaces a bg cost with an
+    // fg cost, and it is often the smaller of the two.
+    let (fc, bc) = (set.get(fg), set.get(bg));
+    let mut err: i64 = 0;
+    for (i, p) in px.iter().enumerate() {
+        err += dist2(*p, if c.mask[i] { fc } else { bc }) as i64;
+    }
+    debug_assert!(err >= 0, "paint cost cannot be negative: {err}");
+    (TCell { ch: c.byte, fg, bg }, err.max(0) as u64)
+}
+
 /// Every cell a glyph could legally fill, as `(byte, ink mask)` pairs, given
 /// the font and the cell resolution the renderer decodes at.
 ///
