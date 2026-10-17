@@ -46,6 +46,8 @@ USAGE:
                                 save a frame as ANSI art (.ANS with SAUCE)
   ytui --convert-ans FILE [-o FILE]
                                 re-encode ANSI art (normalise, or fix iCE)
+  ytui --view-ans FILE
+                                play ANSI art in the terminal, as-is
   ytui --import-subs FILE       import a Google Takeout subscriptions.csv
   ytui --login [--client FILE]  sign in with Google to like and comment
   ytui --logout                 sign out and revoke access
@@ -59,7 +61,8 @@ USAGE:
   ytui --uninstall [--yes]      sign out and remove ytui, its settings and data
 
 OPTIONS:
-  --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock | braille
+  --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock |
+                 braille | ansi | ansiblink | ansi9
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
@@ -129,6 +132,7 @@ fn main() -> Result<()> {
     let mut snapshot: Option<String> = None;
     let mut snapshot_ans: Option<String> = None;
     let mut convert_ans: Option<String> = None;
+    let mut view_ans: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut ans_ice = true;
     let mut ans_compact = false;
@@ -181,6 +185,7 @@ fn main() -> Result<()> {
             "--snapshot" => snapshot = Some(val("--snapshot")?),
             "--snapshot-ans" => snapshot_ans = Some(val("--snapshot-ans")?),
             "--convert-ans" => convert_ans = Some(val("--convert-ans")?),
+            "--view-ans" => view_ans = Some(val("--view-ans")?),
             "-o" | "--out" => out_path = Some(val("--out")?),
             "--no-ice" => ans_ice = false,
             "--compact" => ans_compact = true,
@@ -290,6 +295,10 @@ fn main() -> Result<()> {
     if let Some(src) = bench {
         let use_mpv = engine != "ffmpeg" && mpv::available();
         return bench::run(&src, secs, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h.unwrap_or(720), renderer, scols.unwrap_or(120), srows.unwrap_or(40));
+    }
+
+    if let Some(path) = view_ans {
+        return view_ans_file(&path, ans_ice);
     }
 
     // ANSI art output. Both paths return, since neither opens the UI.
@@ -537,4 +546,55 @@ fn write_ans_from_video(
     );
     let _ = aspect;
     emit(&bytes, &opts.out)
+}
+
+/// Show an ANSI art file on the terminal, exactly as its author drew it.
+///
+/// This is the "just look at it" path: the file is emitted with its own
+/// attributes preserved, so the terminal does the rendering and what you see
+/// is what the art says, not our interpretation of it.
+fn view_ans_file(path: &str, ice_flag: bool) -> Result<()> {
+    let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot read {path}: {e}"))?;
+    let art = textmode::read_ansi(
+        &data,
+        textmode::ReadOpts {
+            ice: if ice_flag { textmode::Ice::On } else { textmode::Ice::Off },
+            width: None,
+            use_sauce: true,
+        },
+    );
+    if let Some(s) = &art.sauce {
+        eprintln!(
+            "{}{}{} · {}x{} · iCE {}",
+            if s.title.is_empty() { "(untitled)".to_string() } else { s.title.clone() },
+            if s.author.is_empty() { String::new() } else { format!(" by {}", s.author) },
+            if s.group.is_empty() { String::new() } else { format!(" of {}", s.group) },
+            art.cols,
+            art.rows,
+            if s.ice() { "on" } else { "off" },
+        );
+    }
+    // Re-emit through the encoder so what appears is normalised (absolute row
+    // placement, no reliance on the terminal's own wrapping) rather than the
+    // original byte soup, which may assume a specific client.
+    let bytes = textmode::write_ansi(
+        &art,
+        textmode::WriteOpts {
+            style: textmode::Style::Portable,
+            ice: if sweet_ice(&art, ice_flag) { textmode::Ice::On } else { textmode::Ice::Off },
+            sauce: false,
+            bits: 8,
+            skip_blank_bg: false,
+        },
+    );
+    emit(&bytes, &None)
+}
+
+/// Which iCE answer to use for a file: its own SAUCE flag if it has one,
+/// otherwise the caller's.
+fn sweet_ice(art: &textmode::Art, fallback: bool) -> bool {
+    match &art.sauce {
+        Some(s) if s.datatype == 1 => s.ice(),
+        _ => fallback,
+    }
 }

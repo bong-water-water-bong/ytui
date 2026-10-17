@@ -240,6 +240,13 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 | `quadrant` | 2×2 two-colour mosaic |
 | `halfblock` | Top/bottom half blocks |
 | `braille` | 2×4 dot mosaic |
+| `ansi` | Real text-mode art: CP437 glyphs from the IBM 8×16 ROM font on the 16-colour DOS palette, with iCE colours (8 foregrounds × 16 backgrounds) |
+| `ansiblink` | As `ansi`, but backgrounds limited to the 8 that do not blink (iCE off) |
+| `ansi9` | As `ansi` at 9 dots per cell: the extra column makes block characters and box rules join without a seam, as a VGA screen drew them |
+
+The three `ansi` modes are the slow ones — they fit every CP437 glyph for every cell (~30 ms per
+frame at 120×40), so they suit stills and the exporter better than live video. The mosaic modes
+remain the fast choice. See [ANSI art](#ansi-art) below.
 
 **Auto-exposure** (on by default, `E` toggles) lifts under-exposed video so dark scenes stay
 readable: it measures each frame's 1st–99th percentile brightness, raises the highlights to white
@@ -252,6 +259,37 @@ The ASCII modes match glyph *shape*, not just brightness, following the techniqu
 rasterised from a real monospace font and described by its ink coverage in six staggered sampling
 circles; image cells are sampled the same way, with directional and global contrast enhancement,
 and the nearest glyph wins.
+
+## ANSI art
+
+ytui speaks the format the BBS art scene has used since 1990: 80×25 text mode, code page 437, and
+the 16-colour attribute byte.
+
+```
+ytui --view-ans art.ans                  show art in the terminal
+ytui --snapshot-ans VIDEO -o art.ans     save a video frame as ANSI art
+ytui --convert-ans art.ans -o out.ans    re-encode existing art
+```
+
+Options for the writer: `--no-ice` (read the background high bit as blink, 8 backgrounds),
+`--compact` (CR/LF rows instead of absolute cursor moves — smaller, but clients that wrap at
+column 80 will band it), and `--bits 9` (the 9th-dot rule).
+
+The interesting details, all of which took a wrong turn first:
+
+* **`ESC[1m` is not bold.** It sets the foreground's high bit, and it brightens the colour *already
+  set*, not just the next one. Art writes a bare `ESC[1m` after a colour to make it bright, so
+  treating it as a font weight leaves the whole picture a shade too dark.
+* **`ESC[5m` is not blink.** It sets the background's high bit, and whether that is a colour at all
+  depends on the iCE convention, which is a *reading* choice rather than something the file records.
+* **The DOS and ANSI colour orders disagree.** Attribute 1 is blue, but `ESC[31m` is red.
+* **Bright has to be spelled `ESC[1;3Xm`, not `ESC[9Xm`.** AnsiLove, the reference renderer,
+  does not implement the 90–97 range at all.
+* **A foreground escape must not start with `ESC[0m`** — that resets the background too.
+
+The engine is conformance-tested against [AnsiLove/C](https://www.ansilove.org): its own
+`bs-alove.ans` fixture renders **pixel for pixel identically** (604 160 pixels, zero differences),
+and so does our re-encoding of it rendered by AnsiLove. Both tests ship in the repo.
 
 ## Keys
 

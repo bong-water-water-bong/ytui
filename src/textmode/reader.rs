@@ -991,3 +991,37 @@ mod encode_conformance {
         assert_eq!(differing, 0, "{differing} of {} pixels differ", w * h);
     }
 }
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+    use super::super::writer::{write_ansi, Style, WriteOpts};
+
+    const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/bs-alove.ans");
+
+    /// What `--view-ans` emits must render identically to the original. The
+    /// viewer normalises the stream (absolute row placement) and drops the
+    /// SAUCE record, so the bytes differ while the picture must not.
+    #[test]
+    fn normalised_output_preserves_the_picture() {
+        let art = read_ansi(FIXTURE, ReadOpts::default());
+        let ice = art.sauce.as_ref().map(|s| s.ice()).unwrap_or(true);
+        let bytes = write_ansi(
+            &art,
+            WriteOpts {
+                style: Style::Portable,
+                ice: if ice { Ice::On } else { Ice::Off },
+                sauce: false,
+                bits: 8,
+                skip_blank_bg: false,
+            },
+        );
+        assert!(parse_sauce(&bytes).is_none(), "the viewer drops SAUCE");
+        let back = read_ansi(&bytes, ReadOpts { width: Some(art.cols), ..Default::default() });
+
+        let before = super::super::palette::rasterise(&art.cells, art.cols, art.rows, Rgb::Vga, 8);
+        let after = super::super::palette::rasterise(&back.cells, back.cols, back.rows, Rgb::Vga, 8);
+        assert_eq!(before.len(), after.len(), "geometry changed");
+        assert_eq!(before, after, "the normalised stream draws a different picture");
+    }
+}

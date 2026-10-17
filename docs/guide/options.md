@@ -13,6 +13,9 @@ description: All ytui command-line options and environment variables, for render
 | `ytui QUERY...` | Open a search |
 | `ytui URL` | Open a video, playlist or channel URL |
 | `ytui --snapshot SRC [--at SECONDS] [--cols N --rows N]` | Print one rendered frame of a URL or file, then exit |
+| `ytui --view-ans FILE` | Show ANSI art in the terminal |
+| `ytui --snapshot-ans SRC [-o FILE]` | Save a video frame as ANSI art (`.ANS` with SAUCE) |
+| `ytui --convert-ans FILE [-o FILE]` | Re-encode ANSI art |
 | `ytui --import-subs FILE` | Import a Google Takeout `subscriptions.csv` |
 | `ytui --signin` | Sign in for playback when YouTube asks you to confirm you're not a bot |
 | `ytui --signout-cookies` | Forget the playback sign-in |
@@ -27,7 +30,11 @@ description: All ytui command-line options and environment variables, for render
 
 | Option | What it does |
 |---|---|
-| `--mode M` | Render mode: `glow`, `art`, `ascii`, `classic`, `sextant`, `quadrant`, `halfblock` or `braille` |
+| `--mode M` | Render mode: `glow`, `art`, `ascii`, `classic`, `sextant`, `quadrant`, `halfblock`, `braille`, `ansi`, `ansiblink` or `ansi9` |
+| `-o FILE`, `--out FILE` | Output path for `--snapshot-ans` and `--convert-ans` |
+| `--no-ice` | Write ANSI art with the background high bit as blink (8 backgrounds) instead of iCE colours (16) |
+| `--compact` | Write CR/LF-separated rows instead of absolute cursor moves: smaller files, but clients that wrap at column 80 will band them |
+| `--bits N` | Cell width in dots when writing ANSI art: `8` or `9` |
 | `--audio A` | Audio output: `auto`, `pulse`, `alsa`, `ffplay` or `none`. Off by default over SSH. |
 | `--engine E` | Playback engine: `auto`, `mpv` or `ffmpeg`. `auto` uses libmpv when it's found. |
 | `--no-native` | Never use the native video window (Windows) |
