@@ -1,6 +1,6 @@
 ---
 title: Keys
-description: Every ytui keyboard shortcut for browsing, playback, volume, captions and render modes.
+description: Every ytui keyboard shortcut for browsing, playback, volume, captions and the picture.
 ---
 
 Press `?` in ytui to see these at any time. The mouse works too: click anything, scroll with the wheel, and click
@@ -31,7 +31,7 @@ the progress bar to seek.
 | `<` `>` | Seek back or forward 60 seconds |
 | `0`–`9` | Jump to 0%–90% of the video |
 | `+` `-` `M` | Volume up, down, mute |
-| `S` | Captions: off, then each track |
+| `S` | Captions: your language first, then each track, then off |
 | `n` `a` `x` | Next video, autoplay on or off, close the player |
 | `C` `I` | Show or hide live chat, send a chat message |
 
@@ -39,9 +39,6 @@ the progress bar to seek.
 
 | Key | What it does |
 |---|---|
-| `m` | Switch the render mode (braille or glow) |
-| `o` | Look panel: mode, brightness, saturation, background, contrast, auto-exposure |
-| `[` `]` | Contrast down, up |
 | `E` | Auto-exposure on or off |
 
 ## Writing comments and chat

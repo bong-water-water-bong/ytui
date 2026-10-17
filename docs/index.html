@@ -7,7 +7,7 @@ layout: null
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ytui: watch YouTube in the terminal (TUI client for Windows, Linux, macOS)</title>
-<meta name="description" content="ytui is a free, open-source terminal YouTube client. Search and watch YouTube in your terminal as 24-bit colour braille or glow ASCII, at 60 fps. Windows, Linux and macOS.">
+<meta name="description" content="ytui is a free, open-source terminal YouTube client. Search and watch YouTube in your terminal as 24-bit colour half blocks, at 60 fps. Windows, Linux and macOS.">
 <link rel="canonical" href="https://bong-water-water-bong.github.io/ytui/">
 <meta name="theme-color" content="#e8eaee" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
@@ -15,7 +15,7 @@ layout: null
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="ytui">
 <meta property="og:title" content="ytui: watch YouTube in the terminal">
-<meta property="og:description" content="A terminal YouTube client. Play video as 24-bit colour braille or glow ASCII at 60 fps, on Windows, Linux and macOS.">
+<meta property="og:description" content="A terminal YouTube client. Play video as 24-bit colour half blocks at 60 fps, on Windows, Linux and macOS.">
 <meta property="og:url" content="https://bong-water-water-bong.github.io/ytui/">
 <meta property="og:image" content="https://bong-water-water-bong.github.io/ytui/social-preview.jpg">
 <meta property="og:image:width" content="1280">
@@ -33,7 +33,7 @@ layout: null
   "@type": "SoftwareApplication",
   "name": "ytui",
   "alternateName": "YouTube TUI",
-  "description": "A terminal YouTube client: search, browse and watch YouTube in the terminal as 24-bit colour braille or glow ASCII, at up to 60 fps.",
+  "description": "A terminal YouTube client: search, browse and watch YouTube in the terminal as 24-bit colour half blocks, at up to 60 fps.",
   "applicationCategory": "MultimediaApplication",
   "applicationSubCategory": "Video player",
   "operatingSystem": "Windows 10, Windows 11, Linux, macOS",
@@ -44,9 +44,8 @@ layout: null
   "image": "https://bong-water-water-bong.github.io/ytui/screenshots/home.jpg",
   "screenshot": [
     "https://bong-water-water-bong.github.io/ytui/screenshots/home.jpg",
-    "https://bong-water-water-bong.github.io/ytui/screenshots/glow.jpg",
-    "https://bong-water-water-bong.github.io/ytui/screenshots/braille.jpg",
-    "https://bong-water-water-bong.github.io/ytui/screenshots/look-panel.jpg"
+    "https://bong-water-water-bong.github.io/ytui/screenshots/halfblock.jpg",
+    "https://bong-water-water-bong.github.io/ytui/screenshots/captions.jpg"
   ],
   "softwareVersion": "2026.10.17",
   "datePublished": "2026-10-16",
@@ -54,7 +53,7 @@ layout: null
   "programmingLanguage": "Rust",
   "isAccessibleForFree": true,
   "featureList": [
-    "Watch YouTube in the terminal as 24-bit colour braille or glow ASCII",
+    "Watch YouTube in the terminal as 24-bit colour half blocks",
     "60 fps playback through ffmpeg",
     "Home, Trending, search, channels, playlists, comments and live chat",
     "Captions, autoplay, tabs and watch later",
@@ -108,7 +107,7 @@ layout: null
     {
       "@type": "Question",
       "name": "How is ytui different from ytfzf or youtube-tui?",
-      "acceptedAnswer": { "@type": "Answer", "text": "ytfzf and youtube-tui help you find a video in the terminal and then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as 24-bit colour braille or glow ASCII, in a YouTube-style interface with Home, channels, comments and live chat." }
+      "acceptedAnswer": { "@type": "Answer", "text": "ytfzf and youtube-tui help you find a video in the terminal and then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as 24-bit colour half blocks, in a YouTube-style interface with Home, channels, comments and live chat." }
     },
     {
       "@type": "Question",
@@ -128,7 +127,7 @@ layout: null
   <nav aria-label="Sections">
     <a href="guide/">Docs</a>
     <a href="#install">Install</a>
-    <a href="#modes">Render modes</a>
+    <a href="#video">Video</a>
     <a href="#features">Features</a>
     <a href="#faq">FAQ</a>
     <a href="https://github.com/bong-water-water-bong/ytui">GitHub</a>
@@ -138,7 +137,7 @@ layout: null
 <main>
   <div class="wrap hero">
     <h1>Watch YouTube in the terminal</h1>
-    <p class="lede">ytui is a free, open-source YouTube client for your terminal. You can search, browse Home and Trending, and play videos as 24-bit colour braille or glow ASCII at up to 60 fps. It runs on Windows, Linux and macOS, with no browser and no API key.</p>
+    <p class="lede">ytui is a free, open-source YouTube client for your terminal. You can search, browse Home and Trending, and play videos as 24-bit colour half blocks at up to 60 fps. It runs on Windows, Linux and macOS, with no browser and no API key.</p>
     <div class="actions">
       <a class="btn" href="https://github.com/bong-water-water-bong/ytui/releases/latest">Download ytui</a>
       <a class="alt" href="guide/">Read the docs</a>
@@ -174,22 +173,18 @@ layout: null
     </div>
   </section>
 
-  <section id="modes" aria-labelledby="modes-h">
+  <section id="video" aria-labelledby="video-h">
     <div class="wrap">
-      <h2 id="modes-h">Pick how video looks</h2>
-      <p class="sub">Two modes, both in 24-bit colour. Press <kbd>m</kbd> to switch between them and <kbd>o</kbd> to tune the picture. Glow is translated from <a href="https://github.com/LucasHJin/react-video-ascii">react-video-ascii</a> by Lucas Jin.</p>
+      <h2 id="video-h">Video in the terminal</h2>
+      <p class="sub">Each cell is a truecolour half block: two pixels, one above the other. ytui sends only the cells that changed and sizes each frame to what your terminal can keep up with, so fast motion gets slightly coarser instead of dropping frames. <a href="guide/render-modes/">How it works</a>.</p>
       <div class="gallery">
         <figure>
-          <div class="frame"><img src="screenshots/glow.jpg" srcset="screenshots/glow-800.jpg 800w, screenshots/glow.jpg 1590w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1590" height="945" loading="lazy" alt="Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen"></div>
-          <figcaption><strong>Glow.</strong> The default. Shape-matched ASCII in boosted colour over a dimmed copy of the picture.</figcaption>
+          <div class="frame"><img src="screenshots/halfblock.jpg" srcset="screenshots/halfblock-800.jpg 800w, screenshots/halfblock.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom"></div>
+          <figcaption><strong>Half blocks.</strong> Fullscreen and paused, with the player bar at the bottom.</figcaption>
         </figure>
         <figure>
-          <div class="frame"><img src="screenshots/braille.jpg" srcset="screenshots/braille-800.jpg 800w, screenshots/braille.jpg 1590w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1590" height="945" loading="lazy" alt="Big Buck Bunny leaping at a butterfly, drawn in braille mode, fullscreen, with the player bar at the bottom"></div>
-          <figcaption><strong>Braille.</strong> 2×4 dots in boosted colour over a dimmed copy of the picture.</figcaption>
-        </figure>
-        <figure>
-          <div class="frame"><img src="screenshots/look-panel.jpg" srcset="screenshots/look-panel-800.jpg 800w, screenshots/look-panel.jpg 1590w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1590" height="945" loading="lazy" alt="The look panel open over glow-mode video, with Mode, Brightness, Saturation, Background, Contrast and Auto-exposure"></div>
-          <figcaption><strong>Look panel.</strong> Adjust the mode, brightness, saturation, background, contrast and auto-exposure. Your settings are kept between runs.</figcaption>
+          <div class="frame"><img src="screenshots/captions.jpg" srcset="screenshots/captions-800.jpg 800w, screenshots/captions.jpg 1580w" decoding="async" sizes="(max-width: 860px) calc(100vw - 46px), 570px" width="1580" height="945" loading="lazy" alt="Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box"></div>
+          <figcaption><strong>Captions.</strong> Bold white text in a solid black box. The first press of <kbd>S</kbd> picks your system language.</figcaption>
         </figure>
       </div>
     </div>
@@ -202,7 +197,7 @@ layout: null
         <div><dt>Home, Trending and categories</dt><dd>Music, Gaming, News, Live, Sports, Learning, Podcasts and Movies, as a thumbnail grid you can click.</dd></div>
         <div><dt>Search, channels and playlists</dt><dd>Press <kbd>/</kbd> to search or paste a URL. Open channels, playlists, comments and live chat.</dd></div>
         <div><dt>60 fps playback through ffmpeg</dt><dd>Streams up to 720p by default, the lowest height YouTube serves at 60 fps.</dd></div>
-        <div><dt>Captions</dt><dd>Press <kbd>S</kbd> to cycle caption tracks. ytui draws them as text over the video, and your language choice is remembered for later videos.</dd></div>
+        <div><dt>Captions</dt><dd>Press <kbd>S</kbd> for captions in your system language, then again to go through the other tracks. ytui draws them in a black box over the video, and your language choice is remembered for later videos.</dd></div>
         <div><dt>Optional Google sign-in</dt><dd>See your recommendations, subscriptions and playlists, and like and comment. Signing in also keeps videos playing when YouTube asks you to "confirm you're not a bot".</dd></div>
         <div><dt>Works over SSH and in tmux</dt><dd>ytui runs in any truecolour terminal. Inside tmux without truecolour, it tells you the one line to add to <code>~/.tmux.conf</code>.</dd></div>
       </dl>
@@ -219,7 +214,7 @@ layout: null
           <tr><th><kbd>space</kbd> <kbd>f</kbd></th><td>Pause, fullscreen</td></tr>
           <tr><th><kbd>,</kbd> <kbd>.</kbd> and <kbd>0</kbd>–<kbd>9</kbd></th><td>Seek 10 seconds, or jump to a point</td></tr>
           <tr><th><kbd>+</kbd> <kbd>-</kbd> <kbd>M</kbd></th><td>Volume up, down, mute</td></tr>
-          <tr><th><kbd>m</kbd> <kbd>o</kbd></th><td>Switch render mode, open the look panel</td></tr>
+          <tr><th><kbd>S</kbd> <kbd>E</kbd></th><td>Captions, auto-exposure</td></tr>
           <tr><th><kbd>?</kbd> <kbd>q</kbd></th><td>Help, quit</td></tr>
         </tbody>
       </table>
@@ -252,7 +247,7 @@ layout: null
         </details>
         <details>
           <summary>How is ytui different from ytfzf or youtube-tui?</summary>
-          <p>ytfzf and youtube-tui help you find a video in the terminal, then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as 24-bit colour braille or glow ASCII, in a YouTube-style interface with Home, channels, comments and live chat. See <a href="guide/alternatives/">terminal YouTube clients compared</a>.</p>
+          <p>ytfzf and youtube-tui help you find a video in the terminal, then usually hand it to mpv in a separate window. ytui plays the video inside the terminal itself, as 24-bit colour half blocks, in a YouTube-style interface with Home, channels, comments and live chat. See <a href="guide/alternatives/">terminal YouTube clients compared</a>.</p>
         </details>
         <details>
           <summary>Is ytui free?</summary>
@@ -265,8 +260,8 @@ layout: null
 
 <footer>
   <div class="wrap">
-    <p>ytui is MIT licensed. <a href="https://github.com/bong-water-water-bong/ytui">Source on GitHub</a>. Glow and braille are translated from <a href="https://github.com/LucasHJin/react-video-ascii">react-video-ascii</a> by Lucas Jin (MIT, <a href="https://video-ascii-demo.vercel.app/">demo</a>); see <a href="https://github.com/bong-water-water-bong/ytui/blob/main/NOTICE">NOTICE</a>.</p>
-    <p>Video screenshots show <a href="https://peach.blender.org/">Big Buck Bunny</a>, © Blender Foundation, licensed CC BY 3.0. ytui is not affiliated with YouTube or Google.</p>
+    <p>ytui is MIT licensed. <a href="https://github.com/bong-water-water-bong/ytui">Source on GitHub</a>.</p>
+    <p>The half-block screenshot shows <a href="https://peach.blender.org/">Big Buck Bunny</a>, © Blender Foundation, licensed CC BY 3.0. The captions screenshot shows <a href="https://durian.blender.org/">Sintel</a>, © Blender Foundation, licensed CC BY 3.0. ytui is not affiliated with YouTube or Google.</p>
   </div>
 </footer>
 </body>

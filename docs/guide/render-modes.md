@@ -1,61 +1,31 @@
 ---
-title: Render modes
-description: Play YouTube in the terminal as 24-bit colour braille or glow ASCII, and tune the picture with the look panel and auto-exposure.
+title: Video in the terminal
+description: How ytui draws YouTube in the terminal as truecolour half blocks, why playback stays smooth, and what auto-exposure does.
 ---
 
-ytui has two render modes, both in 24-bit colour. Press `m` to switch between them, or start with
-`--mode`. Your choice is saved.
+ytui draws video as truecolour half blocks. Each terminal cell is the character `▀`: its
+foreground colour is the top pixel and its background colour is the bottom pixel, so every cell
+shows two pixels, one above the other. ffmpeg decodes each frame at exactly the size of the cell
+grid, `cols × 2*rows` pixels, so nothing is scaled again in the terminal.
 
-| Mode | What it looks like |
-|---|---|
-| `glow` | The default. Shape-matched ASCII in boosted colour over a dimmed copy of the picture. |
-| `braille` | 2×4 braille dots in boosted colour over a dimmed copy of the picture. |
+Thumbnails, avatars and banners are drawn the same way.
 
-Thumbnails, avatars and banners are drawn as half blocks.
+![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
 
-## Glow
+## Why it stays smooth
 
-Glow is translated from [react-video-ascii](https://github.com/LucasHJin/react-video-ascii) by
-Lucas Jin (MIT). You can try the original in its [live demo](https://video-ascii-demo.vercel.app/).
-ytui uses the demo's settings and picks the same characters it does. The licence and details are in
-[NOTICE](https://github.com/bong-water-water-bong/ytui/blob/main/NOTICE).
+The frame rate is limited by how many bytes the terminal can parse, not by drawing. So ytui sends
+as little as it can:
 
-For each cell of the picture:
+- **Only cells that changed are sent.** A cell keeps its colour until the picture there moves past
+  a small tolerance.
+- **Each frame fits a byte budget** based on the terminal's measured speed. After each big frame,
+  ytui asks the terminal for the cursor position. The terminal can only answer once it has
+  processed the frame. Until it answers, a newer frame replaces the waiting one instead of queueing
+  behind it.
 
-- ytui samples the brightness in six circles.
-- It raises each sample by a shape exponent, which sharpens edges. This is **Contrast** in the look panel, 2.0 by default.
-- It picks the character from the demo's character set whose shape is nearest.
-- It grades the colour in HSL, by **Brightness** and **Saturation** (both 1.25 by default).
-- It draws the character in that colour over the same colour times **Background** (0.30 by default).
-
-The character shapes are the table the demo computes for itself (DejaVu Sans Mono at its default
-size), built into ytui, so the same picture gives the same characters on every system.
-
-![Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen]({{ '/screenshots/glow.jpg' | relative_url }})
-
-## Braille
-
-Braille is ytui's own extension of the glow look, on 2×4 braille dots. Each dot's brightness goes
-through the same shape step, then an ordered-dither threshold. So brighter cells light more dots,
-and the dots follow edges. Lit dots take the colour of their part of the cell. The ground takes the
-rest, dimmed by Background.
-
-![Big Buck Bunny leaping at a butterfly, drawn in braille mode, fullscreen, with the player bar at the bottom]({{ '/screenshots/braille.jpg' | relative_url }})
-
-## The look panel
-
-Press `o` to open the look panel in the top right. It has:
-
-- **Mode:** braille or glow.
-- **Brightness and saturation:** the HSL colour grade.
-- **Background:** how bright the dimmed picture behind the characters or dots is.
-- **Contrast:** the shape exponent. `[` and `]` change it without opening the panel.
-- **Auto-exposure:** on or off.
-
-Use the arrow keys or `hjkl` to choose a row and change it, or click and drag the sliders. Your
-settings are kept between runs. Press `o` or `Esc` to close the panel.
-
-![The look panel open over glow-mode video, with Mode, Brightness, Saturation, Background, Contrast and Auto-exposure]({{ '/screenshots/look-panel.jpg' | relative_url }})
+Still or slow pictures are sent exactly. Fast motion gets slightly coarser instead of dropping
+frames. On a maximized GNOME Ptyxis (VTE) window, ytui holds 54–62 fps on 60 fps video.
 
 ## Auto-exposure
 

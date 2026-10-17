@@ -11,7 +11,7 @@ description: Browse YouTube in the terminal with tabs, search, channels, playlis
 ytui                          # opens Home
 ytui lofi hip hop             # opens a search
 ytui https://youtube.com/…    # opens a video, playlist or channel URL (also @handle)
-ytui --mode glow --audio pulse
+ytui --fullscreen --audio pulse
 ytui --import-subs subscriptions.csv    # import a Google Takeout export
 ytui --snapshot SRC --at 30   # print one rendered frame and exit
 ```

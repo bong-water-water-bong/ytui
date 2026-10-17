@@ -1,6 +1,6 @@
 ---
 title: Command-line options
-description: All ytui command-line options and environment variables, for render modes, audio, stream quality and cookies.
+description: All ytui command-line options and environment variables, for audio, stream quality and cookies.
 ---
 
 `ytui --help` prints this list.
@@ -26,7 +26,6 @@ description: All ytui command-line options and environment variables, for render
 
 | Option | What it does |
 |---|---|
-| `--mode M` | Render mode: `glow` (the default) or `braille` |
 | `--audio A` | Audio output: `auto`, `pulse`, `alsa`, `ffplay` or `none`. `auto` uses PulseAudio when it's there and `ffplay` on Windows. Off by default over SSH. |
 | `--fullscreen` | Start the player fullscreen |
 | `--fps N` | Maximum frame rate (default 60) |

@@ -2653,7 +2653,7 @@ impl App {
                         continue;
                     }
                     let pw = (*pw).min(w.saturating_sub(*x));
-                    fill(buf, r, r.x + x, sy, pw, *h, Color::Black);
+                    fill(buf, r, r.x + x, sy, pw, *h, Color::Rgb(0, 0, 0));
                     let mine = self.player.as_mut().filter(|p| &p.video.id == id);
                     match mine {
                         Some(p) => {
@@ -2741,7 +2741,7 @@ impl App {
         }
         let r = Rect { x: pr.x + pr.width - mw - 1, y: pr.y + pr.height - h, width: mw, height: h };
         fill(buf, pr, r.x.saturating_sub(1).max(pr.x), (r.y - pr.y) as i64, mw + 1, h, Color::Rgb(20, 20, 24));
-        fill(buf, r, r.x, 0, mw, vh, Color::Black);
+        fill(buf, r, r.x, 0, mw, vh, Color::Rgb(0, 0, 0));
         if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
@@ -2772,7 +2772,7 @@ impl App {
 
     fn draw_fullscreen(&mut self, buf: &mut Buffer, area: Rect) {
         let Some(p) = &mut self.player else { return };
-        buf.set_style(area, Style::default().bg(Color::Black));
+        buf.set_style(area, Style::default().bg(Color::Rgb(0, 0, 0)));
         let vh = area.height - 1;
         let side = self.store.show_chat && self.chat.as_ref().is_some_and(|c| c.video == p.video.id) && area.width >= 100;
         let vw = if side { area.width - 44 } else { area.width };
