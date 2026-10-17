@@ -131,6 +131,11 @@ fn tmux_wrap(seq: &[u8]) -> Vec<u8> {
 pub fn detect() -> Caps {
     let mut caps = Caps { tmux: std::env::var("TMUX").is_ok(), ..Default::default() };
     caps.cell = crate::sys::cell_px();
+    if caps.tmux {
+        caps.passthrough = tmux_query("#{allow-passthrough}").or_else(|| {
+            std::process::Command::new("tmux").args(["show", "-gv", "allow-passthrough"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        }).is_some_and(|v| v == "on" || v == "all");
+    }
     let mut q = Vec::new();
     let kitty_q = b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\";
     if caps.tmux {
@@ -139,7 +144,15 @@ pub fn detect() -> Caps {
         q.extend_from_slice(kitty_q);
     }
     q.extend_from_slice(b"[>0q[16t[c");
-    let got = crate::sys::query_tty(&q, |b| da1_end(b).is_some(), 700);
+    // tmux answers DA1 itself at once, before the outer terminal's kitty
+    // reply has made it back through passthrough. Ask the outer terminal
+    // for DA1 too: it answers in order, so its DA1 comes after its kitty
+    // reply, and two DA1s mean everything is in.
+    let outer = caps.tmux && caps.passthrough;
+    if outer {
+        q.extend(tmux_wrap(b"[c"));
+    }
+    let got = crate::sys::query_tty(&q, |b| if outer { da1_count(b) >= 2 } else { da1_end(b).is_some() }, 700);
     let s = String::from_utf8_lossy(&got).to_string();
     if caps.tmux {
         // tmux answers DA1 itself; ask it what the real (outer) terminal can do.
@@ -152,9 +165,6 @@ pub fn detect() -> Caps {
                 caps.cell = Some((w, h));
             }
         }
-        caps.passthrough = tmux_query("#{allow-passthrough}").or_else(|| {
-            std::process::Command::new("tmux").args(["show", "-gv", "allow-passthrough"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        }).is_some_and(|v| v == "on" || v == "all");
     }
     caps.kitty = s.contains("\x1b_Gi=31;OK");
     if !caps.tmux {
@@ -185,6 +195,17 @@ pub fn detect() -> Caps {
 }
 
 /// Byte range of the DA1 parameters ("\e[?" .. "c"), if present.
+/// How many complete DA1 replies are in `b`.
+fn da1_count(b: &[u8]) -> usize {
+    let mut n = 0;
+    let mut at = 0;
+    while let Some((_, end)) = da1_end(&b[at..]) {
+        n += 1;
+        at += end + 1;
+    }
+    n
+}
+
 fn da1_end(b: &[u8]) -> Option<(usize, usize)> {
     let s = b.windows(3).position(|w| w == b"\x1b[?")?;
     let start = s + 3;
