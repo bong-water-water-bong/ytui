@@ -2,7 +2,7 @@
 
 **ytui** is a terminal YouTube client (TUI) for Windows, Linux and macOS. Search YouTube, browse
 Home and Trending, and watch videos right in your terminal. Video is drawn as 24-bit colour
-braille dots or glow ASCII, at up to 60 fps. You don't need a browser or a YouTube API key. It's
+half blocks, at up to 60 fps. You don't need a browser or a YouTube API key. It's
 one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 
 **[Download the latest release](https://github.com/bong-water-water-bong/ytui/releases/latest)** for Windows, Linux or macOS · **[Website and docs](https://bong-water-water-bong.github.io/ytui/)**
@@ -10,20 +10,17 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 ![ytui's Home page, signed out, showing the Trending feed as a grid of half-block thumbnails](docs/screenshots/home.jpg)
 *Home, signed out: the Trending feed, with thumbnails drawn as half blocks.*
 
-![Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen](docs/screenshots/glow.jpg)
-*Glow mode (the default), fullscreen: shape-matched ASCII in boosted colour over a dimmed copy of the picture, as in the react-video-ascii demo.*
+![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom](docs/screenshots/halfblock.jpg)
+*Fullscreen and paused: each cell is a `▀` half block, two pixels in 24-bit colour.*
 
-![Big Buck Bunny leaping at a butterfly, drawn in braille mode, fullscreen, with the player bar at the bottom](docs/screenshots/braille.jpg)
-*Braille mode, fullscreen: 2×4 dots in boosted colour over a dimmed copy of the picture.*
+![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box](docs/screenshots/captions.jpg)
+*Captions (`S`): bold white text in a solid black box, in your system language.*
 
-![The look panel open over glow-mode video, with Mode, Brightness, Saturation, Background, Contrast and Auto-exposure](docs/screenshots/look-panel.jpg)
-*The look panel (`o`): mode, brightness, saturation, background, contrast and auto-exposure, kept between runs.*
-
-<sub>Video screenshots show [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
+<sub>The half-block screenshot shows [Big Buck Bunny](https://peach.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The captions screenshot shows [Sintel](https://durian.blender.org/), © Blender Foundation, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).</sub>
 
 ## Features
 
-- **Watch YouTube in the terminal:** two render modes, braille and glow, both in 24-bit colour.
+- **Watch YouTube in the terminal:** truecolour half blocks, sending only what changed, so playback stays smooth.
 - **60 fps playback through ffmpeg:** streams up to 720p, the lowest height YouTube serves at 60 fps.
 - **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more, and a Music link in the sidebar for YouTube's Music channel. Also search, channels, playlists, comments and live chat.
 - **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
@@ -41,7 +38,7 @@ Download the package for your platform from the
 | Linux (x86_64) | `ytui-<version>-linux-x86_64.tar.gz` |
 | macOS (Apple Silicon) | `ytui-<version>-macos-arm64.tar.gz` |
 
-Each package holds `ytui` (or `ytui.exe`), `README.md`, `LICENSE` and `NOTICE`.
+Each package holds `ytui` (or `ytui.exe`), `README.md` and `LICENSE`.
 
 Then install the tools ytui uses:
 
@@ -77,9 +74,11 @@ Every video plays through ffmpeg and is drawn in the terminal. ytui fetches stre
 by default, the lowest height YouTube serves at 60 fps; `--height N` changes that and `--fps N`
 caps the frame rate.
 
-**Captions:** `S` cycles off / each caption track (uploaded first, then auto-generated); the
-language you pick is remembered for later videos. ytui fetches the track's WebVTT file itself and
-draws each cue as text over the video.
+**Captions:** the first press of `S` picks your system language (`LANG`), else English,
+preferring the creator's captions over automatic ones; further presses go through each track, then
+off. The language you pick is remembered for later videos. ytui fetches the track's WebVTT file
+itself and draws each cue as bold white text in a solid black box, with a blank row above and
+below.
 
 YouTube stalls open-ended HTTP range requests after ~800 KB, so ffmpeg reads googlevideo
 streams through a small local relay that fetches them in bounded chunks.
@@ -90,7 +89,7 @@ streams through a small local relay that fetches them in bounded chunks.
 ytui                         # opens Home
 ytui lofi hip hop            # opens a search
 ytui https://youtube.com/…   # opens a video, playlist or channel URL (also @handle)
-ytui --mode glow --audio pulse
+ytui --fullscreen --audio pulse
 ytui --import-subs subscriptions.csv   # Google Takeout export
 ytui --snapshot SRC --at 30  # print one rendered frame
 ```
@@ -163,30 +162,19 @@ While the OAuth app is in *Testing*, Google expires the sign-in after 7 days (ru
 again, or publish the app). The free quota is 10,000 units/day; a like or comment costs 50.
 `ytui --logout` revokes access. `ytui --help-login` prints these steps.
 
-## Render modes (`m` switches)
+## How video is drawn
 
-| Mode | Description |
-|---|---|
-| `glow` | The default. Shape-matched ASCII in boosted colour over a dimmed copy of the picture |
-| `braille` | 2×4 braille dots in boosted colour over a dimmed copy of the picture |
+Each cell is a `▀` half block: the top pixel is the foreground colour and the bottom pixel the
+background, so a cell holds 1×2 pixels in 24-bit colour. ffmpeg decodes each frame at exactly the
+cell grid (`cols × 2*rows` pixels). Thumbnails, avatars and banners are drawn the same way.
 
-Thumbnails, avatars and banners are drawn as half blocks.
-
-**Glow** is translated from [react-video-ascii](https://github.com/LucasHJin/react-video-ascii)
-by Lucas Jin ([demo](https://video-ascii-demo.vercel.app/)) and picks the same characters as the
-demo. For each cell, ytui samples the luma in six circles, applies a shape exponent (Contrast,
-default 2.0) and picks the character from the demo's character set whose shape vector is nearest,
-using the shape table the demo itself computes. The colour is graded in HSL (Brightness and
-Saturation, default 1.25) and drawn over the same colour times Background (default 0.30): the
-demo's settings.
-
-**Braille** is ytui's own extension of the same look, on 2×4 braille dots. Each dot's luma goes
-through the same shape step and an ordered-dither threshold, so brighter cells light more dots and
-the dots follow edges. Lit dots take the colour of their part of the cell, and the ground takes the
-rest, dimmed by Background.
-
-**The look panel** (`o`) has Mode, Brightness, Saturation, Background, Contrast and
-Auto-exposure. `[` and `]` change the contrast without opening it. Settings are kept between runs.
+**Why it's smooth:** the frame rate is limited by how many bytes the terminal can parse, not by
+drawing. ytui sends only cells that changed, and a cell keeps its colour until the picture there
+moves past a small tolerance. Each frame is sized to a byte budget from the terminal's measured
+speed: after each big frame ytui asks the terminal for the cursor position, which it can only
+answer once it has processed the frame, and until it answers, newer frames replace the waiting one
+instead of queueing. Still or slow pictures are sent exactly; fast motion gets slightly coarser
+instead of dropping frames. A maximized GNOME Ptyxis (VTE) window holds 54–62 fps on 60 fps video.
 
 **Auto-exposure** (on by default, `E` toggles) lifts under-exposed video so dark scenes stay
 readable: it measures each frame's 1st–99th percentile brightness, raises the highlights to white
@@ -208,13 +196,10 @@ black don't become noise. `AE` on the player bar shows when it's on.
 | `C` `I` | show / hide live chat, send a chat message |
 | `P` | save the focused / current video to a playlist |
 | `E` | auto-exposure on / off |
-| `S` | captions: off / each track |
+| `S` | captions: your language first, then each track, then off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
-| `m` | switch render mode (braille / glow) |
-| `o` | look panel: mode, brightness, saturation, background, contrast, auto-exposure |
-| `[` `]` | contrast down / up |
 | `?` `q` | help, quit |
 
 Audio goes through PipeWire/PulseAudio (`pw-cat` or `pacat`) or ALSA (`aplay`), or through
@@ -222,13 +207,6 @@ Audio goes through PipeWire/PulseAudio (`pw-cat` or `pacat`) or ALSA (`aplay`), 
 tools, ffmpeg plays the audio directly. Pick the output with `--audio`; it is off by default over
 SSH.
 
-## Credits
-
-The glow and braille renderers are translated from
-[react-video-ascii](https://github.com/LucasHJin/react-video-ascii) by Lucas Jin (MIT;
-[live demo](https://video-ascii-demo.vercel.app/)). Its licence and the details of what was
-translated are in [NOTICE](NOTICE).
-
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party notices are in [NOTICE](NOTICE).
+MIT, see [LICENSE](LICENSE).

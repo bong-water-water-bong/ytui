@@ -1,11 +1,11 @@
 ---
 title: ytui docs
-description: How to install ytui, watch YouTube in your terminal, pick a render mode, and set up sign-in and playback.
+description: How to install ytui, watch YouTube in your terminal, see how video is drawn, and set up sign-in and playback.
 ---
 
 ytui is a YouTube client that runs in your terminal. It works like a browser for YouTube, with
 tabs, an address bar, Home and Trending, search, channels, playlists, comments and live chat. It
-draws video in 24-bit colour, as braille dots or glow ASCII.
+draws video in 24-bit colour, as half blocks.
 
 Browsing uses YouTube's own web API directly, with no API key and no account. yt-dlp is only used to find the
 video streams, and ffmpeg plays them.
@@ -19,7 +19,7 @@ video streams, and ffmpeg plays them.
 ## Find what you need
 
 - [Using ytui](usage/): browsing, tabs, the watch page, live chat, and starting from the command line.
-- [Render modes](render-modes/): braille, glow, the look panel and auto-exposure.
+- [Video in the terminal](render-modes/): how video is drawn, why it stays smooth, and auto-exposure.
 - [Playback and audio](playback/): ffmpeg, captions, audio outputs and volume.
 - [Signing in](sign-in/): getting past YouTube's bot check, and Google sign-in for likes, comments and playlists.
 - [Keys](keys/) and [command-line options](options/).

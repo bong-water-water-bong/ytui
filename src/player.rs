@@ -8,7 +8,7 @@
 //! views is instant. Pause / seek / terminal resize restart ffmpeg.
 
 use crate::api::VideoItem;
-use crate::glyphs::{CH, CW};
+use crate::render::{CH, CW};
 use crate::render::{Cell, Exposure, Img, Renderer};
 use crate::yt::Stream;
 use anyhow::Result;
@@ -442,6 +442,11 @@ impl Player {
         self.stream.duration.unwrap_or(0.0)
     }
 
+    /// Frames per second the decoder delivers (0 when stopped).
+    pub fn frame_rate(&self) -> f64 {
+        self.dec.as_ref().map_or(0.0, |d| d.fps)
+    }
+
     /// A decoder exists but has produced no frame yet.
     pub fn loading(&self) -> bool {
         self.dec.is_some() && self.seen == 0 && !self.ended
@@ -678,6 +683,23 @@ impl Player {
         None
     }
 
+    /// The track to turn on first: the system language (from LANG), else
+    /// English, preferring a creator's track over YouTube's automatic one;
+    /// else the first track.
+    fn first_track(&self) -> usize {
+        let subs = &self.stream.subs;
+        let base = |l: &str| l.split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
+        let sys = std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).map(|l| base(&l)).ok().filter(|l| l.len() == 2 && l != "c");
+        for want in sys.iter().map(String::as_str).chain(["en"]) {
+            for auto in [false, true] {
+                if let Some(i) = subs.iter().position(|t| t.auto == auto && base(&t.lang) == want) {
+                    return i;
+                }
+            }
+        }
+        0
+    }
+
     /// Next caption track (off -> each track -> off). Returns a message for
     /// the status line and the language now preferred (None: off).
     pub fn cycle_captions(&mut self) -> (String, Option<String>) {
@@ -685,7 +707,7 @@ impl Player {
             return ("no captions for this video".into(), self.cc_pref.clone());
         }
         let next = match self.cc {
-            None => Some(0),
+            None => Some(self.first_track()),
             Some(i) if i + 1 < self.stream.subs.len() => Some(i + 1),
             Some(_) => None,
         };

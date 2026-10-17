@@ -1,6 +1,6 @@
 ---
 title: How to watch YouTube in the terminal
-description: A step-by-step guide to watching YouTube in a terminal on Windows, Linux and macOS, over SSH and inside tmux, as 24-bit colour braille or glow ASCII.
+description: A step-by-step guide to watching YouTube in a terminal on Windows, Linux and macOS, over SSH and inside tmux, in 24-bit colour.
 ---
 
 You can search and watch YouTube without leaving your terminal. This guide sets up
@@ -52,12 +52,12 @@ Download `ytui-<version>-macos-arm64.tar.gz` from the
 - You can also start straight from your shell: `ytui lofi hip hop`, or `ytui https://youtu.be/…`.
 - `space` pauses, `f` goes fullscreen, `,` and `.` seek 10 seconds back and forward, and `?` shows every key.
 
-## Choose how it looks
+## How it looks
 
-Press `m` to switch between the two [render modes](../render-modes/): glow (the default) and
-braille. Press `o` to tune brightness, saturation, background and contrast.
+Video is drawn as truecolour half blocks, two pixels per cell, sized to your terminal. A bigger
+window gives a sharper picture. See [video in the terminal](../render-modes/) for how it works.
 
-![Big Buck Bunny under an apple tree, drawn as coloured ASCII characters in glow mode, fullscreen]({{ '/screenshots/glow.jpg' | relative_url }})
+![Big Buck Bunny's ear in front of an apple tree, drawn as half blocks, fullscreen and paused, with the player bar at the bottom]({{ '/screenshots/halfblock.jpg' | relative_url }})
 
 ## Watch YouTube over SSH
 

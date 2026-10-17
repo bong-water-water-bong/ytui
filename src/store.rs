@@ -30,8 +30,6 @@ pub struct Store {
     pub history: Vec<HistEntry>,
     #[serde(default)]
     pub later: Vec<VideoItem>,
-    #[serde(default)]
-    pub mode: Option<String>,
     #[serde(default = "yes")]
     pub autoplay: bool,
     #[serde(default = "one")]
@@ -41,16 +39,6 @@ pub struct Store {
     /// Auto-exposure for video.
     #[serde(default = "yes")]
     pub exposure: bool,
-    /// Look panel: brightness, saturation, background (how much picture
-    /// shows behind the glyphs) and contrast (the shape exponent).
-    #[serde(default = "look_bright")]
-    pub look_bright: f32,
-    #[serde(default = "look_sat")]
-    pub look_sat: f32,
-    #[serde(default = "look_bg")]
-    pub look_bg: f32,
-    #[serde(default = "look_contrast")]
-    pub look_contrast: f32,
     /// Caption language to switch on for every video (None: captions off).
     #[serde(default)]
     pub captions: Option<String>,
@@ -64,23 +52,6 @@ fn yes() -> bool {
 
 fn one() -> f32 {
     1.0
-}
-
-// The look defaults are the react-video-ascii demo's.
-fn look_bright() -> f32 {
-    1.25
-}
-
-fn look_sat() -> f32 {
-    1.25
-}
-
-fn look_bg() -> f32 {
-    0.30
-}
-
-fn look_contrast() -> f32 {
-    2.0
 }
 
 fn path() -> PathBuf {
@@ -100,10 +71,6 @@ impl Store {
                 volume: 1.0,
                 show_chat: true,
                 exposure: true,
-                look_bright: look_bright(),
-                look_sat: look_sat(),
-                look_bg: look_bg(),
-                look_contrast: look_contrast(),
                 ..Default::default()
             })
     }

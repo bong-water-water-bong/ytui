@@ -3,7 +3,7 @@
 - { title: Install, url: /guide/install/ }
 - { title: Watch YouTube in the terminal, url: /guide/watch-youtube-in-terminal/ }
 - { title: Using ytui, url: /guide/usage/ }
-- { title: Render modes, url: /guide/render-modes/ }
+- { title: Video in the terminal, url: /guide/render-modes/ }
 - { title: Playback and audio, url: /guide/playback/ }
 - { title: Signing in, url: /guide/sign-in/ }
 - { title: Keys, url: /guide/keys/ }

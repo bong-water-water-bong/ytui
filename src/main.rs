@@ -5,7 +5,6 @@ mod browser_login;
 mod bench;
 mod chat;
 mod cookies;
-mod glyphs;
 mod out;
 mod page;
 mod player;
@@ -19,14 +18,14 @@ mod uninstall;
 mod yt;
 
 use anyhow::{bail, Result};
-use glyphs::{CH, CW};
+use render::{CH, CW};
 use page::Kind;
 use player::{Audio, Opts};
-use render::{Img, Mode, Renderer};
+use render::{Img, Renderer};
 
 const HELP: &str = "\
 ytui - YouTube in the terminal: a full browser-style client with videos
-rendered as 24-bit colour glow ASCII or braille
+drawn as 24-bit colour half blocks
 
 USAGE:
   ytui                          open Home
@@ -46,7 +45,6 @@ USAGE:
   ytui --uninstall [--yes]      sign out and remove ytui, its settings and data
 
 OPTIONS:
-  --mode M       glow | braille (default glow)
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --fullscreen   start the player fullscreen
@@ -61,8 +59,6 @@ OPTIONS:
 
 Press ? inside the app for all keys. State lives in ~/.local/share/ytui/.
 ENV: YTUI_YTDLP (yt-dlp path)
-
-Glow and braille follow react-video-ascii by Lucas Jin (MIT); see NOTICE.
 ";
 
 fn main() -> Result<()> {
@@ -84,7 +80,6 @@ fn main() -> Result<()> {
         }
     }
     let mut args = std::env::args().skip(1);
-    let mut mode = None;
     let mut audio = Audio::auto();
     let mut fps = 60;
     let mut fullscreen = false;
@@ -109,10 +104,6 @@ fn main() -> Result<()> {
             "-h" | "--help" => {
                 print!("{HELP}");
                 return Ok(());
-            }
-            "--mode" => {
-                let v = val("--mode")?;
-                mode = Some(Mode::parse(&v).ok_or_else(|| anyhow::anyhow!("unknown mode {v}"))?);
             }
             "--audio" => {
                 audio = match val("--audio")?.as_str() {
@@ -199,7 +190,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut renderer = Renderer::new(mode.unwrap_or(Mode::Glow));
+    let renderer = Renderer::new();
 
     if let Some(src) = bench_render {
         return bench::render(&src, if at > 0.0 { at } else { 60.0 }, scols.unwrap_or(184), srows.unwrap_or(39), max_h.unwrap_or(480));
@@ -227,7 +218,7 @@ fn main() -> Result<()> {
             eprintln!("auto-exposure: offset {lo:.3}, gain {gain:.2}");
         }
         let mut cells = Vec::new();
-        renderer.render(&Img { w: w * CW, h: h * CH, px: &px }, w, h, &mut cells);
+        Renderer::cells(&Img { w: w * CW, h: h * CH, px: &px }, w, h, &mut cells);
         print!("{}", term::to_ansi(&cells, w, h));
         return Ok(());
     }
@@ -237,7 +228,7 @@ fn main() -> Result<()> {
     if tmux_lacks_rgb() {
         hints.push("tmux limits colours to 256: add  set -as terminal-features ',xterm*:RGB'  to ~/.tmux.conf and reattach".into());
     }
-    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h, mode.is_some());
+    let (mut app, rx) = app::App::new(renderer, Opts { audio, fps }, max_h);
     if let Some(h) = hints.last() {
         app.hint(h.clone());
     }

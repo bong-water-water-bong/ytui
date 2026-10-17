@@ -6,7 +6,8 @@ description: How ytui plays YouTube through ffmpeg at up to 60 fps, plus caption
 ## ffmpeg
 
 Every video plays through **ffmpeg** and is drawn in the terminal. yt-dlp finds the streams, ffmpeg
-decodes them, and ytui turns each frame into [braille or glow](../render-modes/) characters.
+decodes them, at exactly the size of the terminal's cell grid, and ytui draws each frame as
+[truecolour half blocks](../render-modes/).
 
 ## Quality and frame rate
 
@@ -17,9 +18,13 @@ ytui fetches streams up to 720p by default. That's the lowest height YouTube ser
 
 ## Captions
 
-`S` cycles through off and each caption track, uploaded tracks first, then auto-generated ones. The
-language you pick is remembered for later videos. ytui fetches the track's WebVTT file itself and
-draws each caption as text over the video.
+The first press of `S` picks your system language (from `LANG`), or English if there's none,
+and prefers the creator's captions over automatic ones. Pressing it again goes through each track,
+then off. The language you pick is remembered for later videos. ytui fetches the track's WebVTT
+file itself and draws each caption as bold white text in a solid black box, with a blank row above
+and below.
+
+![Sintel fullscreen in a firelit close-up, with the English caption “You’re a fool for traveling alone, so completely unprepared.” in a black box]({{ '/screenshots/captions.jpg' | relative_url }})
 
 ## Audio
 

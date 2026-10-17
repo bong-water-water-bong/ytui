@@ -14,7 +14,7 @@ Get the package for your system from the
 | Linux (x86_64) | `ytui-<version>-linux-x86_64.tar.gz` |
 | macOS (Apple Silicon) | `ytui-<version>-macos-arm64.tar.gz` |
 
-Each package holds `ytui` (or `ytui.exe` on Windows), `README.md`, `LICENSE` and `NOTICE`.
+Each package holds `ytui` (or `ytui.exe` on Windows), `README.md` and `LICENSE`.
 Each release also has `SHA256SUMS.txt` so you can check your download.
 
 ## Install what ytui plays through
@@ -72,7 +72,7 @@ ytui first lists everything it will remove and asks before deleting anything:
 - your settings and playback sign-in cookies (`~/.config/ytui/`)
 - your history, subscriptions, watch later, Google sign-in and ytui's sign-in browser profile (`~/.local/share/ytui/`)
 - its cache (`~/.cache/ytui/`)
-- the `ytui` program itself, plus the files that came with it in the release folder (`README.md`, `LICENSE` and `NOTICE`)
+- the `ytui` program itself, plus the files that came with it in the release folder (`README.md` and `LICENSE`)
 
 If you're signed in with Google, it also signs you out, which revokes ytui's access to your account. yt-dlp and ffmpeg
 stay installed, because other programs may use them. Add `--yes` to skip the question, for example in a script.
