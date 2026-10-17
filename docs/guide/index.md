@@ -20,7 +20,7 @@ video streams, and libmpv (or ffmpeg) plays them.
 
 - [Using ytui](usage/): browsing, tabs, the watch page, live chat, and starting from the command line.
 - [Render modes](render-modes/): ASCII art, glow, mosaics, the look panel and auto-exposure.
-- [Pixel graphics](pixel-graphics/): sixel, kitty, the native window on Windows, and colours under tmux.
+- [Pixel graphics](pixel-graphics/): sixel, kitty, the native window on Windows, the mpv window on Linux and macOS, and colours under tmux.
 - [Playback and audio](playback/): libmpv or ffmpeg, captions, audio outputs and volume.
 - [Signing in](sign-in/): getting past YouTube's bot check, and Google sign-in for likes, comments and playlists.
 - [Keys](keys/) and [command-line options](options/).

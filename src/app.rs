@@ -232,6 +232,8 @@ pub struct App {
     /// This frame's video box for the native window: (full, visible part),
     /// in terminal cells.
     native_rect: Option<(Rect, Rect)>,
+    /// mpv can open its own video window here (libmpv, a desktop, not SSH).
+    mpv_window_ok: bool,
     /// Our terminal tab is the one showing (from focus reports): the native
     /// window must not float over other tabs.
     tab_active: bool,
@@ -301,6 +303,32 @@ impl App {
         self.overlay = Some(o);
     }
 
+    /// Allow video in mpv's own window (Linux / macOS), and use it now if
+    /// that's how the user left it.
+    #[cfg(not(windows))]
+    pub fn set_mpv_window(&mut self, ok: bool) {
+        self.mpv_window_ok = ok;
+        if ok && self.store.mpv_window {
+            self.opts.wid = Some(crate::mpv::OWN_WINDOW);
+        }
+    }
+
+    /// Switch video between mpv's own window and the terminal.
+    fn toggle_mpv_window(&mut self) {
+        if !self.mpv_window_ok {
+            self.flash("the mpv window needs libmpv and a desktop session (not SSH)");
+            return;
+        }
+        self.store.mpv_window = !self.store.mpv_window;
+        self.store.touch();
+        self.opts.wid = self.store.mpv_window.then_some(crate::mpv::OWN_WINDOW);
+        let wid = self.opts.wid;
+        if let Some(p) = &mut self.player {
+            p.set_native(wid);
+        }
+        self.flash(if self.store.mpv_window { "video in the mpv window (N: back to the terminal)" } else { "video in the terminal" });
+    }
+
     /// Place or hide the native video window after a frame is drawn.
     fn place_overlay(&mut self) {
         #[cfg(windows)]
@@ -334,6 +362,9 @@ impl App {
     fn stream_height(&self) -> u32 {
         if let Some(h) = self.max_h {
             return h;
+        }
+        if self.opts.wid == Some(crate::mpv::OWN_WINDOW) {
+            return 1080;
         }
         #[cfg(windows)]
         if self.opts.wid.is_some() {
@@ -419,6 +450,7 @@ impl App {
             #[cfg(windows)]
             grid: Arc::new(std::sync::Mutex::new(None)),
             native_rect: None,
+            mpv_window_ok: false,
             tab_active: true,
             #[cfg(windows)]
             away_since: None,
@@ -1250,6 +1282,9 @@ impl App {
     }
 
     fn after_tick(&mut self) {
+        if self.player.as_mut().is_some_and(|p| std::mem::take(&mut p.window_closed)) && self.store.mpv_window {
+            self.toggle_mpv_window();
+        }
         self.poll_login();
         self.poll_capture();
         self.sync_chat();
@@ -2578,7 +2613,7 @@ impl App {
                     }
                 }
                 #[cfg(not(windows))]
-                self.flash("native video window is Windows-only for now");
+                self.toggle_mpv_window();
             }
             KeyCode::Char('S') => {
                 if let Some(p) = &mut self.player {
@@ -2612,6 +2647,11 @@ impl App {
                     }
                 }
             },
+            KeyCode::Char('f') if self.player.as_ref().is_some_and(|p| p.own_window()) => {
+                if let Some(p) = &self.player {
+                    p.toggle_window_fullscreen();
+                }
+            }
             KeyCode::Char('f') if self.player.is_some() => self.fullscreen = true,
             KeyCode::Char('x') if self.player.is_some() || self.pending.is_some() => {
                 self.stop();
@@ -3064,6 +3104,8 @@ impl App {
                                 }
                                 if p.loading() {
                                     center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
+                                } else if p.own_window() {
+                                    center_text(buf, r, r.x + x, sy, pw, *h, " Playing in the mpv window  ·  N: play here ");
                                 }
                             } else if self.viz && gfx_on {
                                 let samples = p.samples();
@@ -3214,6 +3256,9 @@ impl App {
         } else if p.native() {
             let b = Rect { x: r.x, y: r.y, width: mw, height: vh };
             self.native_rect = Some((b, b));
+            if p.own_window() {
+                center_text(buf, r, r.x, 0, mw, vh, " Playing in the mpv window  ·  N: play here ");
+            }
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, mw as usize, vh as usize);
@@ -3274,6 +3319,9 @@ impl App {
         } else if p.native() {
             let b = Rect { x: area.x, y: area.y, width: vw, height: vh };
             self.native_rect = Some((b, b));
+            if p.own_window() {
+                center_text(buf, area, area.x, 0, vw, vh, " Playing in the mpv window  ·  N: play here ");
+            }
         } else if gfx_on && p.pixels().is_some() {
             let (px, fw, fh, fseq) = p.pixels().unwrap();
             let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, vw as usize, vh as usize);

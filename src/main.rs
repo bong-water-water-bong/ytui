@@ -58,7 +58,8 @@ OPTIONS:
   --audio A      auto | pulse | alsa | ffplay | none
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --engine E     auto | mpv | ffmpeg: playback engine (auto: libmpv when found)
-  --no-native    never use the native GPU video window (Windows; N toggles it)
+  --no-native    never use the native GPU video window (N toggles it; on Linux
+                 and macOS it's a separate mpv window)
   --fullscreen   start the player fullscreen
   --fps N        max frame rate for the ffmpeg engine (default 60)
   --height N     max stream height to fetch (default: 720 in the terminal, so
@@ -88,6 +89,22 @@ fn main() -> Result<()> {
         return bench::color_test(&std::env::args().skip(2).collect::<Vec<_>>());
     }
     sys::init();
+    // In a tmux started outside the desktop, the desktop's Wayland display
+    // is missing: find it, so mpv's window and the sign-in browser open.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            if let Some(n) = (0..4).map(|i| format!("wayland-{i}")).find(|n| std::path::Path::new(&dir).join(n).exists()) {
+                std::env::set_var("WAYLAND_DISPLAY", n);
+            }
+        }
+    }
+    // mpv's window renders with Vulkan; Mesa's RADV prints a warning on
+    // newer AMD GPUs straight onto ytui's screen otherwise.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("MESA_VK_IGNORE_CONFORMANCE_WARNING").is_none() {
+        std::env::set_var("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1");
+    }
     let mut args = std::env::args().skip(1);
     let mut mode = None;
     let mut audio = Audio::auto();
@@ -314,9 +331,11 @@ fn main() -> Result<()> {
         hints.insert(0, "libmpv not found: playing through ffmpeg (no captions); see README".into());
     }
     let (mut app, rx) = app::App::new(renderer, Opts { audio, fps, mpv: use_mpv, wid: None }, max_h, mode.is_some());
-    // --no-native only matters to the Windows overlay.
     #[cfg(not(windows))]
-    let _ = native;
+    {
+        let desktop = cfg!(target_os = "macos") || std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+        app.set_mpv_window(use_mpv && native && desktop && std::env::var("SSH_CONNECTION").is_err());
+    }
     #[cfg(windows)]
     if use_mpv && native && std::env::var("SSH_CONNECTION").is_err() {
         if let Some(o) = overlay::Overlay::new() {

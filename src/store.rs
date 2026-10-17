@@ -57,6 +57,9 @@ pub struct Store {
     /// Native GPU video window over the terminal (where available).
     #[serde(default = "yes")]
     pub native: bool,
+    /// Linux / macOS: video in mpv's own window (N) instead of the terminal.
+    #[serde(default)]
+    pub mpv_window: bool,
     /// Caption language to switch on for every video (None: captions off).
     #[serde(default)]
     pub captions: Option<String>,

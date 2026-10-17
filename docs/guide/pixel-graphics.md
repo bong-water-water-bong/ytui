@@ -45,6 +45,17 @@ and it hides when you switch tabs or open a dialog.
 
 `N` toggles it. `--no-native` turns it off for the session.
 
+## mpv window (Linux and macOS)
+
+On Linux and macOS, `N` plays the video in mpv's own window instead: hardware-decoded, up to 1080p60, in any
+terminal, including ones without pixel graphics. ytui can't place a window over the terminal there, so it's an
+ordinary window you can move or put full screen. ytui stays in charge: play, pause, seek, volume, captions and
+the queue all work from the terminal.
+
+In the window, `f` or a double-click goes full screen, `Esc` leaves it, `Space` pauses and the arrow keys seek.
+Closing the window brings the video back into the terminal. ytui remembers your choice. It needs libmpv and
+a desktop session (not SSH).
+
 ## Colours under tmux
 
 ytui draws in 24-bit colour. If tmux doesn't know the outer terminal supports it, tmux rounds

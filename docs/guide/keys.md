@@ -44,7 +44,7 @@ the progress bar to seek.
 | `o` | Look panel: mode, brightness, saturation, background, contrast, auto-exposure |
 | `E` | Auto-exposure on or off |
 | `G` | Pixel graphics (kitty or sixel) on or off |
-| `N` | Native video window on or off (Windows Terminal) |
+| `N` | Native video window on or off (over the terminal on Windows; mpv's own window on Linux and macOS) |
 
 ## Writing comments and chat
 

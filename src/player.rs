@@ -429,6 +429,8 @@ pub struct Player {
     /// Captions drawn into the picture by mpv (pixel graphics) rather than
     /// as text by us.
     cc_burn: bool,
+    /// The user closed mpv's own window (see `mpv::OWN_WINDOW`).
+    pub window_closed: bool,
     cc_text: String,
 }
 
@@ -469,6 +471,7 @@ impl Player {
             cc_ids: Vec::new(),
             cc_pref: None,
             cc_burn: false,
+            window_closed: false,
             cc_text: String::new(),
         };
         p.restart();
@@ -775,6 +778,9 @@ impl Player {
         let Some(m) = self.mpv.as_ref() else { return false };
         let ev = m.poll();
         let mut fresh = false;
+        if ev.closed {
+            self.window_closed = true;
+        }
         if ev.loaded && !self.mpv_loaded {
             self.mpv_loaded = true;
             if std::mem::take(&mut self.mpv_seek) {
@@ -868,9 +874,20 @@ impl Player {
         self.mpv.is_some() && self.opts.wid.is_some()
     }
 
+    /// Video is in mpv's own window (not glued over the terminal).
+    pub fn own_window(&self) -> bool {
+        self.native() && self.opts.wid == Some(crate::mpv::OWN_WINDOW)
+    }
+
+    /// Full screen on / off for mpv's own window.
+    pub fn toggle_window_fullscreen(&self) {
+        if let Some(m) = self.mpv.as_ref().filter(|_| self.own_window()) {
+            let _ = m.command(&["cycle", "fullscreen"]);
+        }
+    }
+
     /// Switch between the native window (Some) and terminal rendering,
     /// keeping the position and pause state.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_native(&mut self, wid: Option<i64>) {
         if self.opts.wid == wid || !self.opts.mpv {
             return;

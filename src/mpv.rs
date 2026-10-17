@@ -37,6 +37,7 @@ const FORMAT_DOUBLE: c_int = 5;
 const EVENT_NONE: c_int = 0;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_FILE_LOADED: c_int = 8;
+const EVENT_CLIENT_MESSAGE: c_int = 16;
 const EVENT_PLAYBACK_RESTART: c_int = 21;
 const END_EOF: c_int = 0;
 const END_ERROR: c_int = 4;
@@ -151,7 +152,19 @@ pub struct Events {
     pub eof: bool,
     /// Playback stopped on an error (message).
     pub error: Option<String>,
+    /// The user closed mpv's own window.
+    pub closed: bool,
 }
+
+#[repr(C)]
+struct ClientMessage {
+    num_args: c_int,
+    args: *const *const c_char,
+}
+
+/// `wid` for mpv's own top-level window, where ytui can't glue the video
+/// over the terminal (Linux, macOS).
+pub const OWN_WINDOW: i64 = 0;
 
 pub struct Engine {
     api: &'static Api,
@@ -273,6 +286,15 @@ impl Engine {
             opt("osd-level", "0");
             opt("ytdl", "no");
             match wid {
+                Some(OWN_WINDOW) => {
+                    opt("vo", "gpu-next");
+                    opt("hwdec", "auto-safe");
+                    opt("force-window", "yes");
+                    opt("title", "ytui");
+                    opt("background-color", "#000000");
+                    // Keys in the window: only the ones bound below.
+                    opt("input-vo-keyboard", "yes");
+                }
                 Some(w) => {
                     opt("vo", "gpu-next");
                     opt("wid", &w.to_string());
@@ -309,7 +331,21 @@ impl Engine {
             }
             let rs = Arc::new(RenderShared { st: Mutex::new(RenderState::default()), cv: Condvar::new() });
             if wid.is_some() {
-                return Some(Engine { api, h, rs, thread: None, taken: 0 });
+                let e = Engine { api, h, rs, thread: None, taken: 0 };
+                if wid == Some(OWN_WINDOW) {
+                    for (key, cmd) in [
+                        ("CLOSE_WIN", "script-message ytui-close"),
+                        ("f", "cycle fullscreen"),
+                        ("MBTN_LEFT_DBL", "cycle fullscreen"),
+                        ("ESC", "set fullscreen no"),
+                        ("SPACE", "cycle pause"),
+                        ("LEFT", "seek -10"),
+                        ("RIGHT", "seek 10"),
+                    ] {
+                        let _ = e.command(&["keybind", key, cmd]);
+                    }
+                }
+                return Some(e);
             }
             let sw = cs("sw");
             let mut params = [Param { kind: RP_API_TYPE, data: sw.as_ptr() as *mut c_void }, Param { kind: RP_INVALID, data: std::ptr::null_mut() }];
@@ -392,6 +428,12 @@ impl Engine {
                 EVENT_NONE => break,
                 EVENT_FILE_LOADED => ev.loaded = true,
                 EVENT_PLAYBACK_RESTART => ev.restarted = true,
+                EVENT_CLIENT_MESSAGE if !e.data.is_null() => {
+                    let m = unsafe { &*(e.data as *const ClientMessage) };
+                    if m.num_args > 0 && unsafe { CStr::from_ptr(*m.args) }.to_bytes() == b"ytui-close" {
+                        ev.closed = true;
+                    }
+                }
                 EVENT_END_FILE if !e.data.is_null() => {
                     let end = unsafe { &*(e.data as *const EndFile) };
                     match end.reason {
