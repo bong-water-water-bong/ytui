@@ -22,6 +22,7 @@ mod store;
 mod sys;
 mod term;
 mod thumbs;
+mod uninstall;
 mod yt;
 
 use anyhow::{bail, Result};
@@ -50,6 +51,7 @@ USAGE:
   ytui --signout-cookies        forget those cookies
   ytui --help-cookies           more about that
   ytui --demo3d [SCENE]         3D ASCII engine showcase (logo, knot, terrain, visualizer)
+  ytui --uninstall [--yes]      sign out and remove ytui, its settings and data
 
 OPTIONS:
   --mode M       glow | art | ascii | classic | sextant | quadrant | halfblock | braille
@@ -153,6 +155,7 @@ fn main() -> Result<()> {
             "--demo3d" => demo = Some(args.next().unwrap_or_default()),
             "--client" => client = Some(val("--client")?),
             "--logout" => return auth::logout(),
+            "--uninstall" => return uninstall::run(args.any(|a| a == "--yes" || a == "-y")),
             "--signin" => signin = true,
             "--signin-probe" => return browser_login::probe(),
             "--signin-titles" => return browser_login::log_titles(),
