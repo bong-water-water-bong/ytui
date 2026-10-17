@@ -6,10 +6,6 @@
 use crate::api::{self, Api, ChannelPage, Comment, CommentBatch, Entry, Feed, Item, PlaylistPage, Role, Target, VideoItem, WatchInfo};
 use crate::auth::{Auth, MyPlaylist, PlItem};
 use crate::chat::{self, Chat};
-use crate::engine3d::Engine;
-use crate::gfx::{Gfx, Key as GKey, Proto};
-use crate::glyphs::{CH as GH, CW as GW};
-use crate::scenes::{Analyzer, Kind as SceneKind, Orbit, Scenes};
 use crate::page::{self, chip_query, layout, Act, Ctx, Doc, Kind, Page, Prim, Watch, ACCENT, CHIPS, DIM, FILTERS, META};
 use crate::player::{fit, Opts, Player};
 use crate::render::{Cell, Mode, Renderer};
@@ -213,40 +209,8 @@ pub struct App {
     auth: Option<Arc<Auth>>,
     compose: Option<Compose>,
     dialog: Option<Dialog>,
-    /// 3D audio visualiser instead of the video picture.
-    viz: bool,
-    engine3d: Engine,
-    scenes: Scenes,
-    analyzer: Analyzer,
-    viz_cells: Vec<Cell>,
-    viz_last: Instant,
-    t0: Instant,
-    /// Pixel graphics backend (kitty / sixel), if the terminal has one.
-    gfx: Option<Gfx>,
-    /// Native GPU video window over the terminal, and where the terminal's
-    /// grid is on screen (kept fresh by a background thread).
-    #[cfg(windows)]
-    overlay: Option<crate::overlay::Overlay>,
-    #[cfg(windows)]
-    grid: Arc<std::sync::Mutex<Option<crate::overlay::Grid>>>,
-    /// This frame's video box for the native window: (full, visible part),
-    /// in terminal cells.
-    native_rect: Option<(Rect, Rect)>,
-    /// mpv can open its own video window here (libmpv, a desktop, not SSH).
-    mpv_window_ok: bool,
-    /// Our terminal tab is the one showing (from focus reports): the native
-    /// window must not float over other tabs.
-    tab_active: bool,
-    /// Focus went to another application while our tab was showing; when
-    /// the terminal comes back without focusing us, another tab was picked.
-    #[cfg(windows)]
-    away_since: Option<Instant>,
-    /// Bytes for the backend to write after the current frame.
-    gfx_out: Vec<u8>,
-    /// Frame counter for animated pixel images (3D scenes).
-    gfx_seq: u64,
-    /// Graphics just toggled: clear the screen (and kitty images).
-    gfx_reset: bool,
+    /// Bytes to write after the current frame.
+    frame_out: Vec<u8>,
     /// Chat source for a video: (video id, token, is_replay).
     chat_src: Option<(String, String, bool)>,
     up_next: (String, Vec<VideoItem>),
@@ -284,118 +248,20 @@ fn s<T>(r: anyhow::Result<T>) -> R<T> {
 }
 
 impl App {
-    /// Use a native GPU window for video (Windows Terminal + libmpv).
-    #[cfg(windows)]
-    pub fn set_overlay(&mut self, o: crate::overlay::Overlay) {
-        let grid = self.grid.clone();
-        let term = o.owner as isize;
-        std::thread::Builder::new()
-            .name("ytui-grid".into())
-            .spawn(move || loop {
-                let g = crate::overlay::current_grid(term as _);
-                *grid.lock().unwrap() = g;
-                std::thread::sleep(Duration::from_millis(250));
-            })
-            .ok();
-        if self.store.native {
-            self.opts.wid = Some(o.wid());
-        }
-        self.overlay = Some(o);
-    }
-
-    /// Allow video in mpv's own window (Linux / macOS), and use it now if
-    /// that's how the user left it.
-    #[cfg(not(windows))]
-    pub fn set_mpv_window(&mut self, ok: bool) {
-        self.mpv_window_ok = ok;
-        if ok && self.store.mpv_window {
-            self.opts.wid = Some(crate::mpv::OWN_WINDOW);
-        }
-    }
-
-    /// Switch video between mpv's own window and the terminal.
-    fn toggle_mpv_window(&mut self) {
-        if !self.mpv_window_ok {
-            self.flash("the mpv window needs libmpv and a desktop session (not SSH)");
-            return;
-        }
-        self.store.mpv_window = !self.store.mpv_window;
-        self.store.touch();
-        self.opts.wid = self.store.mpv_window.then_some(crate::mpv::OWN_WINDOW);
-        let wid = self.opts.wid;
-        if let Some(p) = &mut self.player {
-            p.set_native(wid);
-        }
-        self.flash(if self.store.mpv_window { "video in the mpv window (N: back to the terminal)" } else { "video in the terminal" });
-    }
-
-    /// Place or hide the native video window after a frame is drawn.
-    fn place_overlay(&mut self) {
-        #[cfg(windows)]
-        {
-            if let (Some(t), Some(o)) = (self.away_since, self.overlay.as_ref()) {
-                // Back in the terminal but no focus report for us: the user
-                // came back to a different tab.
-                if crate::overlay::is_foreground(o.owner) && t.elapsed() > Duration::from_millis(400) {
-                    self.tab_active = false;
-                    self.away_since = None;
-                }
-            }
-            let busy = self.edit.is_some() || self.compose.is_some() || self.dialog.is_some() || self.viz || !self.tab_active || self.look.is_some();
-            let grid = *self.grid.lock().unwrap();
-            let native = self.player.as_ref().is_some_and(|p| p.native());
-            let Some(o) = self.overlay.as_mut() else { return };
-            match (self.native_rect, grid) {
-                (Some((full, vis)), Some(g)) if native && !busy && vis.width > 0 && vis.height > 0 => {
-                    use crate::overlay::Overlay;
-                    o.place(Some((Overlay::cells_to_screen(g, full.x, full.y, full.width, full.height), Overlay::cells_to_screen(g, vis.x, vis.y, vis.width, vis.height))));
-                }
-                _ => o.place(None),
-            }
-        }
-    }
-
-    /// Stream height to ask for: --height if given; for the native window,
-    /// its real pixel height (so fullscreen gets 1080p60); otherwise 720,
-    /// the lowest height YouTube serves at 60 fps. Terminal output is never
+    /// Stream height to ask for: --height if given, otherwise 720, the
+    /// lowest height YouTube serves at 60 fps. Terminal output is never
     /// sharper than that, and 720p decodes cheaply in hardware.
     fn stream_height(&self) -> u32 {
-        if let Some(h) = self.max_h {
-            return h;
-        }
-        if self.opts.wid == Some(crate::mpv::OWN_WINDOW) {
-            return 1080;
-        }
-        #[cfg(windows)]
-        if self.opts.wid.is_some() {
-            if let Some(g) = *self.grid.lock().unwrap() {
-                let px = (self.term.1 as f32 * g.ch) as u32;
-                return [720, 1080, 1440, 2160].into_iter().find(|&h| h >= px).unwrap_or(2160).min(1440);
-            }
-            return 1080;
-        }
-        720
+        self.max_h.unwrap_or(720)
     }
 
     pub fn set_fullscreen(&mut self, on: bool) {
         self.fs_on_play = on;
     }
 
-    pub fn set_gfx(&mut self, g: Option<Gfx>) {
-        if let Some(g) = &g {
-            self.flash(format!("pixel graphics: {} (G switches to characters)", g.proto.name()));
-        }
-        self.gfx = g;
-    }
-
     /// Show a startup hint in the status bar (longer than a normal flash).
     pub fn hint(&mut self, msg: String) {
         self.status = (msg, Instant::now() + Duration::from_secs(8));
-    }
-
-    /// Pixel backend, when present and switched on.
-    fn gfx_active(&self) -> bool {
-        self.gfx.is_some() && self.store.gfx
     }
 
     pub fn new(mut renderer: Renderer, opts: Opts, max_h: Option<u32>, mode_forced: bool) -> (App, Receiver<Msg>) {
@@ -413,7 +279,7 @@ impl App {
         renderer.bright = store.look_bright;
         renderer.sat = store.look_sat;
         renderer.bg_level = store.look_bg;
-        renderer.glob_exp = store.look_contrast;
+        renderer.contrast = store.look_contrast;
         let app = App {
             api: Arc::new(Api::new()),
             tx,
@@ -435,26 +301,7 @@ impl App {
             auth: Auth::load().map(Arc::new),
             compose: None,
             dialog: None,
-            viz: false,
-            engine3d: Engine::new(),
-            scenes: Scenes::new(),
-            analyzer: Analyzer::default(),
-            viz_cells: Vec::new(),
-            viz_last: Instant::now(),
-            t0: Instant::now(),
-            gfx: None,
-            gfx_out: Vec::new(),
-            gfx_seq: 0,
-            #[cfg(windows)]
-            overlay: None,
-            #[cfg(windows)]
-            grid: Arc::new(std::sync::Mutex::new(None)),
-            native_rect: None,
-            mpv_window_ok: false,
-            tab_active: true,
-            #[cfg(windows)]
-            away_since: None,
-            gfx_reset: false,
+            frame_out: Vec::new(),
             chat_src: None,
             up_next: (String::new(), Vec::new()),
             queue: Vec::new(),
@@ -1093,10 +940,10 @@ impl App {
         }
         let start = at.unwrap_or_else(|| self.store.resume_pos(&v.id));
         self.pending = Some((v.clone(), start));
-        let (api, tx, h, av1) = (self.api.clone(), self.tx.clone(), self.stream_height(), self.opts.mpv);
+        let (api, tx, h) = (self.api.clone(), self.tx.clone(), self.stream_height());
         let id = v.id.clone();
         std::thread::spawn(move || {
-            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h, av1));
+            let r = s(yt::resolve(&format!("https://www.youtube.com/watch?v={id}"), h));
             let _ = tx.send(Msg::Stream(id.clone(), r));
             if let Ok(w) = api.watch(&id) {
                 let _ = tx.send(Msg::Related(id, w.related.videos(), w.chat));
@@ -1282,9 +1129,6 @@ impl App {
     }
 
     fn after_tick(&mut self) {
-        if self.player.as_mut().is_some_and(|p| std::mem::take(&mut p.window_closed)) && self.store.mpv_window {
-            self.toggle_mpv_window();
-        }
         self.poll_login();
         self.poll_capture();
         self.sync_chat();
@@ -1928,30 +1772,7 @@ impl App {
     // ------------------------------------------------------------ input
 
     fn on_event(&mut self, ev: Event) {
-        if matches!(ev, Event::Resize(..)) {
-            if let Some(g) = &mut self.gfx {
-                g.force = true;
-            }
-        }
         match ev {
-            Event::FocusGained => {
-                self.tab_active = true;
-                #[cfg(windows)]
-                {
-                    self.away_since = None;
-                }
-            }
-            Event::FocusLost => {
-                // Still the foreground window: a tab or pane switch inside
-                // the terminal. Otherwise another app took focus, and the
-                // video can stay put (the app covers it anyway).
-                #[cfg(windows)]
-                match self.overlay.as_ref().map(|o| crate::overlay::is_foreground(o.owner)) {
-                    Some(true) => self.tab_active = false,
-                    Some(false) => self.away_since = Some(Instant::now()),
-                    None => {}
-                }
-            }
             Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Paste(t) => {
                 let t = t.replace("\r\n", "\n").replace('\r', "\n");
@@ -2015,7 +1836,7 @@ impl App {
             1 => self.renderer.bright,
             2 => self.renderer.sat,
             3 => self.renderer.bg_level,
-            4 => self.renderer.glob_exp,
+            4 => self.renderer.contrast,
             _ => 0.0,
         }
     }
@@ -2028,7 +1849,7 @@ impl App {
             1 => (self.renderer.bright, self.store.look_bright) = (v, v),
             2 => (self.renderer.sat, self.store.look_sat) = (v, v),
             3 => (self.renderer.bg_level, self.store.look_bg) = (v, v),
-            4 => (self.renderer.glob_exp, self.store.look_contrast) = (v, v),
+            4 => (self.renderer.contrast, self.store.look_contrast) = (v, v),
             _ => return,
         }
         self.store.touch();
@@ -2090,7 +1911,6 @@ impl App {
             buf[(xx, r.y + h - 1)].set_char('─').set_style(border);
         }
         buf.set_string(r.x + 2, r.y, " Look ", Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD));
-        let glow = matches!(self.renderer.mode, Mode::Glow);
         let label_w = 15u16;
         let slider_w = w - label_w - 11;
         for (i, &(name, lo, hi, step)) in LOOK_ROWS.iter().enumerate() {
@@ -2105,12 +1925,10 @@ impl App {
             if step > 0.0 {
                 let v = self.look_value(i);
                 let lit = (((v - lo) / (hi - lo)) * slider_w as f32).round() as u16;
-                // Sliders other than contrast only change glow mode.
-                let live = glow || i == 4;
                 for k in 0..slider_w {
                     let c = &mut buf[(sx + k, y)];
                     if k < lit {
-                        c.set_char('█').set_fg(if live { Color::White } else { Color::Rgb(120, 120, 130) });
+                        c.set_char('█').set_fg(Color::White);
                     } else {
                         c.set_char('▁').set_fg(Color::Rgb(90, 90, 100));
                     }
@@ -2125,7 +1943,7 @@ impl App {
             }
             self.geo.look.push((row, slider, i));
         }
-        let hint = if glow { "↑↓ choose · ←→ adjust · click/drag · o close" } else { "switch Mode to glow for the colour sliders" };
+        let hint = "↑↓ choose · ←→ adjust · drag · o close";
         buf.set_string(r.x + 2, r.y + h - 2, page::trunc(hint, w as usize - 4), Style::default().fg(DIM).bg(bg));
     }
 
@@ -2539,19 +2357,13 @@ impl App {
             KeyCode::Right if alt => self.forward(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('?') => self.navigate(Kind::Help),
-            KeyCode::Char('o') => {
-                self.look = Some(0);
-                if !matches!(self.renderer.mode, Mode::Glow | Mode::Classic) {
-                    self.flash("brightness, saturation and background apply to glow mode (Mode row)");
-                }
-            }
+            KeyCode::Char('o') => self.look = Some(0),
             KeyCode::Char('m') => {
                 self.renderer.mode = self.renderer.mode.next();
                 self.store.mode = Some(self.renderer.mode.name().into());
                 self.store.touch();
                 self.flash(format!("render mode: {}", self.renderer.mode.name()));
             }
-            KeyCode::Char('B') => self.renderer.ascii_bg = !self.renderer.ascii_bg,
             KeyCode::Char('+') | KeyCode::Char('=') => self.change_volume(0.05),
             KeyCode::Char('-') | KeyCode::Char('_') => self.change_volume(-0.05),
             KeyCode::Char('M') => {
@@ -2562,17 +2374,6 @@ impl App {
                 }
             }
             KeyCode::Char('I') => self.open_chat_compose(),
-            KeyCode::Char('G') => {
-                if let Some(g) = &self.gfx {
-                    self.store.gfx = !self.store.gfx;
-                    self.store.touch();
-                    self.gfx_reset = true;
-                    let name = g.proto.name();
-                    self.flash(if self.store.gfx { format!("pixel graphics ({name})") } else { "character rendering".to_string() });
-                } else {
-                    self.flash("this terminal has no kitty or sixel graphics (see --gfx)");
-                }
-            }
             KeyCode::Char('E') => {
                 self.store.exposure = !self.store.exposure;
                 self.store.touch();
@@ -2581,10 +2382,6 @@ impl App {
                     p.exposure.reset();
                 }
                 self.flash(if self.store.exposure { "auto-exposure on" } else { "auto-exposure off" });
-            }
-            KeyCode::Char('V') => {
-                self.viz = !self.viz;
-                self.flash(if self.viz { "3D visualiser on (V to switch back to video)" } else { "video" });
             }
             KeyCode::Char('P') => {
                 let v = match self.focused() {
@@ -2595,25 +2392,6 @@ impl App {
                 if let Some(v) = v {
                     self.open_save_dialog(v);
                 }
-            }
-            KeyCode::Char('N') => {
-                #[cfg(windows)]
-                {
-                    if let Some(o) = &self.overlay {
-                        self.store.native = !self.store.native;
-                        self.store.touch();
-                        self.opts.wid = self.store.native.then(|| o.wid());
-                        let wid = self.opts.wid;
-                        if let Some(p) = &mut self.player {
-                            p.set_native(wid);
-                        }
-                        self.flash(if self.store.native { "native video window" } else { "video in the terminal" });
-                    } else {
-                        self.flash("native video needs libmpv in Windows Terminal");
-                    }
-                }
-                #[cfg(not(windows))]
-                self.toggle_mpv_window();
             }
             KeyCode::Char('S') => {
                 if let Some(p) = &mut self.player {
@@ -2630,10 +2408,8 @@ impl App {
                 self.store_changed();
                 self.flash(if self.store.show_chat { "chat shown" } else { "chat hidden" });
             }
-            KeyCode::Char('[') => self.renderer.glob_exp = (self.renderer.glob_exp - 0.2).max(1.0),
-            KeyCode::Char(']') => self.renderer.glob_exp += 0.2,
-            KeyCode::Char('{') => self.renderer.dir_exp = (self.renderer.dir_exp - 0.25).max(1.0),
-            KeyCode::Char('}') => self.renderer.dir_exp += 0.25,
+            KeyCode::Char('[') => self.set_look(4, self.renderer.contrast - LOOK_ROWS[4].3),
+            KeyCode::Char(']') => self.set_look(4, self.renderer.contrast + LOOK_ROWS[4].3),
             KeyCode::Char('a') => {
                 self.store.autoplay = !self.store.autoplay;
                 self.store_changed();
@@ -2647,11 +2423,6 @@ impl App {
                     }
                 }
             },
-            KeyCode::Char('f') if self.player.as_ref().is_some_and(|p| p.own_window()) => {
-                if let Some(p) = &self.player {
-                    p.toggle_window_fullscreen();
-                }
-            }
             KeyCode::Char('f') if self.player.is_some() => self.fullscreen = true,
             KeyCode::Char('x') if self.player.is_some() || self.pending.is_some() => {
                 self.stop();
@@ -2729,19 +2500,10 @@ impl App {
     // ------------------------------------------------------------ drawing
 
     pub fn draw(&mut self, f: &mut Frame) {
-        self.gfx_seq += 1;
-        self.native_rect = None;
         self.draw_ui(f);
         if self.look.is_some() {
             let area = f.area();
             self.draw_look(f.buffer_mut(), area);
-        }
-        self.place_overlay();
-        if self.gfx_active() {
-            if let Some(g) = &mut self.gfx {
-                let bytes = g.finish(f.buffer_mut());
-                self.gfx_out.extend(bytes);
-            }
         }
     }
 
@@ -2749,20 +2511,8 @@ impl App {
         let area = f.area();
         self.geo = Geo::default();
         self.term = (area.width, area.height);
-        // Decode video at the pixel backend's resolution, or 6x12 per cell for glyphs.
-        let px_cell = match (&self.gfx, self.store.gfx) {
-            (Some(g), true) => {
-                let rows = area.height.saturating_sub(1).max(1);
-                let (pw, ph) = g.px_for(area.width, rows);
-                (pw as f32 / area.width as f32, ph as f32 / rows as f32)
-            }
-            _ => (GW as f32, GH as f32),
-        };
-        let burn = self.gfx.is_some() && self.store.gfx;
         if let Some(p) = &mut self.player {
             p.set_term(area.width as usize, area.height.saturating_sub(1) as usize);
-            p.set_px_cell(px_cell);
-            p.set_caption_burn(burn);
         }
         if area.height < 8 || area.width < 30 {
             f.buffer_mut().set_string(0, 0, "window too small", Style::default());
@@ -3018,8 +2768,6 @@ impl App {
         let scroll = page.scroll;
         let mut player_visible = false;
         let pending_id = self.pending.as_ref().map(|p| p.0.id.clone());
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
         for prim in &doc.prims {
             match prim {
                 Prim::Text { x, y, line } => {
@@ -3040,24 +2788,9 @@ impl App {
                     }
                     let iw = (*iw).min(w.saturating_sub(*x));
                     let sy = *y as i64 - scroll as i64;
-                    let mut placed = false;
-                    if gfx_on {
-                        if let Some(g) = self.gfx.as_mut() {
-                            // Sixel can't have text over it: keep the badge row as text.
-                            let rows = if g.proto == Proto::Sixel && (badge.is_some() || progress.is_some()) && *h > 2 { *h - 1 } else { *h };
-                            if g.proto == Proto::Sixel && rows < *h {
-                                fill(buf, r, r.x + x, sy + rows as i64, iw, 1, Color::Rgb(20, 20, 24));
-                            }
-                            let thumbs = &self.thumbs;
-                            let name = format!("{url}|{iw}x{rows}");
-                            placed = g.place(buf, r, r.x + x, sy, iw, rows, GKey { name: &name, seq: None }, &mut |pw, ph| thumbs.pixels(url, pw, ph));
-                        }
-                    }
-                    if !placed {
-                        match self.thumbs.cells(url, iw, *h, &mut self.renderer) {
-                            Some(cells) => blit(buf, r, r.x + x, sy, cells, iw as usize, *h as usize),
-                            None => fill(buf, r, r.x + x, sy, iw, *h, Color::Rgb(38, 38, 46)),
-                        }
+                    match self.thumbs.cells(url, iw, *h) {
+                        Some(cells) => blit(buf, r, r.x + x, sy, cells, iw as usize, *h as usize),
+                        None => fill(buf, r, r.x + x, sy, iw, *h, Color::Rgb(38, 38, 46)),
                     }
                     let by = *y as i64 + *h as i64 - 1 - scroll as i64;
                     if let Some(p) = progress {
@@ -3088,60 +2821,11 @@ impl App {
                     match mine {
                         Some(p) => {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
-                            let t = self.t0.elapsed().as_secs_f32();
-                            if p.native() && !self.viz {
-                                let full = Rect { x: r.x + x, y: (r.y as i64 + sy).max(0) as u16, width: pw, height: *h };
-                                let top = (r.y as i64 + sy).max(r.y as i64);
-                                let bot = (r.y as i64 + sy + *h as i64).min((r.y + vh) as i64);
-                                let vis = Rect { x: r.x + x, y: top as u16, width: pw, height: (bot - top).max(0) as u16 };
-                                let full = Rect { y: (r.y as i64 + sy) as u16, ..full };
-                                if r.y as i64 + sy >= 0 {
-                                    self.native_rect = Some((full, vis));
-                                } else {
-                                    // Scrolled partly above the screen: keep the window
-                                    // aligned to the visible part.
-                                    self.native_rect = Some((vis, vis));
-                                }
-                                if p.loading() {
-                                    center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
-                                } else if p.own_window() {
-                                    center_text(buf, r, r.x + x, sy, pw, *h, " Playing in the mpv window  ·  N: play here ");
-                                }
-                            } else if self.viz && gfx_on {
-                                let samples = p.samples();
-                                let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-                                if let Some(g) = self.gfx.as_mut() {
-                                    g.place(buf, r, r.x + x, sy, pw, *h, GKey { name: "viz-inline", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-                                }
-                            } else if self.viz {
-                                let samples = p.samples();
-                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                            } else if gfx_on && p.pixels().is_some() {
-                                let (px, fw, fh, fseq) = p.pixels().unwrap();
-                                let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, pw as usize, *h as usize);
-                                if let Some(g) = self.gfx.as_mut() {
-                                    g.place(buf, r, r.x + x + ox as u16, sy + oy as i64, cw as u16, ch as u16, GKey { name: "video-inline", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-                                }
-                            } else {
-                                match p.cells(&mut self.renderer, pw as usize, *h as usize) {
-                                    Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
-                                    None => {
-                                        // Connecting: keep the 3D logo spinning until the first frame.
-                                        let t = self.t0.elapsed().as_secs_f32();
-                                        render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                        blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                                        let msg = " Loading video… ";
-                                        let y = sy + *h as i64 - 2;
-                                        if y >= 0 && y < vh as i64 {
-                                            buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-                                        }
-                                    }
-                                }
+                            match p.cells(&mut self.renderer, pw as usize, *h as usize) {
+                                Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
+                                None => center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… "),
                             }
-                            if !self.viz {
-                                draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
-                            }
+                            draw_captions(buf, r, r.x + x, sy, pw, *h, p.caption_text());
                             if p.paused && !p.ended {
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ❚❚  paused ");
                             } else if p.ended {
@@ -3151,30 +2835,12 @@ impl App {
                         None => {
                             let loading = pending_id.as_deref() == Some(id.as_str());
                             if loading {
-                                // Spinning 3D logo while the stream resolves.
-                                let t = self.t0.elapsed().as_secs_f32();
-                                render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &[], SceneKind::Logo, t, &mut self.viz_last, pw as usize, *h as usize, &mut self.viz_cells);
-                                blit(buf, r, r.x + x, sy, &self.viz_cells, pw as usize, *h as usize);
-                                let msg = " Loading video… ";
-                                let y = sy + *h as i64 - 2;
-                                if y >= 0 && y < vh as i64 {
-                                    buf.set_string(r.x + x + pw.saturating_sub(msg.chars().count() as u16) / 2, r.y + y as u16, msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-                                }
+                                center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
                             } else {
                                 let url = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
                                 let (cw, ch, ox, oy) = fit(16.0 / 9.0, pw as usize, *h as usize);
-                                let mut placed = false;
-                                if gfx_on {
-                                    if let Some(g) = self.gfx.as_mut() {
-                                        let thumbs = &self.thumbs;
-                                        let name = format!("{url}|{cw}x{ch}");
-                                        placed = g.place(buf, r, r.x + x + ox as u16, sy + oy as i64, cw as u16, ch as u16, GKey { name: &name, seq: None }, &mut |tw, th| thumbs.pixels(&url, tw, th));
-                                    }
-                                }
-                                if !placed {
-                                    if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16, &mut self.renderer) {
-                                        blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
-                                    }
+                                if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16) {
+                                    blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
                                 }
                                 center_text(buf, r, r.x + x, sy, pw, *h, " ▶  Enter / click to play ");
                             }
@@ -3239,40 +2905,12 @@ impl App {
         let r = Rect { x: pr.x + pr.width - mw - 1, y: pr.y + pr.height - h, width: mw, height: h };
         fill(buf, pr, r.x.saturating_sub(1).max(pr.x), (r.y - pr.y) as i64, mw + 1, h, Color::Rgb(20, 20, 24));
         fill(buf, r, r.x, 0, mw, vh, Color::Black);
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
-        if self.viz && gfx_on {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, r, r.x, 0, mw, vh, GKey { name: "viz-mini", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-            }
-        } else if self.viz {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, mw as usize, vh as usize, &mut self.viz_cells);
-            blit(buf, r, r.x, 0, &self.viz_cells, mw as usize, vh as usize);
-        } else if p.native() {
-            let b = Rect { x: r.x, y: r.y, width: mw, height: vh };
-            self.native_rect = Some((b, b));
-            if p.own_window() {
-                center_text(buf, r, r.x, 0, mw, vh, " Playing in the mpv window  ·  N: play here ");
-            }
-        } else if gfx_on && p.pixels().is_some() {
-            let (px, fw, fh, fseq) = p.pixels().unwrap();
-            let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, mw as usize, vh as usize);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, r, r.x + ox as u16, oy as i64, cw as u16, ch as u16, GKey { name: "video-mini", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-            }
-        } else if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
+        if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
         }
-        if !self.viz {
-            draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
-        }
+        draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
         // Overlay controls on the video, like YouTube's miniplayer.
         let ctl = Style::default().fg(Color::White).bg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD);
         let expand = Rect { x: r.x, y: r.y, width: 4, height: 1 };
@@ -3302,41 +2940,11 @@ impl App {
         let side = self.store.show_chat && self.chat.as_ref().is_some_and(|c| c.video == p.video.id) && area.width >= 100;
         let vw = if side { area.width - 44 } else { area.width };
         let varea = Rect { width: vw, ..area };
-        let gfx_on = self.gfx.is_some() && self.store.gfx;
-        let seq = self.gfx_seq;
-        if self.viz && gfx_on {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            let (eng, sc, an, last) = (&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.viz_last);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, varea, area.x, 0, vw, vh, GKey { name: "viz-full", seq: Some(seq) }, &mut |tw, th| Some(viz_rgb(eng, sc, an, &samples, SceneKind::Visualizer, t, last, tw, th)));
-            }
-        } else if self.viz {
-            let t = self.t0.elapsed().as_secs_f32();
-            let samples = p.samples();
-            render_viz(&mut self.engine3d, &self.scenes, &mut self.analyzer, &mut self.renderer, &samples, SceneKind::Visualizer, t, &mut self.viz_last, vw as usize, vh as usize, &mut self.viz_cells);
-            blit(buf, varea, area.x, 0, &self.viz_cells, vw as usize, vh as usize);
-        } else if p.native() {
-            let b = Rect { x: area.x, y: area.y, width: vw, height: vh };
-            self.native_rect = Some((b, b));
-            if p.own_window() {
-                center_text(buf, area, area.x, 0, vw, vh, " Playing in the mpv window  ·  N: play here ");
-            }
-        } else if gfx_on && p.pixels().is_some() {
-            let (px, fw, fh, fseq) = p.pixels().unwrap();
-            let (cw, ch, ox, oy) = fit(fw as f64 / fh as f64, vw as usize, vh as usize);
-            if let Some(g) = self.gfx.as_mut() {
-                g.place(buf, varea, area.x + ox as u16, oy as i64, cw as u16, ch as u16, GKey { name: "video-full", seq: Some(fseq) }, &mut |tw, th| Some(resize(px, fw, fh, tw, th)));
-            }
-        } else {
-            match p.cells(&mut self.renderer, vw as usize, vh as usize) {
-                Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
-                None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
-            }
+        match p.cells(&mut self.renderer, vw as usize, vh as usize) {
+            Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
+            None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
         }
-        if !self.viz {
-            draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
-        }
+        draw_captions(buf, varea, area.x, 0, vw, vh, p.caption_text());
         if side {
             let inp = self.chat.as_ref().is_some_and(|c| !c.replay).then_some(self.auth.is_some());
             draw_chat(buf, area, area.x + vw + 1, 0, 43, vh, self.chat.as_ref(), inp);
@@ -3431,14 +3039,6 @@ impl App {
                     self.load_more();
                 }
             }
-            if self.gfx_reset {
-                self.gfx_reset = false;
-                let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
-                out.push(&bytes);
-                terminal.clear()?;
-                out.push(&[]);
-                self.dirty = true;
-            }
             if self.dirty || fresh {
                 last_draw = Instant::now();
                 let t0 = Instant::now();
@@ -3447,18 +3047,17 @@ impl App {
                 }
                 terminal.draw(|f| self.draw(f))?;
                 let t1 = Instant::now();
-                let gfx_bytes = self.gfx_out.len();
                 if sync {
-                    self.gfx_out.extend_from_slice(b"\x1b[?2026l");
+                    self.frame_out.extend_from_slice(b"\x1b[?2026l");
                 }
                 // The whole frame goes out as one write on the output thread;
                 // this waits only for the previous frame to be taken.
-                out.push(&self.gfx_out);
-                self.gfx_out.clear();
+                out.push(&self.frame_out);
+                self.frame_out.clear();
                 self.dirty = false;
                 if let Some(s) = &mut self.stats {
                     let p = self.player.as_ref();
-                    s.frame(t1 - t0, t1.elapsed(), gfx_bytes, p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
+                    s.frame(t1 - t0, t1.elapsed(), p.map_or(0.0, |p| p.fps), p.map_or(0.0, |p| p.pos), p.map(|p| p.debug()).unwrap_or_default() + " | " + &crate::sys::console_state());
                 }
             }
             if last_save.elapsed() > Duration::from_secs(20) {
@@ -3480,65 +3079,9 @@ impl App {
         }
         self.stop();
         self.store.save();
-        let bytes = self.gfx.as_mut().map(|g| g.clear_all()).unwrap_or_default();
-        out.push(&bytes);
         out.drain();
         Ok(())
     }
-}
-
-/// Resample RGB24 to exactly tw x th.
-fn resize(px: &[u8], fw: usize, fh: usize, tw: usize, th: usize) -> Vec<u8> {
-    if (fw, fh) == (tw, th) {
-        return px.to_vec();
-    }
-    let mut out = Vec::new();
-    crate::player::downsample(px, fw, fh, tw, th, &mut out);
-    out
-}
-
-/// Render a 3D scene straight to pixels (for the pixel backends).
-#[allow(clippy::too_many_arguments)]
-fn viz_rgb(engine: &mut Engine, scenes: &Scenes, analyzer: &mut Analyzer, samples: &[f32], kind: SceneKind, t: f32, last: &mut Instant, w: usize, h: usize) -> Vec<u8> {
-    let dt = last.elapsed().as_secs_f32().clamp(0.0, 0.2);
-    *last = Instant::now();
-    analyzer.update(samples, dt);
-    let bands: &[f32] = if samples.is_empty() { &[] } else { &analyzer.bands };
-    let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
-    engine.render(&scene, &cam, w, h).to_vec()
-}
-
-/// Render a 3D scene into `out` (w x h cells) through the glyph renderer,
-/// with settings suited to 3D (dark crush, colour-value density, classic
-/// ASCII in place of the two-tone mode).
-#[allow(clippy::too_many_arguments)]
-fn render_viz(
-    engine: &mut Engine,
-    scenes: &Scenes,
-    analyzer: &mut Analyzer,
-    r: &mut Renderer,
-    samples: &[f32],
-    kind: SceneKind,
-    t: f32,
-    last: &mut Instant,
-    w: usize,
-    h: usize,
-    out: &mut Vec<Cell>,
-) {
-    let dt = last.elapsed().as_secs_f32().clamp(0.0, 0.2);
-    *last = Instant::now();
-    analyzer.update(samples, dt);
-    let bands: &[f32] = if samples.is_empty() { &[] } else { &analyzer.bands };
-    let (scene, cam) = scenes.build(kind, t, bands, Orbit::default());
-    let px = engine.render(&scene, &cam, w * GW, h * GH);
-    let saved = (r.mode, r.black, r.value_density);
-    if matches!(r.mode, Mode::Ascii | Mode::Art) {
-        r.mode = Mode::Classic;
-    }
-    r.black = 0.2;
-    r.value_density = true;
-    r.render(&crate::render::Img { w: w * GW, h: h * GH, px }, w, h, out);
-    (r.mode, r.black, r.value_density) = saved;
 }
 
 fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize, h: usize) {
@@ -3553,14 +3096,7 @@ fn blit(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, cells: &[Cell], w: usize,
                 break;
             }
             let c = cells[yy * w + xx];
-            let (fg, bg) = if crate::render::PALETTE_256.load(std::sync::atomic::Ordering::Relaxed) {
-                // fg and bg are the top and bottom pixel rows of mosaic cells.
-                let (sx, sy) = (cx as usize, 2 * (clip.y as usize + y as usize));
-                (Color::Indexed(crate::render::xterm256(c.fg, sx, sy)), Color::Indexed(crate::render::xterm256(c.bg, sx, sy + 1)))
-            } else {
-                (Color::Rgb(c.fg[0], c.fg[1], c.fg[2]), Color::Rgb(c.bg[0], c.bg[1], c.bg[2]))
-            };
-            buf[(cx, clip.y + y as u16)].set_char(c.ch).set_fg(fg).set_bg(bg);
+            buf[(cx, clip.y + y as u16)].set_char(c.ch).set_fg(Color::Rgb(c.fg[0], c.fg[1], c.fg[2])).set_bg(Color::Rgb(c.bg[0], c.bg[1], c.bg[2]));
         }
     }
 }
@@ -3586,33 +3122,30 @@ struct Stats {
     since: Instant,
     n: u32,
     draw: Duration,
-    gfx: Duration,
-    gfx_max: Duration,
-    bytes: usize,
+    write: Duration,
+    write_max: Duration,
 }
 
 impl Stats {
     fn new(path: String) -> Stats {
         let _ = std::fs::write(&path, "");
-        Stats { path, since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+        Stats { path, ..Stats::new_keep() }
     }
 
-    fn frame(&mut self, draw: Duration, gfx: Duration, bytes: usize, decoded_fps: f64, pos: f64, dbg: String) {
+    fn frame(&mut self, draw: Duration, write: Duration, decoded_fps: f64, pos: f64, dbg: String) {
         self.n += 1;
         self.draw += draw;
-        self.gfx += gfx;
-        self.gfx_max = self.gfx_max.max(gfx);
-        self.bytes += bytes;
+        self.write += write;
+        self.write_max = self.write_max.max(write);
         let el = self.since.elapsed().as_secs_f64();
         if el >= 1.0 {
             let n = self.n.max(1) as f64;
             let line = format!(
-                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  gfx write {:6.2} ms (max {:6.1})  gfx {:7.1} KB/frame  {dbg}\n",
+                "pos {pos:7.2}  drawn {:5.1} fps  decoded {decoded_fps:5.1} fps  ui+text {:6.2} ms  write {:6.2} ms (max {:6.1})  {dbg}\n",
                 self.n as f64 / el,
                 self.draw.as_secs_f64() * 1000.0 / n,
-                self.gfx.as_secs_f64() * 1000.0 / n,
-                self.gfx_max.as_secs_f64() * 1000.0,
-                self.bytes as f64 / n / 1024.0
+                self.write.as_secs_f64() * 1000.0 / n,
+                self.write_max.as_secs_f64() * 1000.0,
             );
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&self.path) {
@@ -3623,7 +3156,7 @@ impl Stats {
     }
 
     fn new_keep() -> Stats {
-        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, gfx: Duration::ZERO, gfx_max: Duration::ZERO, bytes: 0 }
+        Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, write: Duration::ZERO, write_max: Duration::ZERO }
     }
 }
 
@@ -3707,7 +3240,7 @@ fn draw_bar(buf: &mut Buffer, x: u16, y: u16, w: u16, p: &Player, mode: Mode, co
     let pct = if p.muted() { "muted".to_string() } else { format!("{:>3.0}%", p.level() * 100.0) };
     let ae = if p.exposure.on { " AE" } else { "" };
     let cc = if p.caption_track().is_some() { " CC" } else { "" };
-    let rate = if p.native() { "gpu".to_string() } else { format!("{:.0}fps", p.fps) };
+    let rate = format!("{:.0}fps", p.fps);
     // [time]  vol [slider] pct  [mode AE CC rate]
     let head = format!(" {time}  vol ");
     let rest = format!(" {pct}  {}{ae}{cc} {rate} ", mode.name());

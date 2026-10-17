@@ -1158,23 +1158,16 @@ Keys — player (anywhere while something is playing)
   + -              volume up / down (0-150%)        M                mute
   C                show / hide live chat            I                send a live chat message (signed in)
   P                save the focused / current video to a playlist (signed in)
-  V                3D audio visualiser instead of the video picture (ytui --demo3d for the engine)
   E                auto-exposure on / off (lifts dark videos; 'AE' on the player bar)
-  o                look panel: render mode, brightness, saturation, background,
-                   contrast (glow mode is the coloured ASCII with the picture behind)
+  o                look panel: mode, brightness, saturation, background, contrast
   S                captions: cycle off / each track (remembered across videos)
-  N                native GPU video window on / off (libmpv; over the terminal on
-                   Windows, its own window on Linux and macOS)
-  G                pixel graphics (kitty / sixel) on / off, when the terminal supports them
-  m                cycle render mode
-  [ ] { }          ascii contrast / edges
+  m                switch render mode (braille / glow)
+  [ ]              contrast down / up
   click the progress bar to seek; click the miniplayer to return to the video
 
-Render modes
-  ascii      two-tone shape-matched ASCII (glyphs follow edges)
-  classic    shape-matched ASCII, coloured ink on dark ground
-  sextant    2x3 two-colour mosaic per cell (sharpest; needs a font with sextants)
-  quadrant   2x2 mosaic        halfblock   top/bottom halves        braille   2x4 dots
+Render modes (24-bit colour, after react-video-ascii by Lucas Jin)
+  braille    2x4 dots in boosted colour over a dimmed copy of the picture
+  glow       shape-matched ASCII in boosted colour over a dimmed copy of the picture
 
 Pages
   Home         For you (from your history and subscriptions) and topic chips

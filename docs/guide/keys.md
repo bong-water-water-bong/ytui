@@ -1,6 +1,6 @@
 ---
 title: Keys
-description: Every ytui keyboard shortcut for browsing, playback, volume, captions, render modes and pixel graphics.
+description: Every ytui keyboard shortcut for browsing, playback, volume, captions and render modes.
 ---
 
 Press `?` in ytui to see these at any time. The mouse works too: click anything, scroll with the wheel, and click
@@ -34,17 +34,15 @@ the progress bar to seek.
 | `S` | Captions: off, then each track |
 | `n` `a` `x` | Next video, autoplay on or off, close the player |
 | `C` `I` | Show or hide live chat, send a chat message |
-| `V` | 3D audio visualiser instead of the video |
 
 ## Picture
 
 | Key | What it does |
 |---|---|
-| `m` | Cycle the render mode |
+| `m` | Switch the render mode (braille or glow) |
 | `o` | Look panel: mode, brightness, saturation, background, contrast, auto-exposure |
+| `[` `]` | Contrast down, up |
 | `E` | Auto-exposure on or off |
-| `G` | Pixel graphics (kitty or sixel) on or off |
-| `N` | Native video window on or off (over the terminal on Windows; mpv's own window on Linux and macOS) |
 
 ## Writing comments and chat
 

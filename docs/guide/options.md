@@ -1,6 +1,6 @@
 ---
 title: Command-line options
-description: All ytui command-line options and environment variables, for render modes, audio, the playback engine, pixel graphics, colours and cookies.
+description: All ytui command-line options and environment variables, for render modes, audio, stream quality and cookies.
 ---
 
 `ytui --help` prints this list.
@@ -20,27 +20,19 @@ description: All ytui command-line options and environment variables, for render
 | `ytui --login [--client FILE]` | Sign in with Google to like and comment |
 | `ytui --logout` | Sign out and revoke access |
 | `ytui --help-login` | How to create the Google OAuth client |
-| `ytui --demo3d [SCENE]` | 3D engine showcase: `logo`, `knot`, `terrain` or `visualizer` |
 | `ytui --uninstall [--yes]` | Sign out and remove ytui, its settings, data and cache ([details](../install/#uninstall)) |
 
 ## Options
 
 | Option | What it does |
 |---|---|
-| `--mode M` | Render mode: `glow`, `art`, `ascii`, `classic`, `sextant`, `quadrant`, `halfblock` or `braille` |
-| `--audio A` | Audio output: `auto`, `pulse`, `alsa`, `ffplay` or `none`. Off by default over SSH. |
-| `--engine E` | Playback engine: `auto`, `mpv` or `ffmpeg`. `auto` uses libmpv when it's found. |
-| `--no-native` | Never use the native video window (Windows) |
+| `--mode M` | Render mode: `braille` (the default) or `glow` |
+| `--audio A` | Audio output: `auto`, `pulse`, `alsa`, `ffplay` or `none`. `auto` uses PulseAudio when it's there and `ffplay` on Windows. Off by default over SSH. |
 | `--fullscreen` | Start the player fullscreen |
-| `--fps N` | Maximum frame rate with the ffmpeg engine (default 60) |
-| `--height N` | Maximum stream height to fetch (default 720 in the terminal; the window's height for native video) |
+| `--fps N` | Maximum frame rate (default 60) |
+| `--height N` | Maximum stream height to fetch (default 720, the lowest height YouTube serves at 60 fps) |
 | `--exposure X` | `on` or `off`: auto-exposure for `--snapshot` (in the app, press `E`) |
-| `--gfx X` | Pixel graphics: `auto`, `kitty`, `sixel` or `off` |
-| `--gfx-fps N` | Cap pixel video at N fps (default 12 over SSH, no limit on your own computer) |
-| `--gfx-px N` | Longest edge of pixel images |
-| `--sixel-colors N` | Colours per sixel frame, 2–255 (default 255) |
-| `--colors C` | Colour depth: `auto`, `256` or `true` |
-| `--cookies FILE` | A `cookies.txt` for yt-dlp |
+| `--cookies FILE` | A `cookies.txt` for yt-dlp (default: `cookies.txt` in the config directory, if present) |
 | `--cookies-from-browser B` | Read cookies from browser B (Firefox works; Chrome and Edge usually can't be read while running) |
 
 ## Environment variables
@@ -48,11 +40,6 @@ description: All ytui command-line options and environment variables, for render
 | Variable | What it does |
 |---|---|
 | `YTUI_YTDLP` | Path to yt-dlp |
-| `YTUI_LIBMPV` | Path to libmpv |
-| `YTUI_ENGINE` | Same as `--engine` |
-| `YTUI_GFX` | Same as `--gfx` |
-| `YTUI_COLORS` | Same as `--colors` |
-| `YTUI_FONT` | A monospace `.ttf` whose character shapes the ASCII modes match against |
+| `YTUI_FONT` | A monospace `.ttf` whose character shapes glow mode matches against |
 | `YTUI_BROWSER` | The browser to sign in with (a path, or a name like `firefox`) |
-| `YTUI_SIXEL_EXACT` | Set to `1` to resend every sixel row that changed |
 | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` | Where ytui keeps its data and settings |

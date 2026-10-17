@@ -15,11 +15,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # libmpv for the Windows package (shinchiro builds; generic x86-64 so it
-  # runs on any 64-bit CPU). Bump deliberately: it's what users get.
-  LIBMPV_RELEASE: "20261016"
-  LIBMPV_ASSET: mpv-dev-x86_64-20261016-git-a2cd83c56d.7z
-  LIBMPV_MPV_COMMIT: a2cd83c56d
 
 jobs:
   build:
@@ -61,36 +56,14 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/}"; else v="dev-${GITHUB_SHA::7}"; fi
           echo "v=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Package (Windows, with libmpv)
+      - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           pkg="ytui-${{ steps.ver.outputs.v }}-${{ matrix.name }}"
-          mkdir -p "dist/$pkg/third-party/mpv" mpv
-          gh release download "$LIBMPV_RELEASE" -R shinchiro/mpv-winbuild-cmake -p "$LIBMPV_ASSET" -D mpv
-          7z x -y -ompv "mpv/$LIBMPV_ASSET" > /dev/null
-          cp "target/${{ matrix.target }}/release/ytui.exe" mpv/libmpv-2.dll "dist/$pkg/"
-          cp README.md LICENSE "dist/$pkg/"
-          # mpv's licence texts and where its source is (GPL: corresponding
-          # source must be available to everyone who gets the binary).
-          for f in Copyright LICENSE.GPL LICENSE.LGPL; do
-            curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/$LIBMPV_MPV_COMMIT/$f" -o "dist/$pkg/third-party/mpv/$f"
-          done
-          cat > "dist/$pkg/third-party/mpv/SOURCE.txt" <<EOF
-          libmpv-2.dll is mpv (https://mpv.io), built by shinchiro/mpv-winbuild-cmake,
-          release $LIBMPV_RELEASE ($LIBMPV_ASSET), from mpv commit $LIBMPV_MPV_COMMIT.
-          It is free software under the GPL (this build includes GPL components);
-          see Copyright, LICENSE.GPL and LICENSE.LGPL in this folder.
-
-          Source code:
-            mpv:        https://github.com/mpv-player/mpv/tree/$LIBMPV_MPV_COMMIT
-            build:      https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/$LIBMPV_RELEASE
-          ytui itself (MIT) only loads this library at runtime; delete it to run
-          ytui on its ffmpeg engine instead.
-          EOF
+          mkdir -p "dist/$pkg"
+          cp "target/${{ matrix.target }}/release/ytui.exe" README.md LICENSE NOTICE "dist/$pkg/"
           cd dist && 7z a -tzip "$pkg.zip" "$pkg" > /dev/null
 
       - name: Package (Linux / macOS)
@@ -100,7 +73,7 @@ jobs:
           set -euo pipefail
           pkg="ytui-${{ steps.ver.outputs.v }}-${{ matrix.name }}"
           mkdir -p "dist/$pkg"
-          cp "target/${{ matrix.target }}/release/ytui" README.md LICENSE "dist/$pkg/"
+          cp "target/${{ matrix.target }}/release/ytui" README.md LICENSE NOTICE "dist/$pkg/"
           cd dist && tar czf "$pkg.tar.gz" "$pkg"
 
       - uses: actions/upload-artifact@v4

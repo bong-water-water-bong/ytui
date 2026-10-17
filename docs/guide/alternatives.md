@@ -14,7 +14,7 @@ so check each project for its current features.
 
 | Tool | What it is | Where video plays |
 |---|---|---|
-| **ytui** | A full-screen YouTube client, with Home, search, channels, comments and live chat | Inside the terminal: ASCII art, mosaics, sixel or kitty. On Windows Terminal, also a native window kept over the player. |
+| **ytui** | A full-screen YouTube client, with Home, search, channels, comments and live chat | Inside the terminal, as 24-bit colour braille or glow ASCII |
 | **ytfzf** | A shell script that searches YouTube and lets you pick results with fzf | Hands the video to mpv (or another player) |
 | **youtube-tui** | A TUI for browsing YouTube | Hands the video to mpv |
 | **yewtube** (formerly mps-youtube) | A command-line player for searching, playlists and music | Hands playback to mpv or mplayer. Often used for audio. |
@@ -25,8 +25,8 @@ so check each project for its current features.
 - You want **the video in the terminal**: over SSH, in a tiling setup, or just because you like the look.
 - You want a **YouTube-like interface**, with Home and Trending, channels, playlists, comments, live chat and
   captions, without opening a browser.
-- You're on **Windows**. ytui runs natively in Windows Terminal, with sixel and a GPU video window.
-- You want **picture control** over how the video turns into characters: [eight render modes](../render-modes/),
+- You're on **Windows**. ytui runs natively in Windows Terminal.
+- You want **picture control** over how the video turns into characters: [two render modes](../render-modes/),
   a look panel and auto-exposure.
 
 ## When something else fits better

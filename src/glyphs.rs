@@ -1,58 +1,30 @@
-//! Shape vectors for printable ASCII glyphs.
+//! Shape vectors for the glow mode's characters.
 //!
-//! Each glyph is rasterised from a real monospace font and described by how
-//! much ink falls inside six sampling circles laid out in a staggered 2x3
-//! grid. Image cells are sampled with the same circles, so picking the glyph
-//! with the nearest vector matches *shape* (edges, slants, top/bottom weight)
-//! rather than just brightness. Technique after Alex Harri, "ASCII characters
-//! are not pixels" (2026).
+//! Ported from react-video-ascii by Lucas Jin (MIT, see NOTICE):
+//! `computeShapeVectors` in src/lib/ascii-utils.ts. Each character is
+//! rasterised from a real monospace font and described by how much ink falls
+//! inside six circles in a 2x3 grid (centres at 1/4 and 3/4 of the width,
+//! 1/4, 1/2 and 3/4 of the height, radius a fifth of the width). Each
+//! dimension is then normalised by its maximum over the whole set. Picture
+//! cells are sampled with the same circles, so the nearest vector matches
+//! shape (edges, slants, top or bottom weight), not just brightness.
 
 use fontdue::{Font, FontSettings};
 
 /// Decoded pixels per terminal cell. 6x12 keeps the 1:2 cell aspect and
-/// divides evenly into every mosaic mode (half 6x6, quad 3x6, sext 3x4,
-/// braille 3x3).
+/// splits evenly into braille's 2x4 dots (3x3 pixels each).
 pub const CW: usize = 6;
 pub const CH: usize = 12;
 
+/// Circle centres (u, v) in cell units, in the reference's order:
+/// TL, TR, ML, MR, BL, BR.
+pub const CIRCLES: [(f32, f32); 6] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.50), (0.75, 0.50), (0.25, 0.75), (0.75, 0.75)];
+
 /// Circle radius in cell widths.
-pub const RADIUS: f32 = 0.31;
+pub const RADIUS: f32 = 0.2;
 
-/// Inner circles (u, v) in cell units: left column lowered, right raised.
-/// Order: TL, TR, ML, MR, BL, BR.
-pub const INNER: [(f32, f32); 6] = [
-    (0.28, 0.20),
-    (0.72, 0.15),
-    (0.28, 0.52),
-    (0.72, 0.47),
-    (0.28, 0.84),
-    (0.72, 0.79),
-];
-
-/// Outer circles reaching into neighbouring cells.
-/// 0,1 above; 2,4,6 left side; 3,5,7 right side; 8,9 below.
-pub const OUTER: [(f32, f32); 10] = [
-    (0.28, -0.12),
-    (0.72, -0.17),
-    (-0.25, 0.20),
-    (1.25, 0.15),
-    (-0.25, 0.52),
-    (1.25, 0.47),
-    (-0.25, 0.84),
-    (1.25, 0.79),
-    (0.28, 1.16),
-    (0.72, 1.11),
-];
-
-/// Which outer circles influence each inner circle (directional contrast).
-pub const AFFECT: [&[usize]; 6] = [
-    &[0, 1, 2, 4],
-    &[0, 1, 3, 5],
-    &[2, 4, 6],
-    &[3, 5, 7],
-    &[4, 6, 8, 9],
-    &[5, 7, 8, 9],
-];
+/// The reference's default character set, darkest to brightest.
+pub const CHARS: &str = " `.',-_:!;|\"~+^lr[](\\/L)>t<v=Tz?icf1{sIxY*jJno}CZyVwmSXRqM$O%#9&NW0Q@";
 
 const FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -70,8 +42,9 @@ pub struct Glyphs {
     pub vecs: Vec<[f32; 6]>,
 }
 
-/// Pixel offsets (relative to a cell origin) whose centres lie inside a
-/// circle at (u, v) for a cell of `w` x `h` pixels.
+/// Pixel offsets (relative to a cell origin) whose centres lie inside the
+/// circle at (u, v) for a cell of `w` x `h` pixels. Never empty: a circle
+/// smaller than a pixel keeps the pixel under its centre.
 pub fn circle_offsets(u: f32, v: f32, w: usize, h: usize) -> Vec<(i32, i32)> {
     let (cx, cy, r) = (u * w as f32, v * h as f32, RADIUS * w as f32);
     let mut pts = Vec::new();
@@ -114,25 +87,19 @@ impl Glyphs {
     }
 
     fn from_font(font: &Font) -> Glyphs {
+        // Rasterise well above cell size so the small circles see real ink.
         const S: usize = 8;
         let (w, h) = (CW * S, CH * S);
         let adv = font.metrics('M', 100.0).advance_width / 100.0;
         let px = w as f32 / adv;
-        let (ascent, descent) = font
-            .horizontal_line_metrics(px)
-            .map(|m| (m.ascent, m.descent))
-            .unwrap_or((px * 0.8, -px * 0.2));
+        let (ascent, descent) = font.horizontal_line_metrics(px).map(|m| (m.ascent, m.descent)).unwrap_or((px * 0.8, -px * 0.2));
         let baseline = ((h as f32 - (ascent - descent)) / 2.0 + ascent).round() as i32;
-        let circles: Vec<Vec<(i32, i32)>> =
-            INNER.iter().map(|&(u, v)| circle_offsets(u, v, w, h)).collect();
+        let circles: Vec<Vec<(i32, i32)>> = CIRCLES.iter().map(|&(u, v)| circle_offsets(u, v, w, h)).collect();
 
         let mut chars = Vec::new();
         let mut vecs = Vec::new();
         let mut cov = vec![0f32; w * h];
-        for c in ' '..='~' {
-            if c == '`' {
-                continue; // reads as noise next to '\''
-            }
+        for c in CHARS.chars() {
             cov.iter_mut().for_each(|x| *x = 0.0);
             let (m, bmp) = font.rasterize(c, px);
             let x0 = m.xmin;
@@ -158,8 +125,7 @@ impl Glyphs {
             chars.push(c);
             vecs.push(v);
         }
-        // Normalise each dimension so the densest glyph reaches 1.0; otherwise
-        // every vector huddles near the origin and only a few glyphs win.
+        // Normalise each dimension by its maximum over the set.
         for d in 0..6 {
             let mx = vecs.iter().map(|v| v[d]).fold(0f32, f32::max);
             if mx > 0.0 {
@@ -169,12 +135,13 @@ impl Glyphs {
         Glyphs { chars, vecs }
     }
 
+    /// Index of the character whose shape vector is nearest to `s`.
     pub fn nearest(&self, s: &[f32; 6]) -> usize {
         let mut best = (f32::MAX, 0);
         for (i, v) in self.vecs.iter().enumerate() {
             let mut d = 0.0;
             for k in 0..6 {
-                let t = v[k] - s[k];
+                let t = s[k] - v[k];
                 d += t * t;
             }
             if d < best.0 {
@@ -182,5 +149,23 @@ impl Glyphs {
             }
         }
         best.1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_is_empty_and_full_glyphs_are_dense() {
+        let g = Glyphs::load();
+        assert_eq!(g.chars[0], ' ');
+        assert_eq!(g.nearest(&[0.0; 6]), 0, "no ink matches the space");
+        // Whatever the font: the match for all ink is among the densest
+        // quarter of the set.
+        let ink = |i: usize| g.vecs[i].iter().sum::<f32>();
+        let full = g.nearest(&[1.0; 6]);
+        let denser = (0..g.chars.len()).filter(|&i| ink(i) > ink(full)).count();
+        assert!(denser < g.chars.len() / 4, "all ink matched {:?}, {denser} glyphs are denser", g.chars[full]);
     }
 }

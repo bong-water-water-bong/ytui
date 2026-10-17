@@ -3,7 +3,7 @@ title: Using ytui
 description: Browse YouTube in the terminal with tabs, search, channels, playlists, comments and live chat, and start ytui from the command line.
 ---
 
-![ytui's Home page showing the Trending feed as a grid of thumbnails]({{ '/screenshots/home.jpg' | relative_url }})
+![ytui's Home page, signed out, showing the Trending feed as a grid of half-block thumbnails]({{ '/screenshots/home.jpg' | relative_url }})
 
 ## Start from the command line
 
@@ -11,7 +11,7 @@ description: Browse YouTube in the terminal with tabs, search, channels, playlis
 ytui                          # opens Home
 ytui lofi hip hop             # opens a search
 ytui https://youtube.com/…    # opens a video, playlist or channel URL (also @handle)
-ytui --mode sextant --audio pulse
+ytui --mode glow --audio pulse
 ytui --import-subs subscriptions.csv    # import a Google Takeout export
 ytui --snapshot SRC --at 30   # print one rendered frame and exit
 ```
@@ -38,16 +38,3 @@ See [command-line options](../options/) for everything else.
 - **Miniplayer:** when you scroll or browse away, the video keeps playing in a corner, with controls to go back, close,
   and play or pause. `f` goes fullscreen.
 - **Volume:** 0–150% and mute. The volume changes right away, without restarting the video.
-
-## 3D visualiser
-
-`V` swaps the video for a 3D audio visualiser driven by the real audio. A spinning 3D logo shows
-while a video loads. `ytui --demo3d` shows the 3D engine on its own:
-
-```
-ytui --demo3d            # press 1-4 for logo, knot, terrain, visualizer
-ytui --demo3d terrain    # m cycles render mode, arrows orbit, +/- zoom, space pause
-```
-
-The 3D engine is a small real-time software renderer. Its output goes through the same
-shape-matched glyph renderer as video.

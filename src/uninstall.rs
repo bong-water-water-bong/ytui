@@ -1,13 +1,14 @@
 //! `ytui --uninstall`: sign out, then delete ytui's settings, data and cache
-//! and the program itself. yt-dlp, ffmpeg and mpv stay: other programs may
+//! and the program itself. yt-dlp and ffmpeg stay: other programs may
 //! use them.
 
 use anyhow::{bail, Result};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-/// Files a release package puts next to the binary.
-const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE"];
+/// Files a release package puts next to the binary (libmpv-2.dll: older
+/// Windows packages).
+const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE", "NOTICE"];
 
 pub fn run(yes: bool) -> Result<()> {
     let exe = std::env::current_exe().ok();
@@ -32,7 +33,7 @@ pub fn run(yes: bool) -> Result<()> {
     if auth.is_some() {
         println!("and signs you out of Google (revokes ytui's access).");
     }
-    println!("yt-dlp, ffmpeg and mpv stay installed.");
+    println!("yt-dlp and ffmpeg stay installed.");
     if !yes {
         if !std::io::stdin().is_terminal() {
             bail!("nothing removed; run `ytui --uninstall --yes` to confirm");

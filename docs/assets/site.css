@@ -161,3 +161,5 @@ footer p { margin: 6px 0; max-width: 80ch; }
   .doc-nav ul { margin-top: 8px; }
   .docs .top nav { display: flex; gap: 14px; }
 }
+/* an odd last shot spans the row */
+.gallery figure:last-child:nth-child(odd) { grid-column: 1 / -1; }
