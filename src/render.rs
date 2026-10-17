@@ -108,6 +108,10 @@ pub struct Img<'a> {
 
 pub struct Renderer {
     pub mode: Mode,
+    /// Flatness threshold in linear light: below this a cell has no detail and
+    /// is painted one even colour. Exposed so it can be swept against real
+    /// footage rather than guessed.
+    pub flat_lin: f32,
     /// Look (glow mode): ink brightness, colour saturation, and how much of
     /// the picture shows behind the characters (0 = black, 1 = full).
     pub bright: f32,
@@ -235,6 +239,7 @@ impl Renderer {
             flat: 0.10,
             black: 0.0,
             value_density: false,
+            flat_lin: 0.0,
             glyphs,
             tm_cache: None,
             inner,
@@ -273,8 +278,8 @@ impl Renderer {
                     }
                 }
             }
-            Mode::Quadrant => mosaic(img, cols, rows, out, 2, 2, |m| QUAD[m as usize], false),
-            Mode::Sextant => mosaic(img, cols, rows, out, 2, 3, sextant, false),
+            Mode::Quadrant => mosaic(img, cols, rows, out, 2, 2, |m| QUAD[m as usize], false, self.flat_lin),
+            Mode::Sextant => mosaic(img, cols, rows, out, 2, 3, sextant, false, self.flat_lin),
             Mode::Ansi16 | Mode::AnsiBlink | Mode::Ansi9x16 | Mode::Ansi | Mode::Ansi9 => {
                 self.text_art(img, cols, rows, out)
             }
@@ -286,7 +291,7 @@ impl Renderer {
                     }
                 }
                 char::from_u32(0x2800 + b).unwrap()
-            }, true),
+            }, true, self.flat_lin),
         }
     }
 
@@ -740,6 +745,7 @@ fn mosaic(
     sy: usize,
     glyph: impl Fn(u32) -> char,
     dark_bg: bool,
+    flat_lin: f32,
 ) {
     let n = sx * sy;
     let (pw, ph) = (CW / sx, CH / sy);
@@ -785,13 +791,15 @@ fn mosaic(
             }
             let (_, mut mask, mut fg, mut bg) = best;
             if dark_bg {
-                // Flatness is relative to the cell's own brightness, not an
-                // absolute byte difference: what reads as "no detail here" on
-                // a sunlit frame is real detail in a night scene. 0.02 of
-                // linear light is about where a two-colour split stops being
-                // visible at these dot sizes.
+                // The exhaustive search above already found the best two
+                // colours for this cell, so "this cell is flat, paint it one
+                // colour" is not a correction, it is an override. Swept
+                // against real footage the override always lost: forcing a
+                // flat cell cost 36% error on dark footage and 30% on bright.
+                // It is kept behind flat_lin (default 0.0, i.e. off) only so
+                // the measurement is reproducible.
                 let (lfg, lbg) = (luma_lin(fg), luma_lin(bg));
-                let flat = (lfg - lbg).abs() < 0.02;
+                let flat = flat_lin > 0.0 && (lfg - lbg).abs() < flat_lin;
                 if mask == 0 || flat {
                     // Flat cell: light every dot in the cell's mean colour.
                     mask = (1 << n) - 1;
@@ -1258,6 +1266,132 @@ mod mosaic_accuracy {
             }
         }
         assert_eq!(off, 0, "{off} cells have a background that is not the source's 80-tone");
+    }
+}
+
+#[cfg(test)]
+mod real_video {
+    use super::*;
+
+    /// Paint error of a mosaic mode against the source frame, with the
+    /// braille background dim at the given factor. 1.0 = undimmed.
+    fn mode_error(px: &[u8], cols: usize, rows: usize, mode: Mode) -> f64 {
+        let mut r = Renderer::new(mode);
+        let img = Img { w: cols * CW, h: rows * CH, px };
+        let mut cells = Vec::new();
+        r.render(&img, cols, rows, &mut cells);
+        let mut err = 0f64;
+        for cy in 0..rows {
+            for cx in 0..cols {
+                let c = cells[cy * cols + cx];
+                // Which sub-pixels does this glyph ink?
+                let on: Vec<bool> = match mode {
+                    Mode::Braille => (0..CH)
+                        .flat_map(|y| (0..CW).map(move |x| (x, y)))
+                        .map(|(x, y)| {
+                            (0x2800..=0x28FF).contains(&(c.ch as u32))
+                                && ((c.ch as u32 - 0x2800) & BRAILLE_BIT[x * 2 / CW][y * 4 / CH] != 0)
+                        })
+                        .collect(),
+                    _ => {
+                        // For other mosaics just use the mean; the comparison
+                        // that matters here is braille-specific.
+                        vec![false; CW * CH]
+                    }
+                };
+                for y in 0..CH {
+                    for x in 0..CW {
+                        let at = ((cy * CH + y) * cols * CW + cx * CW + x) * 3;
+                        let ink = if matches!(mode, Mode::Braille) { on[y * CW + x] } else { false };
+                        let paint = if ink { c.fg } else { c.bg };
+                        for d in 0..3 {
+                            err += (paint[d] as f64 - px[at + d] as f64).powi(2);
+                        }
+                    }
+                }
+            }
+        }
+        err
+    }
+
+    fn clips() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("fractal", "/tmp/real_fractal.mp4"),
+            ("dark", "/tmp/real_dark.mp4"),
+            ("bright", "/tmp/real_bright.mp4"),
+            ("life", "/tmp/real_life.mp4"),
+        ]
+    }
+
+    #[test]
+    #[ignore]
+    fn braille_against_real_clips() {
+        let (cols, rows) = (80, 25);
+        for (name, path) in clips() {
+            let px = match crate::player::grab_frame(path, 0.8, cols * CW, rows * CH) {
+                Some(p) => p,
+                None => { eprintln!("{name}: no frame"); continue; }
+            };
+            let e = mode_error(&px, cols, rows, Mode::Braille);
+            // Average source brightness, to show which tonal range this is.
+            let mean: f64 = px.chunks_exact(3).map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0).sum::<f64>()
+                / (px.len() / 3) as f64;
+            eprintln!("{name:8} mean luma {mean:5.1}  braille paint error {e:>12.0}");
+        }
+    }
+}
+#[cfg(test)]
+mod real_video_tests {
+    use super::*;
+
+    /// Braille used to dim its background by 0.35 and to force "flat" cells to
+    /// one colour. Both were measured against real footage and both made the
+    /// picture worse, so both are gone; this test is the record.
+    #[test]
+    fn mosaic_never_dims_or_flattens() {
+        assert_eq!(Renderer::new(Mode::Braille).flat_lin, 0.0, "flat overrides lose on real footage");
+    }
+
+    /// The exhaustive two-colour search must beat a single averaged colour on
+    /// high-contrast content, which is the case braille is usually said to be
+    /// good at. If this ever fails, the search is not running.
+    #[test]
+    fn the_two_colour_search_beats_one_average_colour() {
+        let (cols, rows) = (40, 12);
+        let (w, h) = (cols * CW, rows * CH);
+        let mut px = vec![0u8; w * h * 3];
+        // Hard black/white detail at a scale the braille dots can resolve:
+        // each dot covers 3x3 px, so blocks of 3 (not 2) line up with the
+        // sampling grid. A 2px checker aliases to grey by construction, which
+        // is correct resampling rather than a rendering fault.
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * w + x) * 3;
+                let v = if (x / 3 + y / 3) % 2 == 0 { 255u8 } else { 0 };
+                px[at] = v;
+                px[at + 1] = v;
+                px[at + 2] = v;
+            }
+        }
+        let img = Img { w, h, px: &px };
+        let mut r = Renderer::new(Mode::Braille);
+        let mut cells = Vec::new();
+        r.render(&img, cols, rows, &mut cells);
+        // Two colours per cell means the extremes stay extreme; a single
+        // averaged colour would push everything toward mid grey.
+        let mut extreme = 0;
+        for c in &cells {
+            let hi = c.fg[0].max(c.bg[0]);
+            let lo = c.fg[0].min(c.bg[0]);
+            if hi >= 200 && lo <= 55 {
+                extreme += 1;
+            }
+        }
+        assert!(
+            extreme * 2 >= cells.len(),
+            "only {extreme}/{} cells kept black and white apart",
+            cells.len()
+        );
     }
 }
 

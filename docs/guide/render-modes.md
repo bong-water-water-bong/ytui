@@ -16,7 +16,7 @@ Press `m` to cycle the character render modes, or start with `--mode`. Your choi
 | `sextant` | A 2×3 two-colour mosaic per cell. The sharpest mode. Needs a font with sextant characters. |
 | `quadrant` | A 2×2 two-colour mosaic. |
 | `halfblock` | Top and bottom half blocks. |
-| `braille` | A 2×4 dot mosaic. |
+| `braille` | A 2×4 dot mosaic — 8 dots per cell, the most of any mode. Each dot spans 3×3 px, so detail finer than that averages away; it wants soft gradients and mid-tones rather than 1px line art. |
 | `ansi` | CP437 glyphs from the IBM 8×16 ROM font, in 24-bit colour. See [ANSI art](../ansi-art/). |
 | `ansi9` | As `ansi` at 9 dots per cell, so block characters and box rules join without a seam. |
 | `ansi-16` | The period-correct 16-colour DOS palette, with iCE colours. |

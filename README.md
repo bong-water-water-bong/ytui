@@ -239,7 +239,7 @@ again, or publish the app). The free quota is 10,000 units/day; a like or commen
 | `sextant` | 2×3 two-colour mosaic per cell (sharpest) |
 | `quadrant` | 2×2 two-colour mosaic |
 | `halfblock` | Top/bottom half blocks |
-| `braille` | 2×4 dot mosaic |
+| `braille` | 2×4 dot mosaic. Each dot covers 3×3 px, so it cannot resolve detail finer than that — a 2px checkerboard averages to grey, correctly. Highest dot count of any mode; worst at hard black/white at the smallest scales. |
 | `ansi` | Real text-mode art in 24-bit colour: CP437 glyphs from the IBM 8×16 ROM font, two colours per cell, the best two for the picture rather than the nearest of 16 |
 | `ansi9` | As `ansi` at 9 dots per cell: the extra column makes block characters and box rules join without a seam, as a VGA screen drew them |
 | `ansi-16` | The period-correct version: the 16-colour DOS palette with iCE colours (8 foregrounds × 16 backgrounds) |
