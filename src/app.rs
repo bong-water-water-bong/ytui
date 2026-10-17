@@ -155,10 +155,15 @@ enum Btn {
     Help,
 }
 
+/// YouTube's Music channel: what the Music link in YouTube's own sidebar
+/// opens.
+const MUSIC_CHANNEL: &str = "UC-9-kyTW8ZkZNDHQJ6FgpwQ";
+
 #[derive(Clone)]
 enum Side {
     Home,
     Subs,
+    Music,
     History,
     Later,
     Playlists,
@@ -1715,6 +1720,7 @@ impl App {
         let mut v = vec![
             ("⌂  Home".to_string(), Side::Home),
             ("▤  Subscriptions".to_string(), Side::Subs),
+            ("♫  Music".to_string(), Side::Music),
             ("↺  History".to_string(), Side::History),
             ("◷  Watch later".to_string(), Side::Later),
             ("≡  Playlists".to_string(), Side::Playlists),
@@ -1739,6 +1745,7 @@ impl App {
         let kind = match item {
             Side::Home => Kind::Home { chip: self.default_chip(), feed: Feed::default() },
             Side::Subs => Kind::Subs { feed: Feed::default() },
+            Side::Music => Kind::Channel { id: MUSIC_CHANNEL.into(), params: None, page: None },
             Side::History => Kind::History,
             Side::Later => Kind::Later,
             Side::Playlists => Kind::Playlists { list: None },
@@ -2697,14 +2704,16 @@ impl App {
     fn draw_side(&mut self, buf: &mut Buffer, r: Rect) {
         buf.set_style(r, Style::default().bg(Color::Rgb(20, 20, 24)));
         let items = self.side_items();
+        let fixed = items.iter().take_while(|(_, s)| !matches!(s, Side::Channel(_))).count();
         let cur_kind = match &self.page().kind {
             Kind::Home { .. } => 0,
             Kind::Subs { .. } => 1,
-            Kind::History => 2,
-            Kind::Later => 3,
-            Kind::Playlists { .. } | Kind::MyPlaylist { .. } => 4,
-            Kind::Help => 5,
-            Kind::Account => 6,
+            Kind::Channel { id, .. } if id == MUSIC_CHANNEL => 2,
+            Kind::History => 3,
+            Kind::Later => 4,
+            Kind::Playlists { .. } | Kind::MyPlaylist { .. } => 5,
+            Kind::Help => 6,
+            Kind::Account => 7,
             _ => usize::MAX,
         };
         let cur_channel = match &self.page().kind {
@@ -2713,7 +2722,7 @@ impl App {
         };
         let mut y = r.y + 1;
         for (i, (label, item)) in items.iter().enumerate() {
-            if i == 7 {
+            if i == fixed {
                 y += 1;
                 if y < r.y + r.height {
                     buf.set_string(r.x + 2, y, "SUBSCRIPTIONS", Style::default().fg(DIM).add_modifier(Modifier::BOLD));
