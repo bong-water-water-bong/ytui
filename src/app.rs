@@ -243,6 +243,8 @@ pub struct App {
     edit: Option<Edit>,
     player: Option<Player>,
     pending: Option<(VideoItem, f64)>,
+    /// When the current video load started, for the dot-reveal loader.
+    loader_since: Option<Instant>,
     ended_handled: bool,
     /// Video id we already re-resolved after a stream failure.
     retried: Option<String>,
@@ -332,6 +334,7 @@ impl App {
             edit: None,
             player: None,
             pending: None,
+            loader_since: None,
             ended_handled: false,
             retried: None,
             chat: None,
@@ -3372,6 +3375,7 @@ impl App {
         let scroll = page.scroll;
         let mut player_visible = false;
         let pending_id = self.pending.as_ref().map(|p| p.0.id.clone());
+        let loader_t = self.loader_since.map_or(0.0, |t| t.elapsed().as_secs_f32());
         for prim in &doc.prims {
             match prim {
                 Prim::Text { x, y, line } => {
@@ -3427,7 +3431,11 @@ impl App {
                             player_visible = sy + (*h as i64) / 2 >= 0 && sy + (*h as i64) / 2 < vh as i64;
                             match p.cells(&mut self.renderer, pw as usize, *h as usize) {
                                 Some((cells, cw, ch, ox, oy)) => blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch),
-                                None => center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… "),
+                                None => {
+                                    let tint = self.thumbs.cells(&thumb_url(id), pw, *h).map(|c| c.as_slice());
+                                    dot_reveal(buf, r, r.x + x, sy, pw, *h, loader_t, tint);
+                                    center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
+                                }
                             }
                             let ch = if controls { h.saturating_sub(1) } else { *h };
                             draw_captions(buf, r, r.x + x, sy, pw, ch, p.caption_text());
@@ -3447,9 +3455,11 @@ impl App {
                         None => {
                             let loading = pending_id.as_deref() == Some(id.as_str());
                             if loading {
+                                let tint = self.thumbs.cells(&thumb_url(id), pw, *h).map(|c| c.as_slice());
+                                dot_reveal(buf, r, r.x + x, sy, pw, *h, loader_t, tint);
                                 center_text(buf, r, r.x + x, sy, pw, *h, " Loading video… ");
                             } else {
-                                let url = format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
+                                let url = thumb_url(id);
                                 let (cw, ch, ox, oy) = fit(16.0 / 9.0, pw as usize, *h as usize);
                                 if let Some(cells) = self.thumbs.cells(&url, cw as u16, ch as u16) {
                                     blit(buf, r, r.x + x + ox as u16, sy + oy as i64, cells, cw, ch);
@@ -3506,7 +3516,13 @@ impl App {
         player_visible
     }
 
+    /// Seconds since the current video load started (0 when none is).
+    fn loader_t(&self) -> f32 {
+        self.loader_since.map_or(0.0, |t| t.elapsed().as_secs_f32())
+    }
+
     fn draw_mini(&mut self, buf: &mut Buffer, pr: Rect) {
+        let loader_t = self.loader_t();
         let Some(p) = &mut self.player else { return };
         let mw = (pr.width / 3).clamp(28, 56).min(pr.width);
         let vh = ((mw as f32) * 0.28125).round() as u16;
@@ -3520,6 +3536,8 @@ impl App {
         if let Some((cells, cw, ch, ox, oy)) = p.cells(&mut self.renderer, mw as usize, vh as usize) {
             blit(buf, r, r.x + ox as u16, oy as i64, cells, cw, ch);
         } else {
+            let tint = self.thumbs.cells(&thumb_url(&p.video.id), mw, vh).map(|c| c.as_slice());
+            dot_reveal(buf, r, r.x, 0, mw, vh, loader_t, tint);
             center_text(buf, r, r.x, 0, mw, vh, "Loading…");
         }
         draw_captions(buf, r, r.x, 0, mw, vh, p.caption_text());
@@ -3548,6 +3566,7 @@ impl App {
     fn draw_fullscreen(&mut self, buf: &mut Buffer, area: Rect) {
         let controls = self.controls_on();
         let has_next = self.next_video().is_some();
+        let loader_t = self.loader_t();
         let Some(p) = &mut self.player else { return };
         buf.set_style(area, Style::default().bg(Color::Rgb(0, 0, 0)));
         let vh = area.height - 1;
@@ -3556,7 +3575,11 @@ impl App {
         let varea = Rect { width: vw, ..area };
         match p.cells(&mut self.renderer, vw as usize, vh as usize) {
             Some((cells, cw, ch, ox, oy)) => blit(buf, varea, area.x + ox as u16, oy as i64, cells, cw, ch),
-            None => center_text(buf, varea, area.x, 0, vw, vh, "Loading video…"),
+            None => {
+                let tint = self.thumbs.cells(&thumb_url(&p.video.id), vw, vh).map(|c| c.as_slice());
+                dot_reveal(buf, varea, area.x, 0, vw, vh, loader_t, tint);
+                center_text(buf, varea, area.x, 0, vw, vh, "Loading video…");
+            }
         }
         draw_captions(buf, varea, area.x, 0, vw, if controls { vh - 1 } else { vh }, p.caption_text());
         self.geo.players.push(Rect { height: vh, ..varea });
@@ -3646,7 +3669,11 @@ impl App {
             let ticked = self.player.as_mut().is_some_and(|p| p.tick());
             // Spinners (resolving / loading) animate at ~30 fps, not as fast as
             // the loop spins.
-            let spinning = (self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading())) && last_draw.elapsed() >= Duration::from_millis(33);
+            let loading = self.pending.is_some() || self.player.as_ref().is_some_and(|p| p.loading());
+            if loading != self.loader_since.is_some() {
+                self.loader_since = loading.then(Instant::now);
+            }
+            let spinning = loading && last_draw.elapsed() >= Duration::from_millis(33);
             let fresh = ticked || spinning;
             self.after_tick();
             // Infinite scroll: fetch more when the viewport nears the end.
@@ -3785,6 +3812,61 @@ impl Stats {
 
     fn new_keep() -> Stats {
         Stats { path: String::new(), since: Instant::now(), n: 0, draw: Duration::ZERO, write: Duration::ZERO, write_max: Duration::ZERO }
+    }
+}
+
+fn thumb_url(id: &str) -> String {
+    format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")
+}
+
+/// The loading animation in a w x h video box: dots that spread out from the
+/// centre and pulse in rings, like ChatGPT's image-generation reveal (idea
+/// from intriXlabs/DIVAE). `t` is seconds since the load started. With the
+/// thumbnail's cells (`tint`, w x h) each dot takes the colour of the picture
+/// under it, so the thumbnail assembles out of dots; without, they are grey.
+fn dot_reveal(buf: &mut Buffer, clip: Rect, x: u16, sy: i64, w: u16, h: u16, t: f32, tint: Option<&[Cell]>) {
+    const SHADES: [char; 3] = ['·', '•', '●'];
+    if w < 4 || h < 2 {
+        return;
+    }
+    let tint = tint.filter(|c| c.len() == w as usize * h as usize);
+    // Cells are about twice as tall as wide; measure in half-cell units.
+    let (cx, cy) = (w as f32 / 2.0, h as f32);
+    let maxr = (cx * cx + cy * cy).sqrt().max(1.0);
+    let front = t / 1.2;
+    for yy in 0..h {
+        let y = sy + yy as i64;
+        if y < 0 || y >= clip.height as i64 {
+            continue;
+        }
+        for xx in 0..w {
+            let px = x + xx;
+            if px >= clip.x + clip.width {
+                break;
+            }
+            let (dx, dy) = (xx as f32 + 0.5 - cx, (yy as f32 + 0.5) * 2.0 - cy);
+            let d = (dx * dx + dy * dy).sqrt() / maxr;
+            // Per-dot noise, so the rings break up into a field of dots.
+            let n = ((xx as u32).wrapping_mul(73_856_093) ^ (yy as u32).wrapping_mul(19_349_663)).wrapping_mul(2_654_435_761) >> 16;
+            let n = (n & 0xffff) as f32 / 65_536.0;
+            let reveal = ((front - d - n * 0.15) / 0.25).clamp(0.0, 1.0);
+            let wave = 0.5 + 0.5 * (std::f32::consts::TAU * (d * 3.0 - t * 0.8) + n * 2.2).sin();
+            let level = reveal * (0.25 + 0.75 * wave);
+            let k = (level * 3.99) as usize;
+            if k == 0 {
+                continue;
+            }
+            let b = 0.35 + 0.65 * level;
+            let [r, g, bl] = match tint {
+                Some(c) => {
+                    let c = c[yy as usize * w as usize + xx as usize];
+                    let avg = |i: usize| ((c.fg[i] as u16 + c.bg[i] as u16) / 2) as f32;
+                    [avg(0), avg(1), avg(2)].map(|v| (v.max(40.0) * b).min(255.0) as u8)
+                }
+                None => [(230.0 * b) as u8; 3],
+            };
+            buf[(px, clip.y + y as u16)].set_char(SHADES[k - 1]).set_fg(Color::Rgb(r, g, bl));
+        }
     }
 }
 
