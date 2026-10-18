@@ -214,6 +214,7 @@ black don't become noise. `AE` on the player bar shows when it's on.
 | `S` | captions: your language first, then each track, then off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
+| `m` / right-click / `⋮` | song menu in YouTube Music: start mix, play next, add to queue, library, like, download, credits, share |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
 | `?` `q` | help, quit |
 

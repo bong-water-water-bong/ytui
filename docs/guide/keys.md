@@ -20,6 +20,7 @@ captions and fullscreen.
 | `t` | Open in a new tab |
 | `w` `s` `c` | Watch later, subscribe, go to the channel |
 | `P` | Save the video to a playlist |
+| `m`, right-click | Song menu (YouTube Music) |
 | `@` | Sign in |
 
 ## Playback

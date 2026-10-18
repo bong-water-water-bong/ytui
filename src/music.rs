@@ -75,6 +75,9 @@ pub struct Song {
     pub playlist: Option<String>,
     /// Row number shown on album tracks and charts.
     pub index: Option<String>,
+    /// Signed in, the menu's library toggle: (label, feedback token), the
+    /// one to show first.
+    pub library: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +237,33 @@ impl Api {
         Ok(n)
     }
 
+    /// Send a menu's feedback token (library add / remove).
+    pub fn music_feedback(&self, token: &str) -> Result<()> {
+        let v = self.music_post("feedback", json!({"feedbackTokens": [token]}))?;
+        match v["feedbackResponses"][0]["isProcessed"].as_bool() {
+            Some(true) => Ok(()),
+            _ => anyhow::bail!("YouTube Music didn't take that"),
+        }
+    }
+
+    /// Like a song on the signed-in account (its Liked songs).
+    pub fn music_like(&self, id: &str) -> Result<()> {
+        self.music_post("like/like", json!({"target": {"videoId": id}}))?;
+        Ok(())
+    }
+
+    /// A song's credits: (role, names) pairs ("Written by", "Kevin MacLeod").
+    pub fn music_credits(&self, id: &str) -> Result<Vec<(String, String)>> {
+        let v = self.music_post("browse", json!({"browseId": format!("MPTC{id}")}))?;
+        let mut secs = Vec::new();
+        find_all(&v, "dismissableDialogContentSectionRenderer", &mut secs);
+        let out: Vec<(String, String)> = secs.iter().filter_map(|s| Some((text(&s["title"])?, text(&s["subtitle"]).unwrap_or_default()))).collect();
+        if out.is_empty() {
+            anyhow::bail!("YouTube Music has no credits for this one");
+        }
+        Ok(out)
+    }
+
     pub fn music_lyrics(&self, id: &str) -> Result<Lyrics> {
         let v = self.music_post("browse", json!({"browseId": id}))?;
         let shelf = find(&v["contents"], "musicDescriptionShelfRenderer");
@@ -341,7 +371,7 @@ fn list_item(x: &Value, playlist: Option<&str>) -> Option<MItem> {
             ..Default::default()
         };
         let index = text(&x["index"]).filter(|i| !i.is_empty()).or_else(|| find(&x["customIndexColumn"], "text").and_then(text).filter(|i| !i.is_empty()));
-        return Some(MItem::Song(Song { video, album: meta.album, thumb: art, playlist: pl, index }));
+        return Some(MItem::Song(Song { video, album: meta.album, thumb: art, playlist: pl, index, library: library_of(&x["menu"]) }));
     }
     let ep = &x["navigationEndpoint"]["browseEndpoint"];
     let to = browse_of(ep)?;
@@ -398,7 +428,18 @@ fn panel_song(p: &Value, playlist: &str) -> Option<Song> {
         music: true,
         ..Default::default()
     };
-    Some(Song { video, album: r.album, thumb: thumb(&p["thumbnail"]), playlist: Some(playlist.into()), index: None })
+    Some(Song { video, album: r.album, thumb: thumb(&p["thumbnail"]), playlist: Some(playlist.into()), index: None, library: library_of(&p["menu"]) })
+}
+
+/// A song menu's "Save to library" / "Remove from library" toggle, signed
+/// in: (label, token) for what it does now, then for the other way.
+fn library_of(menu: &Value) -> Vec<(String, String)> {
+    let Some(t) = find(menu, "toggleMenuServiceItemRenderer") else { return Vec::new() };
+    let tok = |ep: &Value| ep["feedbackEndpoint"]["feedbackToken"].as_str().map(String::from);
+    match (text(&t["defaultText"]), tok(&t["defaultServiceEndpoint"]), text(&t["toggledText"]), tok(&t["toggledServiceEndpoint"])) {
+        (Some(a), Some(ta), Some(b), Some(tb)) => vec![(a, ta), (b, tb)],
+        _ => Vec::new(),
+    }
 }
 
 fn items_of(list: &Value, playlist: Option<&str>) -> Vec<MItem> {
@@ -580,6 +621,12 @@ fn collect(v: &Value, page: &mut MusicPage, playlist: Option<&str>) {
 /// "search:QUERY" or "next:VIDEO"), to check the parser against YouTube.
 pub fn dump(what: &str) -> Result<()> {
     let api = Api::new();
+    if let Some(v) = what.strip_prefix("credits:") {
+        for (role, who) in api.music_credits(v)? {
+            println!("{role}: {who}");
+        }
+        return Ok(());
+    }
     if let Some(v) = what.strip_prefix("next:") {
         let n = api.music_next(Some(v), None)?;
         println!("lyrics {:?} related {:?}", n.lyrics, n.related);
@@ -607,7 +654,7 @@ pub fn dump(what: &str) -> Result<()> {
         println!("[{}] more={:?} items={}{}", s.title, s.more.as_ref().map(|b| &b.id), s.items.len(), if s.text.is_some() { " (text)" } else { "" });
         for i in s.items.iter().take(3) {
             match i {
-                MItem::Song(x) => println!("  song {} | {} | {:?} | {:?} | {:?} | pl {:?} #{:?}", x.video.title, x.video.channel, x.album.as_ref().map(|a| &a.0), x.video.duration, x.video.views, x.playlist, x.index),
+                MItem::Song(x) => println!("  song {} | {} | {:?} | {:?} | {:?} | pl {:?} #{:?} lib {:?}", x.video.title, x.video.channel, x.album.as_ref().map(|a| &a.0), x.video.duration, x.video.views, x.playlist, x.index, x.library.first().map(|l| &l.0)),
                 MItem::Card(c) => println!("  card {} | {} | {:?} | artist {}", c.title, c.subtitle, match &c.kind { CardKind::Open(b) => b.id.clone(), CardKind::Play { video, .. } => format!("play {}", video.id) }, c.artist),
                 MItem::Nav { label, to, color } => println!("  nav {label} -> {} {:?} {:?}", to.id, to.params, color),
             }

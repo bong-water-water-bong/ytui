@@ -45,6 +45,18 @@ When a song ends, the next one in the queue starts. The playback keys are the sa
 
 ![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover]({{ '/screenshots/music-player.jpg' | relative_url }})
 
+## Song menu
+
+Every song has a **⋮** at the end of its row. Click it, right-click the song, or press `m` on it
+(on the music player, `m` with nothing focused is the song playing) and its menu pops out:
+
+- **Start mix:** a radio from the song.
+- **Play next**, **Add to queue**, and **Remove from queue** for songs already in it.
+- **Save to library** (or **Remove from library**) and **Add to liked songs**, signed in.
+- **Download:** the audio, with yt-dlp, to `~/Music/ytui`.
+- **Save to playlist**, **Go to album**, **Go to artist**, **View song credits**.
+- **Share:** copies the song's `music.youtube.com` link (the terminal puts it on the clipboard).
+
 ## Links
 
 All of these open in ytui, from the address bar or the command line:
