@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Background image loader (thumbnails, avatars, banners) plus a cache of
 //! images already converted to terminal cells for a given size.
 

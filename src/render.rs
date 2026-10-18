@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Frame -> terminal cells: truecolour half blocks. Each cell is `▀` with
 //! the top pixel as its foreground and the bottom pixel as its background,
 //! so a frame is decoded at exactly `cols` x `2*rows` pixels.

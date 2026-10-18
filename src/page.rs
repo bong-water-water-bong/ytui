@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Page model and layout. Every page is laid out into a `Doc`: positioned
 //! primitives (text, images, the player) plus clickable / focusable targets,
 //! in document coordinates. The app scrolls the doc, draws what is visible,

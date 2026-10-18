@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Signing in with Google (OAuth 2.0 for installed apps, loopback redirect
 //! + PKCE) and the YouTube Data API v3 calls that need it: rating videos and
 //! posting comments / replies.

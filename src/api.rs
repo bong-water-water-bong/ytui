@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Minimal client for YouTube's web JSON API (InnerTube), the same API the
 //! youtube.com front end calls. Browsing (search, channels, playlists, watch
 //! pages, comments, related videos) goes through here; only stream URLs come

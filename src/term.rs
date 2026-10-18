@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! ANSI output for one-shot frame dumps (--snapshot).
 
 use crate::render::Cell;

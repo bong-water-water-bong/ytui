@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Terminal output on its own thread. A frame (text diff + pixel graphics)
 //! is assembled in memory and handed to a writer thread, so the next frame
 //! decodes, renders and encodes while the terminal is still swallowing the

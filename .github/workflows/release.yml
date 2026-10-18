@@ -63,7 +63,7 @@ jobs:
           set -euo pipefail
           pkg="ytui-${{ steps.ver.outputs.v }}-${{ matrix.name }}"
           mkdir -p "dist/$pkg"
-          cp "target/${{ matrix.target }}/release/ytui.exe" README.md LICENSE "dist/$pkg/"
+          cp "target/${{ matrix.target }}/release/ytui.exe" README.md LICENSE THIRD-PARTY-LICENSES.md "dist/$pkg/"
           cd dist && 7z a -tzip "$pkg.zip" "$pkg" > /dev/null
 
       - name: Package (Linux / macOS)
@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           pkg="ytui-${{ steps.ver.outputs.v }}-${{ matrix.name }}"
           mkdir -p "dist/$pkg"
-          cp "target/${{ matrix.target }}/release/ytui" README.md LICENSE "dist/$pkg/"
+          cp "target/${{ matrix.target }}/release/ytui" README.md LICENSE THIRD-PARTY-LICENSES.md "dist/$pkg/"
           cd dist && tar czf "$pkg.tar.gz" "$pkg"
 
       - uses: actions/upload-artifact@v4

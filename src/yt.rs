@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! yt-dlp front end: resolves direct stream URLs for playback.
 
 use anyhow::{anyhow, bail, Context, Result};

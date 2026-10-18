@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Live chat and chat replay. A background poller fetches messages and
 //! hands them to the app; for replays it keeps ~20 s ahead of the player
 //! position and restarts from the seek token when the user jumps around.

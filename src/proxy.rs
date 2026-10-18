@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Local HTTP relay for googlevideo stream URLs.
 //!
 //! YouTube throttles open-ended requests (`Range: bytes=N-`, which is all
