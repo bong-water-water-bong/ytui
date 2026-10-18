@@ -7,7 +7,7 @@ description: Use YouTube Music in the terminal with ytui. Browse Home, Explore, 
 music.youtube.com site rebuilt in the terminal, and it talks to YouTube Music's own service, so you see
 the same shelves, charts and recommendations. Pasting a music.youtube.com link opens it there too.
 
-![ytui's YouTube Music Home, signed out: Quick picks as three columns of songs, then Today's biggest hits as album-art cards]({{ '/screenshots/music-home.jpg' | relative_url }})
+![ytui's YouTube Music Home, signed out: Quick picks as two columns of songs, each with its ⋮ menu button, then Today's biggest hits as album-art cards]({{ '/screenshots/music-home.jpg' | relative_url }})
 
 ## Pages
 
@@ -27,7 +27,7 @@ The bar at the top of every Music page has **Home**, **Explore**, **Library** an
 - **Library** (signed in): your playlists, liked songs, albums, artists, subscriptions and
   history.
 
-![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list]({{ '/screenshots/music-album.jpg' | relative_url }})
+![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list, with the song menu popped out from Breaktime (Start mix, Play next, Add to queue and the rest)]({{ '/screenshots/music-album.jpg' | relative_url }})
 
 ## Playing music
 
@@ -43,7 +43,7 @@ it are three tabs:
 When a song ends, the next one in the queue starts. The playback keys are the same as for videos
 (`space` pauses, `,` `.` seek 10 s, `+` `-` volume, `f` fullscreen).
 
-![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover]({{ '/screenshots/music-player.jpg' | relative_url }})
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, each with its ⋮ menu button, with the player controls on the cover]({{ '/screenshots/music-player.jpg' | relative_url }})
 
 ## Song menu
 

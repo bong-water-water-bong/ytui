@@ -132,7 +132,7 @@ music player with Up next, Lyrics and Related tabs. A song from an album or play
 that list; anywhere else it starts a radio. music.youtube.com links open there too.
 [More about YouTube Music in ytui](https://bong-water-water-bong.github.io/ytui/guide/youtube-music/).
 
-![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover](docs/screenshots/music-player.jpg)
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, each with its ⋮ menu button, with the player controls on the cover](docs/screenshots/music-player.jpg)
 <sub>Shows *25 Years (Volume 2)* by [Kevin MacLeod](https://incompetech.com/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).</sub>
 
 ## Colours under tmux

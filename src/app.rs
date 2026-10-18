@@ -2039,7 +2039,7 @@ impl App {
         if let Some(a) = song.video.channel_id.clone().filter(|a| !a.is_empty()) {
             rows.push(DRow { label: "♪  Go to artist".into(), act: DAct::Artist(a) });
         }
-        rows.push(DRow { label: "ⓘ  View song credits".into(), act: DAct::Credits });
+        rows.push(DRow { label: "♫  View song credits".into(), act: DAct::Credits });
         rows.push(DRow { label: "↗  Share".into(), act: DAct::Share });
         self.dialog = Some(Dialog { title: String::new(), rows, sel: 0, video: None, member: Default::default(), loading: false, song: Some(Box::new(song)), at: Some(at) });
     }
