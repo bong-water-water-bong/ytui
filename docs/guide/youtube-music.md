@@ -1,6 +1,6 @@
 ---
 title: YouTube Music
-description: Use YouTube Music in the terminal with ytui. Browse Home, Explore, charts, moods and genres, search songs, albums and artists, and play with a queue and lyrics.
+description: Use YouTube Music in the terminal with ytui. Browse Home, Explore, charts, moods and genres, search songs, albums and artists, and play with a queue, lyrics and a song menu: play next, add to queue, download and share.
 ---
 
 **♫ Music** in the sidebar opens [YouTube Music](https://music.youtube.com/) inside ytui. It's the
@@ -26,8 +26,6 @@ The bar at the top of every Music page has **Home**, **Explore**, **Library** an
   track list.
 - **Library** (signed in): your playlists, liked songs, albums, artists, subscriptions and
   history.
-
-![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list, with the song menu popped out from Breaktime (Start mix, Play next, Add to queue and the rest)]({{ '/screenshots/music-album.jpg' | relative_url }})
 
 ## Playing music
 
@@ -56,6 +54,8 @@ Every song has a **⋮** at the end of its row. Click it, right-click the song, 
 - **Download:** the audio, with yt-dlp, to `~/Music/ytui`.
 - **Save to playlist**, **Go to album**, **Go to artist**, **View song credits**.
 - **Share:** copies the song's `music.youtube.com` link (the terminal puts it on the clipboard).
+
+![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list, with the song menu popped out from Breaktime (Start mix, Play next, Add to queue and the rest)]({{ '/screenshots/music-album.jpg' | relative_url }})
 
 ## Links
 
