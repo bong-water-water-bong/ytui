@@ -1,6 +1,6 @@
 ---
 title: YouTube Music
-description: Use YouTube Music in the terminal with ytui: browse Home, Explore and charts, search songs, albums and artists, and play with a queue, lyrics and a song menu.
+description: "Use YouTube Music in the terminal with ytui: browse Home, Explore and charts, search songs, albums and artists, and play with a queue, lyrics and a song menu."
 ---
 
 **♫ Music** in the sidebar opens [YouTube Music](https://music.youtube.com/) inside ytui. It's the
