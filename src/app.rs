@@ -64,6 +64,10 @@ pub enum Msg {
     PlDone(R<String>),
     /// A YouTube Music playlist's queue, to start playing it.
     MusicStart(String, R<crate::music::Next>),
+    /// A library toggle finished: (video, message).
+    Library(String, R<String>),
+    /// A song's credits, for the credits dialog: (song title, credits).
+    Credits(String, R<Vec<(String, String)>>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -116,6 +120,9 @@ struct Dialog {
     /// playlist id -> Some(item id) when the video is in it; missing = unknown yet.
     member: std::collections::HashMap<String, Option<String>>,
     loading: bool,
+    /// A song menu: its song, and the screen cell it pops out from.
+    song: Option<Box<crate::music::Song>>,
+    at: Option<(u16, u16)>,
 }
 
 #[derive(Clone)]
@@ -132,6 +139,20 @@ enum DAct {
     /// Confirmed: delete (playlist id, title).
     DeletePlaylist(String, String),
     Close,
+    // Song menu
+    Mix,
+    PlayNext,
+    AddQueue,
+    /// Library toggle (label, feedback token; empty when signed out).
+    Library(String, String),
+    Like,
+    Download,
+    SavePl,
+    Unqueue,
+    Album(String),
+    Artist(String),
+    Credits,
+    Share,
 }
 
 pub enum Load {
@@ -251,6 +272,8 @@ pub struct App {
     /// Waiting for a cookie extension's export on the clipboard since .0;
     /// .1 is the clipboard sequence number last looked at.
     capture: Option<(Instant, u32)>,
+    /// Screen cell of the click being handled (song menus pop out there).
+    click_at: Option<(u16, u16)>,
     /// --fullscreen: go fullscreen when the first video starts.
     fs_on_play: bool,
     /// YTUI_STATS: per-second frame timing log.
@@ -327,6 +350,7 @@ impl App {
             account_name: None,
             drag: None,
             capture: None,
+            click_at: None,
             stats: std::env::var("YTUI_STATS").ok().map(Stats::new),
             fs_on_play: false,
             status: (String::new(), Instant::now()),
@@ -1018,6 +1042,20 @@ impl App {
                 Ok(_) => self.flash("this playlist is empty"),
                 Err(e) => self.flash(format!("⚠ {e}")),
             },
+            Msg::Library(id, r) => match r {
+                Ok(m) => {
+                    self.library_flipped(&id);
+                    self.flash(m);
+                }
+                Err(e) => self.flash(format!("⚠ {e}")),
+            },
+            Msg::Credits(title, r) => match r {
+                Ok(c) => {
+                    let rows = c.into_iter().map(|(role, who)| DRow { label: format!("{role}: {who}"), act: DAct::Close }).collect();
+                    self.dialog = Some(Dialog { title: format!("Song credits · {}", page::trunc(&title, 40)), rows, sel: 0, video: None, member: Default::default(), loading: false, song: None, at: None });
+                }
+                Err(e) => self.flash(format!("⚠ {e}")),
+            },
             Msg::Open(r, new_tab) => match r {
                 Ok(Target::Video(id)) => {
                     let v = VideoItem { id, ..Default::default() };
@@ -1477,6 +1515,10 @@ impl App {
                     }
                 }
             }
+            Act::SongMenu(song) => {
+                let at = self.click_at.or_else(|| self.focus_cell()).unwrap_or((self.term.0 / 2, self.term.1 / 3));
+                self.open_song_menu(*song, at);
+            }
             Act::MusicPlaylist(pl) => {
                 let (api, tx) = (self.api.clone(), self.tx.clone());
                 self.flash("loading…");
@@ -1753,6 +1795,8 @@ impl App {
                         video: None,
                         member: Default::default(),
                         loading: false,
+                        song: None,
+                        at: None,
                     });
                 }
             }
@@ -1849,7 +1893,7 @@ impl App {
         let signed_in = self.auth.is_some();
         rows.push(DRow { label: if signed_in { "+ New playlist".into() } else { "Sign in to save to your YouTube playlists".into() }, act: DAct::New });
         let title = format!("Save “{}” to…", page::trunc(&v.title, 50));
-        self.dialog = Some(Dialog { title, rows, sel: 0, video: Some(v.clone()), member: Default::default(), loading: signed_in });
+        self.dialog = Some(Dialog { title, rows, sel: 0, video: Some(v.clone()), member: Default::default(), loading: signed_in, song: None, at: None });
         if let Some(auth) = self.auth.clone() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
@@ -1875,6 +1919,10 @@ impl App {
         let Some(d) = &self.dialog else { return };
         let Some(row) = d.rows.get(i).cloned() else { return };
         let video = d.video.clone();
+        if let Some(song) = d.song.clone() {
+            self.dialog = None;
+            return self.song_action(*song, row.act);
+        }
         match row.act {
             DAct::Close => self.dialog = None,
             DAct::Later => {
@@ -1918,6 +1966,267 @@ impl App {
                     let _ = tx.send(Msg::PlDone(s(r)));
                 });
             }
+            _ => {}
+        }
+    }
+
+    /// The song an item stands for, if it's a YouTube Music song.
+    fn song_of(&self, act: &Act) -> Option<crate::music::Song> {
+        use crate::music::{CardKind, MItem, MusicPage, Song};
+        let item = |p: &MusicPage, sec: usize, i: usize| match p.sections.get(sec)?.items.get(i)? {
+            MItem::Song(s) => Some(s.clone()),
+            MItem::Card(c) => match &c.kind {
+                CardKind::Play { video, playlist } => Some(Song { video: video.clone(), playlist: playlist.clone(), thumb: c.thumb.clone(), ..Default::default() }),
+                CardKind::Open(_) => None,
+            },
+            MItem::Nav { .. } => None,
+        };
+        let music = match &self.page().kind {
+            Kind::Watch(w) => w.music.as_ref(),
+            _ => None,
+        };
+        match act {
+            Act::SongMenu(s) => Some((**s).clone()),
+            Act::MusicItem(sec, i) => match &self.page().kind {
+                Kind::Music { page: Some(p), .. } => item(p, *sec, *i),
+                _ => None,
+            },
+            Act::MusicRelated(sec, i) => music.and_then(|m| m.related.as_ref()).and_then(|r| r.as_ref().ok()).and_then(|p| item(p, *sec, *i)),
+            Act::MusicQueue(i) => music.and_then(|m| m.next.as_ref()).and_then(|n| n.queue.get(*i).cloned()),
+            Act::Video(v) if v.music => Some(Song { video: v.clone(), ..Default::default() }),
+            _ => None,
+        }
+    }
+
+    /// Screen cell of the focused page item.
+    fn focus_cell(&self) -> Option<(u16, u16)> {
+        let p = self.page();
+        let t = p.focus.and_then(|i| self.doc()?.targets.get(i).cloned())?;
+        let pr = self.geo.page;
+        let y = (t.y as i64 - p.scroll as i64).clamp(0, pr.height as i64 - 1) as u16;
+        Some((pr.x + t.x + t.w.saturating_sub(1), pr.y + y))
+    }
+
+    /// Pop out the menu for a song, YouTube Music's ⋮ menu.
+    fn open_song_menu(&mut self, mut song: crate::music::Song, at: (u16, u16)) {
+        song.video.music = true;
+        let id = song.video.id.clone();
+        let playing = self.now_id();
+        let mut rows = vec![
+            DRow { label: "◉  Start mix".into(), act: DAct::Mix },
+            DRow { label: "↳  Play next".into(), act: DAct::PlayNext },
+            DRow { label: "≡  Add to queue".into(), act: DAct::AddQueue },
+        ];
+        // Signed in, only rows that came with a library toggle get one;
+        // signed out, it leads to signing in.
+        match song.library.first().cloned() {
+            Some((label, token)) => {
+                let icon = if label.starts_with("Remove") { "⊖" } else { "⊕" };
+                rows.push(DRow { label: format!("{icon}  {label}"), act: DAct::Library(label, token) });
+            }
+            None if !self.api.signed_in() => rows.push(DRow { label: "⊕  Save to library".into(), act: DAct::Library("Save to library".into(), String::new()) }),
+            None => {}
+        }
+        rows.push(DRow { label: "♡  Add to liked songs".into(), act: DAct::Like });
+        rows.push(DRow { label: "↓  Download".into(), act: DAct::Download });
+        rows.push(DRow { label: "≡+ Save to playlist".into(), act: DAct::SavePl });
+        if playing.as_deref() != Some(id.as_str()) && self.music_list.iter().any(|s| s.video.id == id) {
+            rows.push(DRow { label: "⊖  Remove from queue".into(), act: DAct::Unqueue });
+        }
+        if let Some((_, album)) = &song.album {
+            rows.push(DRow { label: "◎  Go to album".into(), act: DAct::Album(album.clone()) });
+        }
+        if let Some(a) = song.video.channel_id.clone().filter(|a| !a.is_empty()) {
+            rows.push(DRow { label: "♪  Go to artist".into(), act: DAct::Artist(a) });
+        }
+        rows.push(DRow { label: "♫  View song credits".into(), act: DAct::Credits });
+        rows.push(DRow { label: "↗  Share".into(), act: DAct::Share });
+        self.dialog = Some(Dialog { title: String::new(), rows, sel: 0, video: None, member: Default::default(), loading: false, song: Some(Box::new(song)), at: Some(at) });
+    }
+
+    fn song_action(&mut self, song: crate::music::Song, act: DAct) {
+        let title = page::trunc(&song.video.title, 40);
+        let id = song.video.id.clone();
+        match act {
+            DAct::Mix => {
+                let s = crate::music::Song { playlist: Some(format!("RDAMVM{id}")), ..song };
+                self.open_song(&[s], 0);
+            }
+            DAct::PlayNext => self.queue_song(song, true),
+            DAct::AddQueue => self.queue_song(song, false),
+            DAct::Unqueue => {
+                let Some(cur) = self.now_id() else { return };
+                let list: Vec<_> = self.music_list.iter().filter(|s| s.video.id != id).cloned().collect();
+                self.set_music_queue(list, &cur);
+                self.flash(format!("removed “{title}” from the queue"));
+            }
+            DAct::Library(label, token) => {
+                if token.is_empty() {
+                    return self.need_sign_in();
+                }
+                let (api, tx) = (self.api.clone(), self.tx.clone());
+                let done = if label.starts_with("Remove") { format!("removed “{title}” from your library") } else { format!("saved “{title}” to your library") };
+                std::thread::spawn(move || {
+                    let r = api.music_feedback(&token).map(|_| done);
+                    let _ = tx.send(Msg::Library(id, s(r)));
+                });
+            }
+            DAct::Like => {
+                let (api, tx, auth) = (self.api.clone(), self.tx.clone(), self.auth.clone());
+                if !api.signed_in() && auth.is_none() {
+                    return self.need_sign_in();
+                }
+                std::thread::spawn(move || {
+                    let r = if api.signed_in() { api.music_like(&id) } else { auth.map(|a| a.rate(&id, "like")).unwrap_or(Ok(())) };
+                    let _ = tx.send(Msg::Flash(match r {
+                        Ok(()) => format!("added “{title}” to your liked songs"),
+                        Err(e) => format!("⚠ {e}"),
+                    }));
+                });
+            }
+            DAct::Download => {
+                let dir = crate::sys::home().join("Music").join("ytui");
+                self.flash(format!("downloading “{title}” to {}…", dir.display()));
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let out = std::process::Command::new(yt::ytdlp())
+                        .args(["-f", "bestaudio", "--no-playlist", "--no-progress", "-P"])
+                        .arg(&dir)
+                        .args(["-o", "%(artist,uploader)s - %(track,title)s.%(ext)s", &format!("https://music.youtube.com/watch?v={id}")])
+                        .output();
+                    let _ = tx.send(Msg::Flash(match out {
+                        Ok(o) if o.status.success() => format!("downloaded “{title}” to {}", dir.display()),
+                        Ok(o) => format!("⚠ download failed: {}", String::from_utf8_lossy(&o.stderr).lines().rfind(|l| !l.trim().is_empty()).unwrap_or("yt-dlp failed")),
+                        Err(e) => format!("⚠ couldn't run yt-dlp: {e}"),
+                    }));
+                });
+            }
+            DAct::SavePl => self.open_save_dialog(song.video),
+            DAct::Album(b) | DAct::Artist(b) => self.navigate(Kind::Music { route: MRoute::Browse(crate::music::Browse::new(&b)), page: None }),
+            DAct::Credits => {
+                let (api, tx) = (self.api.clone(), self.tx.clone());
+                let t = song.video.title.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Credits(t, s(api.music_credits(&id))));
+                });
+            }
+            DAct::Share => {
+                // OSC 52: the terminal puts the link on the clipboard.
+                use base64::Engine;
+                let url = format!("https://music.youtube.com/watch?v={id}");
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&url);
+                self.frame_out.extend_from_slice(format!("\x1b]52;c;{b64}\x07").as_bytes());
+                self.flash(format!("copied {url}"));
+            }
+            _ => {}
+        }
+    }
+
+    /// A song's library toggle went through: every copy of the song now
+    /// offers the other way.
+    fn library_flipped(&mut self, id: &str) {
+        use crate::music::{MItem, MusicPage, Song};
+        fn flip(s: &mut Song, id: &str) -> bool {
+            let hit = s.video.id == id && s.library.len() == 2;
+            if hit {
+                s.library.reverse();
+            }
+            hit
+        }
+        fn flip_page(p: &mut MusicPage, id: &str) -> bool {
+            let mut hit = false;
+            for it in p.sections.iter_mut().flat_map(|s| s.items.iter_mut()) {
+                if let MItem::Song(s) = it {
+                    hit |= flip(s, id);
+                }
+            }
+            hit
+        }
+        for s in self.music_list.iter_mut() {
+            flip(s, id);
+        }
+        for p in self.tabs.iter_mut().flat_map(|t| t.pages.iter_mut()) {
+            let hit = match &mut p.kind {
+                Kind::Music { page: Some(mp), .. } => flip_page(mp, id),
+                Kind::Watch(w) => match &mut w.music {
+                    Some(m) => {
+                        let mut hit = false;
+                        for s in m.list.iter_mut() {
+                            hit |= flip(s, id);
+                        }
+                        if let Some(n) = &mut m.next {
+                            for s in n.queue.iter_mut() {
+                                hit |= flip(s, id);
+                            }
+                        }
+                        if let Some(Ok(r)) = &mut m.related {
+                            hit |= flip_page(r, id);
+                        }
+                        hit
+                    }
+                    None => false,
+                },
+                _ => false,
+            };
+            if hit {
+                p.changed();
+            }
+        }
+    }
+
+    /// The video playing (or about to).
+    fn now_id(&self) -> Option<String> {
+        self.player.as_ref().map(|p| p.video.id.clone()).or_else(|| self.pending.as_ref().map(|p| p.0.id.clone()))
+    }
+
+    /// Play next / Add to queue. Nothing playing: it just plays.
+    fn queue_song(&mut self, song: crate::music::Song, next: bool) {
+        let title = page::trunc(&song.video.title, 40);
+        let Some(cur) = self.now_id() else {
+            return self.open_song(&[song], 0);
+        };
+        if song.video.id == cur {
+            return self.flash("that's playing now");
+        }
+        let mut list = self.music_list.clone();
+        if !list.iter().any(|s| s.video.id == cur) {
+            // Something outside a music queue is playing: the queue starts there.
+            let v = self.player.as_ref().map(|p| p.video.clone()).or_else(|| self.pending.as_ref().map(|p| p.0.clone())).unwrap_or_default();
+            list = vec![crate::music::Song { video: v, ..Default::default() }];
+        }
+        list.retain(|s| s.video.id != song.video.id);
+        let at = list.iter().position(|s| s.video.id == cur).unwrap_or(0);
+        if next {
+            list.insert(at + 1, song);
+        } else {
+            list.push(song);
+        }
+        self.set_music_queue(list, &cur);
+        self.flash(if next { format!("“{title}” plays next") } else { format!("added “{title}” to the queue") });
+    }
+
+    /// Make `list` the music queue, `cur` playing in it, on the player and
+    /// on every music player page showing `cur`.
+    fn set_music_queue(&mut self, list: Vec<crate::music::Song>, cur: &str) {
+        let vids: Vec<VideoItem> = list.iter().map(|s| s.video.clone()).collect();
+        let qpos = list.iter().position(|s| s.video.id == cur).unwrap_or(0);
+        self.queue = vids.clone();
+        self.qpos = qpos;
+        self.music_list = list.clone();
+        for p in self.tabs.iter_mut().flat_map(|t| t.pages.iter_mut()) {
+            let Kind::Watch(w) = &mut p.kind else { continue };
+            if w.video.id != cur {
+                continue;
+            }
+            let Some(m) = &mut w.music else { continue };
+            m.list = list.clone();
+            if let Some(n) = &mut m.next {
+                n.queue = list.clone();
+            }
+            w.queue = vids.clone();
+            w.qpos = qpos;
+            p.changed();
         }
     }
 
@@ -2169,7 +2478,12 @@ impl App {
                         self.show_controls();
                     }
                 }
-                MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.click_at = Some((m.column, m.row));
+                    self.click(m.column, m.row);
+                    self.click_at = None;
+                }
+                MouseEventKind::Down(MouseButton::Right) => self.right_click(m.column, m.row),
                 MouseEventKind::Drag(MouseButton::Left) => match self.drag {
                     Some(Drag::Volume(r)) => self.volume_at(r, m.column),
                     // Seek on release, so dragging doesn't restart playback per cell.
@@ -2222,8 +2536,21 @@ impl App {
 
     fn click(&mut self, x: u16, y: u16) {
         let hit = |r: &Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
-        // Dialogs and address-bar suggestions draw over the video's controls.
-        let covered = self.dialog.is_some() || self.geo.sugg.iter().any(|(r, _)| hit(r));
+        // Dialogs draw over everything, the video's controls and bars too.
+        if self.dialog.is_some() && !self.fullscreen {
+            match self.geo.dlg.iter().find(|(r, _)| hit(r)).map(|x| x.1) {
+                Some(i) => {
+                    if let Some(d) = &mut self.dialog {
+                        d.sel = i;
+                    }
+                    self.dialog_pick(i);
+                }
+                None => self.dialog = None,
+            }
+            return;
+        }
+        // Address-bar suggestions draw over the video's controls.
+        let covered = self.geo.sugg.iter().any(|(r, _)| hit(r));
         if let Some(&(_, c)) = self.geo.ctl.iter().find(|(r, _)| hit(r)).filter(|_| !covered) {
             return self.control(c);
         }
@@ -2253,18 +2580,6 @@ impl App {
                     return;
                 }
                 p.toggle_pause();
-            }
-            return;
-        }
-        if self.dialog.is_some() {
-            match self.geo.dlg.iter().find(|(r, _)| hit(r)).map(|x| x.1) {
-                Some(i) => {
-                    if let Some(d) = &mut self.dialog {
-                        d.sel = i;
-                    }
-                    self.dialog_pick(i);
-                }
-                None => self.dialog = None,
             }
             return;
         }
@@ -2339,6 +2654,22 @@ impl App {
                 self.page_mut().focus = Some(i);
                 self.activate(t.act, Some(dx), t.x, t.w);
             }
+        }
+    }
+
+    /// Right-click a song: its menu.
+    fn right_click(&mut self, x: u16, y: u16) {
+        if self.dialog.take().is_some() || self.fullscreen {
+            return;
+        }
+        let pr = self.geo.page;
+        if x < pr.x || x >= pr.x + pr.width || y < pr.y || y >= pr.y + pr.height {
+            return;
+        }
+        let (dx, dy) = (x - pr.x, (y - pr.y) as usize + self.page().scroll);
+        let song = self.doc().and_then(|d| d.targets.iter().find(|t| dx >= t.x && dx < t.x + t.w && dy >= t.y && dy < t.y + t.h as usize).map(|t| t.act.clone())).and_then(|a| self.song_of(&a));
+        if let Some(s) = song {
+            self.open_song_menu(s, (x, y));
         }
     }
 
@@ -2705,6 +3036,17 @@ impl App {
                     self.navigate(Kind::Watch(Box::new(w)));
                 }
             }
+            KeyCode::Char('m') if !self.fullscreen => {
+                let song = self.focused().and_then(|a| self.song_of(&a)).map(|s| (s, self.focus_cell())).or_else(|| match &self.page().kind {
+                    // The music player's own song.
+                    Kind::Watch(w) => w.music.as_ref().map(|m| (crate::music::Song { video: w.video.clone(), album: m.album.clone(), ..Default::default() }, None)),
+                    _ => None,
+                });
+                if let Some((s, at)) = song {
+                    let at = at.unwrap_or((self.geo.page.x + 2, self.geo.page.y + 1));
+                    self.open_song_menu(s, at);
+                }
+            }
             KeyCode::Char('s') => {
                 let target = match &self.page().kind {
                     Kind::Watch(w) => w.info.as_ref().map(|i| (i.channel_id.clone(), i.channel.clone())),
@@ -2770,6 +3112,9 @@ impl App {
 
     fn draw_dialog(&mut self, buf: &mut Buffer, area: Rect) {
         let Some(d) = &self.dialog else { return };
+        if let Some((ax, ay)) = d.at {
+            return self.draw_popup(buf, area, ax, ay);
+        }
         let later = d.video.as_ref().is_some_and(|v| self.store.later.iter().any(|x| x.id == v.id));
         let w = area.width.saturating_sub(8).min(70);
         let rows = d.rows.len().min(area.height as usize - 8);
@@ -2808,6 +3153,41 @@ impl App {
             buf.set_string(r.x + 2, y, "loading your playlists…", Style::default().fg(DIM));
         }
         buf.set_string(r.x + 2, r.y + h - 2, "↑↓ choose · Enter toggle · Esc close", Style::default().fg(DIM));
+    }
+
+    /// A song menu, popped out from (ax, ay): leftward when there's no
+    /// room to the right, upward when none below.
+    fn draw_popup(&mut self, buf: &mut Buffer, area: Rect, ax: u16, ay: u16) {
+        let Some(d) = &self.dialog else { return };
+        let w = (d.rows.iter().map(|r| r.label.width()).max().unwrap_or(10) as u16 + 6).min(area.width);
+        let rows = d.rows.len().min(area.height as usize - 2);
+        let h = rows as u16 + 2;
+        let right = area.x + area.width;
+        let x = if ax + 1 + w <= right { ax + 1 } else { ax.saturating_sub(w).max(area.x) };
+        let bottom = area.y + area.height;
+        let y = if ay + 1 + h <= bottom { ay + 1 } else { ay.saturating_sub(h).max(area.y) };
+        let bg = Color::Rgb(40, 40, 46);
+        fill(buf, area, x, (y - area.y) as i64, w, h, bg);
+        let border = Style::default().fg(Color::Rgb(90, 90, 100)).bg(bg);
+        for cx in x + 1..x + w - 1 {
+            buf[(cx, y)].set_char('─').set_style(border);
+            buf[(cx, y + h - 1)].set_char('─').set_style(border);
+        }
+        for cy in y + 1..y + h - 1 {
+            buf[(x, cy)].set_char('│').set_style(border);
+            buf[(x + w - 1, cy)].set_char('│').set_style(border);
+        }
+        for (cx, cy, ch) in [(x, y, '╭'), (x + w - 1, y, '╮'), (x, y + h - 1, '╰'), (x + w - 1, y + h - 1, '╯')] {
+            buf[(cx, cy)].set_char(ch).set_style(border);
+        }
+        let first = d.sel.saturating_sub(rows.saturating_sub(1));
+        for (k, (i, row)) in d.rows.iter().enumerate().skip(first).take(rows).enumerate() {
+            let line = Rect { x: x + 1, y: y + 1 + k as u16, width: w - 2, height: 1 };
+            let style = if i == d.sel { Style::default().fg(Color::White).bg(Color::Rgb(75, 75, 85)) } else { Style::default().fg(Color::Rgb(230, 230, 230)).bg(bg) };
+            buf.set_style(line, style);
+            buf.set_string(x + 2, line.y, page::trunc(&row.label, w as usize - 4), style);
+            self.geo.dlg.push((line, i));
+        }
     }
 
     fn draw_compose(&self, buf: &mut Buffer, area: Rect) {

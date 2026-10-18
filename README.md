@@ -23,7 +23,7 @@ one small Rust binary, with yt-dlp and ffmpeg doing the heavy lifting.
 - **Watch YouTube in the terminal:** truecolour half blocks, sending only what changed, so playback stays smooth.
 - **60 fps playback through ffmpeg:** streams up to 720p, the lowest height YouTube serves at 60 fps.
 - **YouTube's layout, in the terminal:** Home with Trending, Music, Gaming, News and more. Also search, channels, playlists, comments and live chat.
-- **YouTube Music:** the Music link opens music.youtube.com in ytui: Home, Explore, charts, moods and genres, search, artists, albums, your library, and a music player with a queue, lyrics and related songs.
+- **YouTube Music:** the Music link opens music.youtube.com in ytui: Home, Explore, charts, moods and genres, search, artists, albums, your library, and a music player with a queue, lyrics and related songs. Every song has its ⋮ menu: start a mix, play next, add to queue, like, download and more.
 - **Player controls on the video:** move the mouse over it for YouTube-style previous, play/pause, next, mute, captions and fullscreen buttons.
 - **Optional Google sign-in:** your recommendations, subscriptions, playlists, likes and comments.
 - **Captions, volume slider, autoplay, tabs and watch later.** Mouse and keyboard both work.
@@ -129,10 +129,12 @@ to resolve stream URLs. Press `?` in the app for every key.
 Home, Explore (new releases, charts, moods and genres), search with Songs, Videos, Albums, Artists
 and Playlists, artist, album and playlist pages, and your Library when signed in. Songs play in a
 music player with Up next, Lyrics and Related tabs. A song from an album or playlist plays through
-that list; anywhere else it starts a radio. music.youtube.com links open there too.
+that list; anywhere else it starts a radio. Every song has a ⋮ menu (or right-click it, or press
+`m`) with Start mix, Play next, Add to queue, library, like, download, credits and share.
+music.youtube.com links open there too.
 [More about YouTube Music in ytui](https://bong-water-water-bong.github.io/ytui/guide/youtube-music/).
 
-![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover](docs/screenshots/music-player.jpg)
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, each with its ⋮ menu button, with the player controls on the cover](docs/screenshots/music-player.jpg)
 <sub>Shows *25 Years (Volume 2)* by [Kevin MacLeod](https://incompetech.com/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).</sub>
 
 ## Colours under tmux
@@ -214,6 +216,7 @@ black don't become noise. `AE` on the player bar shows when it's on.
 | `S` | captions: your language first, then each track, then off |
 | `n` `a` `x` | next video, autoplay toggle, close player |
 | `w` `s` `c` `t` | watch later, subscribe, go to channel, open in new tab |
+| `m` / right-click / `⋮` | song menu in YouTube Music: start mix, play next, add to queue, library, like, download, credits, share |
 | composer | `Enter` post, `Alt-Enter` new line, `Esc` cancel (paste works) |
 | `?` `q` | help, quit |
 

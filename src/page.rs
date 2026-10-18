@@ -265,6 +265,8 @@ pub enum Act {
     MusicRelated(usize, usize),
     /// Play entry n of the music player's queue.
     MusicQueue(usize),
+    /// A song's ⋮ menu (Play next, Add to queue, Go to album…).
+    SongMenu(Box<Song>),
     /// Play a playlist from its start (a header's Play / Shuffle / Radio).
     MusicPlaylist(String),
     /// Search filter / library shelf / player tab.
@@ -1217,6 +1219,7 @@ Keys — browsing
   t                open focused item in a new tab
   w                add focused video to Watch later
   c                go to the focused video's channel
+  m / right-click  song menu (YouTube Music): play next, add to queue, go to album…
   s                subscribe / unsubscribe (watch page, channel page, focused channel)
   q or Ctrl-C      quit
 
@@ -1388,6 +1391,10 @@ fn song_row(b: &mut B, x: u16, y: usize, w: u16, s: &Song, numbered: bool, now: 
         }
     }
     let dur = s.video.duration.clone().unwrap_or_default();
+    // The ⋮ menu at the row's end, then the duration.
+    b.line(x + w - 1, y, vec![Span::styled("⋮".to_string(), st(META))]);
+    b.tgt(x + w - 2, y, 2, 2, Act::SongMenu(Box::new(s.clone())));
+    let w = w - 3;
     let tw = (x + w).saturating_sub(tx + dur.width() as u16 + 2) as usize;
     let title_style = if now { Style::default().fg(MUSIC_RED).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White).add_modifier(Modifier::BOLD) };
     let mark = if now { "▶ " } else { "" };
@@ -1408,7 +1415,7 @@ fn song_row(b: &mut B, x: u16, y: usize, w: u16, s: &Song, numbered: bool, now: 
     if !dur.is_empty() {
         b.line(x + w - dur.width() as u16, y, vec![Span::styled(dur, st(META))]);
     }
-    b.tgt(x, y, w, 2, act);
+    b.tgt(x, y, w + 1, 2, act);
 }
 
 /// A card: square art, title, subtitle.

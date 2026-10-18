@@ -1,13 +1,13 @@
 ---
 title: YouTube Music
-description: Use YouTube Music in the terminal with ytui. Browse Home, Explore, charts, moods and genres, search songs, albums and artists, and play with a queue and lyrics.
+description: Use YouTube Music in the terminal with ytui. Browse Home, Explore, charts, moods and genres, search songs, albums and artists, and play with a queue, lyrics and a song menu: play next, add to queue, download and share.
 ---
 
 **♫ Music** in the sidebar opens [YouTube Music](https://music.youtube.com/) inside ytui. It's the
 music.youtube.com site rebuilt in the terminal, and it talks to YouTube Music's own service, so you see
 the same shelves, charts and recommendations. Pasting a music.youtube.com link opens it there too.
 
-![ytui's YouTube Music Home, signed out: Quick picks as three columns of songs, then Today's biggest hits as album-art cards]({{ '/screenshots/music-home.jpg' | relative_url }})
+![ytui's YouTube Music Home, signed out: Quick picks as two columns of songs, each with its ⋮ menu button, then Today's biggest hits as album-art cards]({{ '/screenshots/music-home.jpg' | relative_url }})
 
 ## Pages
 
@@ -27,8 +27,6 @@ The bar at the top of every Music page has **Home**, **Explore**, **Library** an
 - **Library** (signed in): your playlists, liked songs, albums, artists, subscriptions and
   history.
 
-![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list]({{ '/screenshots/music-album.jpg' | relative_url }})
-
 ## Playing music
 
 Choose a song and the music player opens. The cover art or music video plays as the picture, with
@@ -43,7 +41,21 @@ it are three tabs:
 When a song ends, the next one in the queue starts. The playback keys are the same as for videos
 (`space` pauses, `,` `.` seek 10 s, `+` `-` volume, `f` fullscreen).
 
-![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, with the player controls on the cover]({{ '/screenshots/music-player.jpg' | relative_url }})
+![The music player paused on Breaktime by Kevin MacLeod: the album cover as the picture, the song and album below, and the album's songs in Up next, each with its ⋮ menu button, with the player controls on the cover]({{ '/screenshots/music-player.jpg' | relative_url }})
+
+## Song menu
+
+Every song has a **⋮** at the end of its row. Click it, right-click the song, or press `m` on it
+(on the music player, `m` with nothing focused is the song playing) and its menu pops out:
+
+- **Start mix:** a radio from the song.
+- **Play next**, **Add to queue**, and **Remove from queue** for songs already in it.
+- **Save to library** (or **Remove from library**) and **Add to liked songs**, signed in.
+- **Download:** the audio, with yt-dlp, to `~/Music/ytui`.
+- **Save to playlist**, **Go to album**, **Go to artist**, **View song credits**.
+- **Share:** copies the song's `music.youtube.com` link (the terminal puts it on the clipboard).
+
+![The album 25 Years (Volume 2) by Kevin MacLeod: its cover beside the title and Play and Shuffle buttons, then the numbered track list, with the song menu popped out from Breaktime (Start mix, Play next, Add to queue and the rest)]({{ '/screenshots/music-album.jpg' | relative_url }})
 
 ## Links
 
