@@ -41,7 +41,7 @@ for p in crates:
         # A few crates ship no license file. Those that offer MIT get the MIT
         # text with the authors from their Cargo.toml (MIT is the choice we
         # take where a crate is dual-licensed).
-        if re.search(r"\bMIT\b", p.get("license") or ""):
+        if "MIT" in re.split(r"[\s()/]+|\bAND\b|\bOR\b|\bWITH\b", p.get("license") or ""):
             who = ", ".join(re.sub(r"\s*<[^>]*>", "", a) for a in p.get("authors") or []) or f"the {p['name']} authors"
             t = f"MIT License\n\nCopyright (c) {who}\n\n{MIT}"
             h = hashlib.sha256(t.encode()).hexdigest()[:12]
@@ -50,7 +50,7 @@ for p in crates:
         else:
             missing.append(p)
     for f in dict.fromkeys(files):
-        t = open(os.path.join(d, f), errors="replace").read().strip()
+        t = open(os.path.join(d, f), encoding="utf-8").read().strip()
         h = hashlib.sha256(re.sub(r"\s+", " ", t).encode()).hexdigest()[:12]
         texts.setdefault(h, (f, t))
         users.setdefault(h, []).append(f"{p['name']} {p['version']}")
@@ -65,5 +65,5 @@ out = ["# Third-party licenses", "",
 out += [f"| {p['name']} | {p['version']} | {p.get('license') or 'see text'} |" for p in crates]
 for h, (f, t) in sorted(texts.items(), key=lambda kv: users[kv[0]][0]):
     out += ["", "---", "", f"## {f}, used by: {', '.join(users[h])}", "", "```", t, "```"]
-open(os.path.join(ROOT, "THIRD-PARTY-LICENSES.md"), "w").write("\n".join(out) + "\n")
+open(os.path.join(ROOT, "THIRD-PARTY-LICENSES.md"), "w", encoding="utf-8").write("\n".join(out) + "\n")
 print(f"{len(crates)} crates, {len(texts)} distinct license texts")
