@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Signing in for playback: YouTube sometimes refuses to serve a connection
 //! until it can "confirm you're not a bot", and the fix is the cookies of a
 //! browser that's signed in to YouTube. Browsers lock and encrypt their own

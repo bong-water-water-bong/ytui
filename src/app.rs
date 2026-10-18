@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! The browser: tabs with back/forward history, an address bar with search
 //! suggestions, a sidebar, pages laid out as scrollable documents, mouse and
 //! spatial keyboard navigation, and one video player that plays inline on

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! YouTube Music (music.youtube.com): its own API client (the WEB_REMIX
 //! web client) and one page model for everything it serves. Home, Explore,
 //! charts, new releases, moods and genres, search results, artists, albums,

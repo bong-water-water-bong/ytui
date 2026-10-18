@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Headless playback check (`--bench SRC`): plays through the real player
 //! for a while without a terminal UI and reports frame rate, render cost,
 //! seek / pause behaviour and captions.

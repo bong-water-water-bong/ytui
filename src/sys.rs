@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! The few things that differ between Unix and Windows: tying child
 //! processes to our lifetime, freezing ffmpeg for pause, private files,
 //! opening a browser, and reading terminal replies during capability

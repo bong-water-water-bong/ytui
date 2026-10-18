@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! "Sign in" the way websites do it: open a browser window on Google's
 //! sign-in page, let the user sign in there, and take the resulting YouTube
 //! session for yt-dlp.

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Local state: subscriptions, watch history (with resume positions) and
 //! watch later, kept in ~/.local/share/ytui/state.json.
 

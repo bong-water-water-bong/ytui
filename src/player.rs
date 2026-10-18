@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! Video player component. One ffmpeg process per play segment reads the
 //! stream at real-time rate (-readrate 1), sends audio to the sound server
 //! and raw RGB frames down a pipe. A reader thread keeps only the newest

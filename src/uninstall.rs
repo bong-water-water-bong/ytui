@@ -1,3 +1,6 @@
+// Copyright (c) 2026 bong-water-water-bong
+// SPDX-License-Identifier: MIT
+
 //! `ytui --uninstall`: sign out, then delete ytui's settings, data and cache
 //! and the program itself. yt-dlp and ffmpeg stay: other programs may
 //! use them.
@@ -8,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 /// Files a release package puts next to the binary (libmpv-2.dll: older
 /// Windows packages).
-const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE", "NOTICE"];
+const PACKAGED: &[&str] = &["libmpv-2.dll", "third-party", "README.md", "LICENSE", "NOTICE", "THIRD-PARTY-LICENSES.md"];
 
 pub fn run(yes: bool) -> Result<()> {
     let exe = std::env::current_exe().ok();
