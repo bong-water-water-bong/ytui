@@ -64,6 +64,8 @@ pub enum Msg {
     PlDone(R<String>),
     /// A YouTube Music playlist's queue, to start playing it.
     MusicStart(String, R<crate::music::Next>),
+    /// A library toggle finished: (video, message).
+    Library(String, R<String>),
     /// A song's credits, for the credits dialog: (song title, credits).
     Credits(String, R<Vec<(String, String)>>),
 }
@@ -1040,6 +1042,13 @@ impl App {
                 Ok(_) => self.flash("this playlist is empty"),
                 Err(e) => self.flash(format!("⚠ {e}")),
             },
+            Msg::Library(id, r) => match r {
+                Ok(m) => {
+                    self.library_flipped(&id);
+                    self.flash(m);
+                }
+                Err(e) => self.flash(format!("⚠ {e}")),
+            },
             Msg::Credits(title, r) => match r {
                 Ok(c) => {
                     let rows = c.into_iter().map(|(role, who)| DRow { label: format!("{role}: {who}"), act: DAct::Close }).collect();
@@ -2008,9 +2017,16 @@ impl App {
             DRow { label: "↳  Play next".into(), act: DAct::PlayNext },
             DRow { label: "≡  Add to queue".into(), act: DAct::AddQueue },
         ];
-        let lib = song.library.first().cloned().unwrap_or(("Save to library".into(), String::new()));
-        let icon = if lib.0.starts_with("Remove") { "⊖" } else { "⊕" };
-        rows.push(DRow { label: format!("{icon}  {}", lib.0), act: DAct::Library(lib.0, lib.1) });
+        // Signed in, only rows that came with a library toggle get one;
+        // signed out, it leads to signing in.
+        match song.library.first().cloned() {
+            Some((label, token)) => {
+                let icon = if label.starts_with("Remove") { "⊖" } else { "⊕" };
+                rows.push(DRow { label: format!("{icon}  {label}"), act: DAct::Library(label, token) });
+            }
+            None if !self.api.signed_in() => rows.push(DRow { label: "⊕  Save to library".into(), act: DAct::Library("Save to library".into(), String::new()) }),
+            None => {}
+        }
         rows.push(DRow { label: "♡  Add to liked songs".into(), act: DAct::Like });
         rows.push(DRow { label: "↓  Download".into(), act: DAct::Download });
         rows.push(DRow { label: "≡+ Save to playlist".into(), act: DAct::SavePl });
@@ -2048,24 +2064,11 @@ impl App {
                 if token.is_empty() {
                     return self.need_sign_in();
                 }
-                // The toggle flips on this page now; a failure says so.
-                let p = self.page_mut();
-                if let Kind::Music { page: Some(mp), .. } = &mut p.kind {
-                    for s in mp.sections.iter_mut().flat_map(|s| s.items.iter_mut()) {
-                        if let crate::music::MItem::Song(s) = s {
-                            if s.video.id == id {
-                                s.library.reverse();
-                            }
-                        }
-                    }
-                }
                 let (api, tx) = (self.api.clone(), self.tx.clone());
                 let done = if label.starts_with("Remove") { format!("removed “{title}” from your library") } else { format!("saved “{title}” to your library") };
                 std::thread::spawn(move || {
-                    let _ = tx.send(Msg::Flash(match api.music_feedback(&token) {
-                        Ok(()) => done,
-                        Err(e) => format!("⚠ {e}"),
-                    }));
+                    let r = api.music_feedback(&token).map(|_| done);
+                    let _ = tx.send(Msg::Library(id, s(r)));
                 });
             }
             DAct::Like => {
@@ -2117,6 +2120,58 @@ impl App {
                 self.flash(format!("copied {url}"));
             }
             _ => {}
+        }
+    }
+
+    /// A song's library toggle went through: every copy of the song now
+    /// offers the other way.
+    fn library_flipped(&mut self, id: &str) {
+        use crate::music::{MItem, MusicPage, Song};
+        fn flip(s: &mut Song, id: &str) -> bool {
+            let hit = s.video.id == id && s.library.len() == 2;
+            if hit {
+                s.library.reverse();
+            }
+            hit
+        }
+        fn flip_page(p: &mut MusicPage, id: &str) -> bool {
+            let mut hit = false;
+            for it in p.sections.iter_mut().flat_map(|s| s.items.iter_mut()) {
+                if let MItem::Song(s) = it {
+                    hit |= flip(s, id);
+                }
+            }
+            hit
+        }
+        for s in self.music_list.iter_mut() {
+            flip(s, id);
+        }
+        for p in self.tabs.iter_mut().flat_map(|t| t.pages.iter_mut()) {
+            let hit = match &mut p.kind {
+                Kind::Music { page: Some(mp), .. } => flip_page(mp, id),
+                Kind::Watch(w) => match &mut w.music {
+                    Some(m) => {
+                        let mut hit = false;
+                        for s in m.list.iter_mut() {
+                            hit |= flip(s, id);
+                        }
+                        if let Some(n) = &mut m.next {
+                            for s in n.queue.iter_mut() {
+                                hit |= flip(s, id);
+                            }
+                        }
+                        if let Some(Ok(r)) = &mut m.related {
+                            hit |= flip_page(r, id);
+                        }
+                        hit
+                    }
+                    None => false,
+                },
+                _ => false,
+            };
+            if hit {
+                p.changed();
+            }
         }
     }
 
@@ -2981,7 +3036,7 @@ impl App {
                     self.navigate(Kind::Watch(Box::new(w)));
                 }
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char('m') if !self.fullscreen => {
                 let song = self.focused().and_then(|a| self.song_of(&a)).map(|s| (s, self.focus_cell())).or_else(|| match &self.page().kind {
                     // The music player's own song.
                     Kind::Watch(w) => w.music.as_ref().map(|m| (crate::music::Song { video: w.video.clone(), album: m.album.clone(), ..Default::default() }, None)),
