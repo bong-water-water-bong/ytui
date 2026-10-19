@@ -76,6 +76,11 @@ Every video plays through ffmpeg and is drawn in the terminal. ytui fetches stre
 by default, the lowest height YouTube serves at 60 fps; `--height N` changes that and `--fps N`
 caps the frame rate.
 
+**Hardware decoding:** ffmpeg decodes the video on the GPU where it can (VAAPI on Linux,
+VideoToolbox on macOS, D3D11VA on Windows), which roughly halves its CPU use. If the GPU or its
+driver can't decode, ytui switches to software decoding for the rest of the session; `--hwdec off`
+always decodes in software.
+
 **Captions:** the first press of `S` picks your system language (`LANG`), else English,
 preferring the creator's captions over automatic ones; further presses go through each track, then
 off. The language you pick is remembered for later videos. ytui fetches the track's WebVTT file
