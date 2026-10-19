@@ -268,6 +268,8 @@ pub enum Act {
     MusicRelated(usize, usize),
     /// Play entry n of the music player's queue.
     MusicQueue(usize),
+    /// Switch the playing song between its audio track and music video.
+    MusicSwap,
     /// A song's ⋮ menu (Play next, Add to queue, Go to album…).
     SongMenu(Box<Song>),
     /// Play a playlist from its start (a header's Play / Shuffle / Radio).
@@ -1616,6 +1618,11 @@ fn music_watch_layout(b: &mut B, wt: &Watch, m: &MusicNow, w: u16, vh: u16) -> u
     y += 2;
     let rating = wt.rating.as_deref().unwrap_or("none");
     let mut bx = 1;
+    // Song / Video, when the song has both versions.
+    if let Some(s) = m.next.as_ref().and_then(|n| n.queue.iter().find(|s| s.video.id == wt.video.id)).filter(|s| s.alt.is_some()) {
+        bx += b.button(bx, y, "♪ Song", Act::MusicSwap, !s.is_video);
+        bx += b.button(bx, y, "▶ Video", Act::MusicSwap, s.is_video) + 2;
+    }
     bx += b.button(bx, y, "▲ Like", Act::Rate("like".into()), rating == "like") + 1;
     bx += b.button(bx, y, "▼", Act::Rate("dislike".into()), rating == "dislike") + 1;
     bx += b.button(bx, y, "≡+ Save", Act::SaveTo(wt.video.clone()), false) + 1;

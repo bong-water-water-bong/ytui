@@ -81,6 +81,51 @@ pub struct Song {
     /// Signed in, the menu's library toggle: (label, feedback token), the
     /// one to show first.
     pub library: Vec<(String, String)>,
+    /// A music video (or a user video), not an audio track.
+    pub is_video: bool,
+    /// Signed in, the other version: the music video of an audio track, or
+    /// the track of a music video (YouTube Music's Song / Video switch).
+    pub alt: Option<Box<Song>>,
+    /// How the two versions' times line up: (start here, start in `alt`,
+    /// length), in seconds.
+    pub alt_map: Vec<(f64, f64, f64)>,
+}
+
+impl Song {
+    /// The other version, holding this one as its own other version.
+    pub fn swapped(&self) -> Option<Song> {
+        let alt = self.alt.as_ref()?;
+        let back = Song { alt: None, alt_map: Vec::new(), ..self.clone() };
+        Some(Song {
+            album: alt.album.clone().or_else(|| self.album.clone()),
+            playlist: self.playlist.clone(),
+            alt: Some(Box::new(back)),
+            alt_map: self.alt_map.iter().map(|&(a, b, d)| (b, a, d)).collect(),
+            ..(**alt).clone()
+        })
+    }
+
+    /// Where `t` seconds into this version falls in the other one.
+    pub fn alt_time(&self, t: f64) -> f64 {
+        self.alt_map.iter().find(|&&(a, _, d)| t >= a && t < a + d).map(|&(a, b, _)| b + (t - a)).unwrap_or(t).max(0.0)
+    }
+
+    /// This song with its other version taken from `from` (the queue the
+    /// next endpoint sent), when it has none.
+    pub fn with_alt(&self, from: &[Song]) -> Song {
+        if self.alt.is_some() {
+            return self.clone();
+        }
+        if let Some(f) = from.iter().find(|f| f.video.id == self.video.id) {
+            return Song { alt: f.alt.clone(), alt_map: f.alt_map.clone(), is_video: f.is_video, ..self.clone() };
+        }
+        // Played from an album, the list holds the track while the queue
+        // may lead with its video.
+        match from.iter().find(|f| f.alt.as_ref().is_some_and(|a| a.video.id == self.video.id)).and_then(|f| f.swapped()) {
+            Some(o) => Song { alt: o.alt, alt_map: o.alt_map, is_video: o.is_video, ..self.clone() },
+            None => self.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -223,13 +268,13 @@ impl Api {
             body["videoId"] = json!(v);
         }
         let v = self.music_post("next", body)?;
-        let mut n = Next::default();
-        let mut panels = Vec::new();
-        queue_panels(&v["contents"], &mut panels);
-        for p in panels {
-            if let Some(s) = panel_song(p, &pl) {
-                if !n.queue.iter().any(|q: &Song| q.video.id == s.video.id) {
-                    n.queue.push(s);
+        let mut n = Next { queue: queue_of(&v, &pl), ..Default::default() };
+        // The Song / Video switch needs the playing song's other version.
+        // Signed in, the queue sometimes carries it; else search for it.
+        if let Some(id) = video {
+            if let Some(i) = n.queue.iter().position(|s| s.video.id == id && s.alt.is_none()) {
+                if let Some(a) = self.music_alt(&n.queue[i]) {
+                    n.queue[i].alt = Some(Box::new(a));
                 }
             }
         }
@@ -244,6 +289,36 @@ impl Api {
             }
         }
         Ok(n)
+    }
+
+    /// The other version of `s` by search, when the queue had none: the
+    /// music video of a track, or the track of a video. Only a result with
+    /// the same title and artist and a close length counts.
+    pub fn music_alt(&self, s: &Song) -> Option<Song> {
+        let video = !s.is_video;
+        let lead = |c: &str| c.split([',', '&']).next().unwrap_or("").trim().to_lowercase();
+        let artist = lead(&s.video.channel);
+        let title = base_title(&s.video.title);
+        if title.is_empty() || artist.is_empty() {
+            return None;
+        }
+        let page = self.music_search(&format!("{title} {artist}"), FILTERS[if video { 2 } else { 1 }].1).ok()?;
+        let len = |x: &Song| x.video.duration.as_deref().and_then(dur_secs);
+        page.songs()
+            .into_iter()
+            .find(|c| {
+                // A music video runs up to 90 s longer than its track
+                // (intros, outros), and seldom shorter.
+                let fits = match (len(s), len(c)) {
+                    (Some(a), Some(b)) => {
+                        let extra = if video { b - a } else { a - b };
+                        (-25.0..=90.0).contains(&extra)
+                    }
+                    _ => true,
+                };
+                c.video.id != s.video.id && base_title(&c.video.title) == title && tags(&c.video.title) == tags(&s.video.title) && lead(&c.video.channel) == artist && fits
+            })
+            .map(|c| Song { is_video: video, playlist: s.playlist.clone(), alt: None, alt_map: Vec::new(), ..c })
     }
 
     /// Send a menu's feedback token (library add / remove).
@@ -380,7 +455,7 @@ fn list_item(x: &Value, playlist: Option<&str>) -> Option<MItem> {
             ..Default::default()
         };
         let index = text(&x["index"]).filter(|i| !i.is_empty()).or_else(|| find(&x["customIndexColumn"], "text").and_then(text).filter(|i| !i.is_empty()));
-        return Some(MItem::Song(Song { video, album: meta.album, thumb: art, playlist: pl, index, library: library_of(&x["menu"]) }));
+        return Some(MItem::Song(Song { video, album: meta.album, thumb: art, playlist: pl, index, library: library_of(&x["menu"]), ..Default::default() }));
     }
     let ep = &x["navigationEndpoint"]["browseEndpoint"];
     let to = browse_of(ep)?;
@@ -423,16 +498,20 @@ fn nav_button(x: &Value) -> Option<MItem> {
     Some(MItem::Nav { label: text(&x["buttonText"]).unwrap_or_default(), to, color })
 }
 
-/// The queue entries of a "next" response. Signed in, each entry is a
-/// wrapper holding the song and its "counterpart" (the music video for an
-/// audio track, or the other way round); only the song itself is kept, or
-/// the queue would play every song twice.
-fn queue_panels<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+/// The queue entries of a "next" response, each with its counterpart if
+/// it has one. Signed in, each entry is a wrapper holding the song and its
+/// "counterpart" (the music video for an audio track, or the other way
+/// round); the counterpart becomes the song's other version, not a queue
+/// entry of its own, or the queue would play every song twice.
+fn queue_panels<'a>(v: &'a Value, out: &mut Vec<(&'a Value, Option<&'a Value>)>) {
     match v {
         Value::Object(m) => {
             for (k, x) in m {
                 match k.as_str() {
-                    "playlistPanelVideoRenderer" => out.push(x),
+                    "playlistPanelVideoRenderer" => out.push((x, None)),
+                    "playlistPanelVideoWrapperRenderer" => {
+                        out.push((&x["primaryRenderer"]["playlistPanelVideoRenderer"], x["counterpart"].get(0)));
+                    }
                     "counterpart" => {}
                     _ => queue_panels(x, out),
                 }
@@ -441,6 +520,66 @@ fn queue_panels<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
         Value::Array(a) => a.iter().for_each(|x| queue_panels(x, out)),
         _ => {}
     }
+}
+
+/// A title without its bracketed parts ("(Official Video)", "[HD]",
+/// "(2022 Remaster)"), lower case, to match a song with its video.
+fn base_title(t: &str) -> String {
+    let (mut out, mut depth) = (String::new(), 0);
+    for c in t.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// The words in a title that make it a different recording (a live or
+/// acoustic take, a remix), which a match must share.
+fn tags(t: &str) -> Vec<&'static str> {
+    let t = t.to_lowercase();
+    ["live", "acoustic", "remix", "instrumental", "karaoke", "cover", "unplugged", "demo", "extended", "sped up", "slowed"].into_iter().filter(|k| t.split(|c: char| !c.is_alphanumeric() && c != ' ').any(|w| w.split_whitespace().collect::<Vec<_>>().join(" ").contains(k))).collect()
+}
+
+/// "3:34" or "1:02:03" in seconds.
+fn dur_secs(d: &str) -> Option<f64> {
+    d.split(':').try_fold(0.0, |acc, p| p.trim().parse::<f64>().ok().map(|x| acc * 60.0 + x))
+}
+
+/// The songs of a "next" response's queue, each with its other version.
+fn queue_of(v: &Value, pl: &str) -> Vec<Song> {
+    let mut panels = Vec::new();
+    queue_panels(&v["contents"], &mut panels);
+    let mut out: Vec<Song> = Vec::new();
+    for (p, other) in panels {
+        if let Some(mut s) = panel_song(p, pl) {
+            if let Some(c) = other {
+                if let Some(a) = panel_song(&c["counterpartRenderer"]["playlistPanelVideoRenderer"], pl) {
+                    s.alt_map = segments(&c["segmentMap"]);
+                    s.alt = Some(Box::new(a));
+                }
+            }
+            if !out.iter().any(|q| q.video.id == s.video.id) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// A counterpart's segment map as (start here, start there, length) in
+/// seconds.
+fn segments(m: &Value) -> Vec<(f64, f64, f64)> {
+    let ms = |v: &Value| v.as_str().and_then(|s| s.parse::<f64>().ok()).map(|x| x / 1000.0);
+    m["segment"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|g| Some((ms(&g["primaryVideoStartTimeMilliseconds"])?, ms(&g["counterpartVideoStartTimeMilliseconds"])?, ms(&g["durationMilliseconds"])?)))
+        .collect()
 }
 
 /// One queue entry of the "next" endpoint.
@@ -457,7 +596,9 @@ fn panel_song(p: &Value, playlist: &str) -> Option<Song> {
         music: true,
         ..Default::default()
     };
-    Some(Song { video, album: r.album, thumb: thumb(&p["thumbnail"]), playlist: Some(playlist.into()), index: None, library: library_of(&p["menu"]) })
+    let kind = p["navigationEndpoint"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]["watchEndpointMusicConfig"]["musicVideoType"].as_str();
+    let is_video = kind.is_some_and(|k| k != "MUSIC_VIDEO_TYPE_ATV");
+    Some(Song { video, album: r.album, thumb: thumb(&p["thumbnail"]), playlist: Some(playlist.into()), index: None, library: library_of(&p["menu"]), is_video, ..Default::default() })
 }
 
 /// A song menu's "Save to library" / "Remove from library" toggle, signed
@@ -660,7 +801,7 @@ pub fn dump(what: &str) -> Result<()> {
         let n = api.music_next(Some(v), None)?;
         println!("lyrics {:?} related {:?}", n.lyrics, n.related);
         for s in n.queue.iter().take(10) {
-            println!("  {} | {} | {:?} | {:?}", s.video.title, s.video.channel, s.album, s.video.duration);
+            println!("  {} {} | {} | {:?} | {:?} | {} | alt {:?}", s.video.id, s.video.title, s.video.channel, s.album, s.video.duration, if s.is_video { "video" } else { "song" }, s.alt.as_ref().map(|a| (&a.video.id, a.is_video, &s.alt_map)));
         }
         if let Some(l) = n.lyrics {
             let ly = api.music_lyrics(&l)?;
@@ -742,6 +883,21 @@ pub fn address(b: &Browse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn song_video_match() {
+        assert_eq!(base_title("Never Gonna Give You Up (Official Video) [4K Remaster]"), "never gonna give you up");
+        assert_eq!(dur_secs("1:02:03"), Some(3723.0));
+        assert_eq!(tags("Bohemian Rhapsody (Live At Wembley Stadium)"), vec!["live"]);
+        assert!(tags("Never Gonna Give You Up (Official Video)").is_empty());
+        let a = Song { video: VideoItem { id: "v".into(), ..Default::default() }, is_video: true, ..Default::default() };
+        let s = Song { video: VideoItem { id: "s".into(), ..Default::default() }, alt: Some(Box::new(a)), alt_map: vec![(0.0, 0.9, 200.0)], ..Default::default() };
+        let w = s.swapped().unwrap();
+        assert_eq!((w.video.id.as_str(), w.is_video), ("v", true));
+        assert_eq!(w.alt.as_ref().unwrap().video.id, "s");
+        assert!((s.alt_time(10.0) - 10.9).abs() < 1e-9 && (w.alt_time(10.9) - 10.0).abs() < 1e-9);
+        assert_eq!(s.alt_time(500.0), 500.0);
+    }
 
     #[test]
     fn routes_music_urls() {
