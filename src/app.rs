@@ -684,7 +684,9 @@ impl App {
                             // Played from a list: that list (with its own
                             // titles) stays the queue; else the radio is.
                             if m.list.len() > 1 {
-                                n.queue = m.list.clone();
+                                let fetched = std::mem::take(&mut n.queue);
+                                n.queue = m.list.iter().map(|s| s.with_alt(&fetched)).collect();
+                                m.list = n.queue.clone();
                             }
                             let at = n.queue.iter().position(|q| q.video.id == w.video.id);
                             if at.is_some() {
@@ -1442,6 +1444,47 @@ impl App {
         }
     }
 
+    /// YouTube Music's Song / Video switch: play the other version of the
+    /// song on this page from the same point, in its place in the queue.
+    fn swap_version(&mut self) {
+        let Kind::Watch(w) = &self.page().kind else { return };
+        let Some(m) = &w.music else { return };
+        let Some(n) = &m.next else { return };
+        let Some(i) = n.queue.iter().position(|s| s.video.id == w.video.id) else { return };
+        let Some(other) = n.queue[i].swapped() else { return };
+        let pos = self.player.as_ref().filter(|p| p.video.id == w.video.id).map(|p| p.pos).unwrap_or(0.0);
+        let at = n.queue[i].alt_time(pos);
+        let mut list = n.queue.clone();
+        list[i] = other.clone();
+        let next = crate::music::Next { queue: list.clone(), ..n.clone() };
+        let (tab, lyrics, related, album) = (m.tab, m.lyrics.clone(), m.related.clone(), other.album.clone().or_else(|| m.album.clone()));
+        let queue: Vec<VideoItem> = list.iter().map(|s| s.video.clone()).collect();
+        let v = other.video.clone();
+        let wn = Watch {
+            video: v.clone(),
+            info: None,
+            desc_open: false,
+            comments: Vec::new(),
+            comments_cont: None,
+            comment_count: None,
+            comments_loading: false,
+            queue: queue.clone(),
+            qpos: i,
+            rating: None,
+            music: Some(MusicNow { playlist: other.playlist.clone(), tab, next: Some(next), lyrics, related, album, list: list.clone() }),
+        };
+        // In place of this page: Back still leaves the player.
+        let p = self.mk(Kind::Watch(Box::new(wn)));
+        let uid = p.uid;
+        let t = &mut self.tabs[self.cur];
+        t.pages[t.idx] = p;
+        self.load(uid);
+        self.music_list = list;
+        self.flash(if other.is_video { "music video" } else { "song" });
+        self.stop();
+        self.play(v, queue, i, Some(at));
+    }
+
     /// Play `songs[i]` in the music player, the list as its queue.
     fn open_song(&mut self, songs: &[crate::music::Song], i: usize) {
         let Some(s) = songs.get(i) else { return };
@@ -1513,6 +1556,7 @@ impl App {
                     }
                 }
             }
+            Act::MusicSwap => self.swap_version(),
             Act::MusicQueue(i) => {
                 if let Kind::Watch(w) = &self.page().kind {
                     if let Some(n) = w.music.as_ref().and_then(|m| m.next.as_ref()) {
