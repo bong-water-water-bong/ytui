@@ -213,13 +213,19 @@ impl Api {
     pub fn music_next(&self, video: Option<&str>, playlist: Option<&str>) -> Result<Next> {
         let pl = playlist.map(String::from).unwrap_or_else(|| format!("RDAMVM{}", video.unwrap_or_default()));
         let mut body = json!({"playlistId": pl, "isAudioOnly": true});
+        // A song's mix: the "params" YouTube Music's own Start mix sends.
+        // Without it the answer is the song's fixed radio, the same queue
+        // every time.
+        if pl.starts_with("RDAMVM") {
+            body["params"] = json!("wAEB");
+        }
         if let Some(v) = video {
             body["videoId"] = json!(v);
         }
         let v = self.music_post("next", body)?;
         let mut n = Next::default();
         let mut panels = Vec::new();
-        find_all(&v["contents"], "playlistPanelVideoRenderer", &mut panels);
+        queue_panels(&v["contents"], &mut panels);
         for p in panels {
             if let Some(s) = panel_song(p, &pl) {
                 if !n.queue.iter().any(|q: &Song| q.video.id == s.video.id) {
@@ -415,6 +421,26 @@ fn nav_button(x: &Value) -> Option<MItem> {
     let to = browse_of(&x["clickCommand"]["browseEndpoint"])?;
     let color = x["solid"]["leftStripeColor"].as_u64().map(|c| (c & 0xffffff) as u32);
     Some(MItem::Nav { label: text(&x["buttonText"]).unwrap_or_default(), to, color })
+}
+
+/// The queue entries of a "next" response. Signed in, each entry is a
+/// wrapper holding the song and its "counterpart" (the music video for an
+/// audio track, or the other way round); only the song itself is kept, or
+/// the queue would play every song twice.
+fn queue_panels<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                match k.as_str() {
+                    "playlistPanelVideoRenderer" => out.push(x),
+                    "counterpart" => {}
+                    _ => queue_panels(x, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| queue_panels(x, out)),
+        _ => {}
+    }
 }
 
 /// One queue entry of the "next" endpoint.
