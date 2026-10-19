@@ -53,6 +53,8 @@ OPTIONS:
                  (auto: pulse if available, ffplay on Windows, muted over ssh)
   --fullscreen   start the player fullscreen
   --fps N        max frame rate (default 60)
+  --hwdec X      auto | off: decode video on the GPU (VAAPI, VideoToolbox,
+                 D3D11VA; default auto, software if the GPU can't)
   --height N     max stream height to fetch (default 720, the lowest height
                  YouTube serves at 60 fps)
   --exposure X   on | off: auto-exposure for --snapshot (in the app, press E)
@@ -120,6 +122,11 @@ fn main() -> Result<()> {
                 }
             }
             "--fps" => fps = val("--fps")?.parse()?,
+            "--hwdec" => match val("--hwdec")?.as_str() {
+                "auto" | "on" => {}
+                "off" | "no" => player::hwdec_off(),
+                v => bail!("unknown --hwdec value {v} (auto or off)"),
+            },
             "--fullscreen" => fullscreen = true,
             "--height" => max_h = Some(val("--height")?.parse()?),
             "--snapshot" => snapshot = Some(val("--snapshot")?),

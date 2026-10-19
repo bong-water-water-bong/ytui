@@ -95,6 +95,27 @@ struct Shared {
     audio_failed: AtomicBool,
 }
 
+/// Hardware video decoding, until it fails once (no GPU decoder or driver)
+/// or `--hwdec off`: then software for the rest of the session.
+static HW_OFF: AtomicBool = AtomicBool::new(false);
+
+pub fn hwdec_off() {
+    HW_OFF.store(true, Ordering::Relaxed);
+}
+
+/// The platform's ffmpeg hardware decoder, while it is on.
+fn hwaccel() -> Option<&'static str> {
+    if HW_OFF.load(Ordering::Relaxed) {
+        None
+    } else if cfg!(target_os = "macos") {
+        Some("videotoolbox")
+    } else if cfg!(windows) {
+        Some("d3d11va")
+    } else {
+        Some("vaapi")
+    }
+}
+
 pub use crate::sys::die_with_parent;
 use crate::sys::on_path;
 
@@ -218,6 +239,8 @@ struct Decoder {
     start: f64,
     fps: f64,
     audio: Audio,
+    /// Decoding on the GPU.
+    hw: bool,
     fifo: Option<Arc<PcmPipe>>,
 }
 
@@ -295,6 +318,11 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         }
         cmd.args(["-readrate", "1", "-i", &crate::proxy::wrap(url)]);
     };
+    // Decode the video on the GPU; ffmpeg hands frames back to the filters.
+    let hw = hwaccel();
+    if let Some(h) = hw {
+        cmd.args(["-hwaccel", h]);
+    }
     input(&mut cmd, &s.video_url);
     let audio_map = match &s.audio_url {
         _ if opts.audio == Audio::None => None,
@@ -365,7 +393,7 @@ fn spawn(s: &Stream, pos: f64, pw: usize, ph: usize, opts: Opts, vol: &Volume) -
         let _ = stderr.read_to_string(&mut s);
         *she.err.lock().unwrap() = s;
     });
-    Ok(Decoder { child, sh, start: if seek.is_some() { pos } else { 0.0 }, fps, audio: opts.audio, fifo })
+    Ok(Decoder { child, sh, start: if seek.is_some() { pos } else { 0.0 }, fps, audio: opts.audio, hw: hw.is_some(), fifo })
 }
 
 pub struct Player {
@@ -605,6 +633,14 @@ impl Player {
         }
         if d.sh.done.load(Ordering::Acquire) && d.sh.count.load(Ordering::Acquire) == self.seen {
             let err = d.sh.err.lock().unwrap().trim().to_string();
+            // No GPU decoder or driver: software from now on.
+            let hw_err = ["Device creation failed", "No device available", "hwaccel", "VAAPI", "D3D11", "VideoToolbox"].iter().any(|k| err.contains(k));
+            if self.seen == 0 && d.hw && hw_err {
+                hwdec_off();
+                self.note = "no hardware video decoding; decoding in software".into();
+                self.restart();
+                return true;
+            }
             let audio_err = ["pulse", "alsa", "ALSA", "audio"].iter().any(|k| err.contains(k));
             if self.seen == 0 && d.audio != Audio::None && audio_err {
                 self.note = "audio output failed; playing muted".into();
